@@ -1,0 +1,68 @@
+name: Watcher Protocol Browser UI CI
+
+on:
+  push:
+    branches: [watcher-protocol]
+    paths:
+      - 'app/watcher-protocol-page.jsx'
+      - 'app/page.module.css'
+      - 'app/page.jsx'
+      - 'client/watcher/**'
+      - 'public/watcher-prover-worker.js'
+      - 'circuits/withdraw/prover_bundle_bytes.go'
+      - 'circuits/withdraw/cmd/watcher-prover-wasm/**'
+      - 'scripts/prepare-browser-prover.sh'
+      - '.github/workflows/watcher-ui.yml'
+      - '.github/workflows/pages.yml'
+      - 'package.json'
+  pull_request:
+    paths:
+      - 'app/**'
+      - 'client/watcher/**'
+      - 'public/watcher-prover-worker.js'
+      - 'circuits/withdraw/**'
+      - 'scripts/prepare-browser-prover.sh'
+      - '.github/workflows/watcher-ui.yml'
+      - 'package.json'
+
+permissions:
+  contents: read
+
+jobs:
+  browser-ui:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+          cache-dependency-path: circuits/withdraw/go.sum
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Test Watcher browser modules
+        run: node --test client/watcher/*.test.mjs
+
+      - name: Validate worker syntax
+        run: node --check public/watcher-prover-worker.js
+
+      - name: Test Go prover packages
+        working-directory: circuits/withdraw
+        run: go test ./...
+
+      - name: Build Watcher prover WebAssembly
+        working-directory: circuits/withdraw
+        run: GOOS=js GOARCH=wasm go build -trimpath -o /tmp/watcher-prover.wasm ./cmd/watcher-prover-wasm
+
+      - name: Build static browser UI
+        env:
+          NEXT_PUBLIC_WATCHER_BASE_PATH: /watcher-cash
+          NEXT_PUBLIC_WATCHER_RPC_URL: https://api.devnet.solana.com
+        run: npm run build
