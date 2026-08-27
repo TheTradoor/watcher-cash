@@ -11,7 +11,7 @@ on:
       - 'circuits/withdraw/**'
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   test-withdraw-circuit:
@@ -39,14 +39,50 @@ jobs:
         run: |
           python - <<'PY'
           import json
-          p='fixture-out/coordinates.json'
-          d=json.load(open(p))
-          assert len(d['public_inputs']) == 10, len(d['public_inputs'])
-          assert len(d['vk']['ic']) == 11, len(d['vk']['ic'])
+          d=json.load(open('fixture-out/coordinates.json'))
+          assert len(d['public_inputs']) == 10
+          assert len(d['vk']['ic']) == 11
           assert all(len(v)==64 for v in d['proof'].values())
           assert all(len(v)==64 for v in d['public_inputs'])
           print('coordinate fixture valid: 10 inputs, 11 IC points')
           PY
+      - name: Build matched xark wire fixture
+        run: |
+          python - <<'PY'
+          import json, pathlib
+          d=json.load(open('fixture-out/coordinates.json'))
+          # BN254 base-field modulus. xark requires proof A pre-negated.
+          q=21888242871839275222246405745257275088696311157297823662689037894645226208583
+          def le(h): return bytes.fromhex(h)[::-1]
+          def arr(b): return '['+','.join(f'0x{x:02x}' for x in b)+']\n'
+          p=d['proof']; v=d['vk']
+          ay=(q-int(p['a_y'],16)).to_bytes(32,'little')
+          proof=(le(p['a_x'])+ay+le(p['b_x0'])+le(p['b_x1'])+le(p['b_y0'])+le(p['b_y1'])+le(p['c_x'])+le(p['c_y']))
+          vk=le(v['alpha_x'])+le(v['alpha_y'])
+          for n in ('beta','gamma','delta'):
+              vk += le(v[n+'_x0'])+le(v[n+'_x1'])+le(v[n+'_y0'])+le(v[n+'_y1'])
+          for pt in v['ic']: vk += le(pt['x'])+le(pt['y'])
+          pub=b''.join(le(x) for x in d['public_inputs'])
+          assert len(proof)==256 and len(vk)==1152 and len(pub)==320
+          root=pathlib.Path('../../programs/watcher-protocol/src')
+          (root/'dev_proof_array.in').write_text(arr(proof))
+          (root/'dev_vk_array.in').write_text(arr(vk))
+          (root/'dev_public_inputs_array.in').write_text(arr(pub))
+          print('built one matched proof/VK/public-input fixture')
+          PY
+      - name: Publish matched development verifier fixture
+        if: github.event_name == 'push'
+        working-directory: .
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add programs/watcher-protocol/src/dev_proof_array.in programs/watcher-protocol/src/dev_vk_array.in programs/watcher-protocol/src/dev_public_inputs_array.in
+          if git diff --cached --quiet; then
+            echo 'fixture unchanged'
+          else
+            git commit -m 'Sync matched Circuit V1 verifier fixture [skip circuit]'
+            git push origin HEAD:watcher-protocol
+          fi
       - name: Show fixture manifest
         run: cat testdata/v1_fixture/manifest.json
       - name: Upload development fixture
