@@ -1,3 +1,5 @@
+import { PublicKey, SystemProgram } from '@solana/web3.js';
+
 import { asBytes, concatBytes } from './keccak.mjs';
 import { assertU64 } from './field.mjs';
 
@@ -16,6 +18,12 @@ export const XARK_PROOF_BYTES_V1 = 256;
 export const DEPOSIT_INSTRUCTION_PUBLIC_INPUT_BYTES_V1 = 96;
 export const WITHDRAW_PUBLIC_INPUT_BYTES_V1 = 320;
 
+// Canonical names used by the browser-facing client. Keep the versioned names
+// above for backwards compatibility with the original clean-room SDK.
+export const WATCHER_GROTH16_PROOF_BYTES = XARK_PROOF_BYTES_V1;
+export const WATCHER_DEPOSIT_PUBLIC_INPUT_BYTES = DEPOSIT_INSTRUCTION_PUBLIC_INPUT_BYTES_V1;
+export const WATCHER_WITHDRAW_PUBLIC_INPUT_BYTES = WITHDRAW_PUBLIC_INPUT_BYTES_V1;
+
 export function publicKeyBytesV1(value, label = 'public key') {
   if (value && typeof value.toBytes === 'function') {
     return exactBytes(value.toBytes(), 32, label);
@@ -30,6 +38,10 @@ function exactBytes(value, length, label) {
   const bytes = asBytes(value, label);
   if (bytes.length !== length) throw new RangeError(`${label} must be exactly ${length} bytes`);
   return bytes;
+}
+
+function publicKey(value, label) {
+  return value instanceof PublicKey ? value : new PublicKey(publicKeyBytesV1(value, label));
 }
 
 function u16LE(value, label) {
@@ -74,6 +86,12 @@ export function deriveVaultAddressV1({ programId, config, findProgramAddressSync
     throw new Error('findProgramAddressSync returned an invalid PDA result');
   }
   return { vault: result[0], bump: result[1] };
+}
+
+export function deriveWatcherVaultPda({ programId, config }) {
+  const program = publicKey(programId, 'programId');
+  const configBytes = publicKeyBytesV1(config, 'config');
+  return PublicKey.findProgramAddressSync([VAULT_SEED_V1, configBytes], program);
 }
 
 export function encodeInitializeDataV1({ treasury }) {
@@ -121,6 +139,10 @@ export function encodeWithdrawDataV1({
     prefixedBytes(publicInputs, WITHDRAW_PUBLIC_INPUT_BYTES_V1, 'withdraw public inputs'),
   );
 }
+
+export const encodeInitializeData = encodeInitializeDataV1;
+export const encodeDepositData = encodeDepositDataV1;
+export const encodeWithdrawData = encodeWithdrawDataV1;
 
 export function buildInitializeInstructionV1({
   programId,
@@ -212,4 +234,97 @@ export function buildWithdrawInstructionV1({
       publicInputs,
     }),
   };
+}
+
+export function buildInitializeInstruction({
+  programId,
+  authority,
+  config,
+  commitments,
+  nullifiers,
+  rootHistory,
+  treasury,
+}) {
+  const [vault] = deriveWatcherVaultPda({ programId, config });
+  return buildInitializeInstructionV1({
+    programId,
+    authority,
+    config,
+    commitments,
+    nullifiers,
+    rootHistory,
+    vault,
+    treasury,
+    systemProgram: SystemProgram.programId,
+  });
+}
+
+export function buildDepositInstruction({
+  programId,
+  depositor,
+  config,
+  commitments,
+  rootHistory,
+  commitment,
+  amount,
+  proof,
+  publicInputs,
+}) {
+  const [vault] = deriveWatcherVaultPda({ programId, config });
+  return buildDepositInstructionV1({
+    programId,
+    depositor,
+    config,
+    commitments,
+    rootHistory,
+    vault,
+    systemProgram: SystemProgram.programId,
+    commitment,
+    amount,
+    proof,
+    publicInputs,
+  });
+}
+
+export function buildWithdrawInstruction({
+  programId,
+  config,
+  commitments,
+  nullifiers,
+  rootHistory,
+  recipient,
+  relayer,
+  treasury,
+  nullifier0,
+  nullifier1,
+  changeCommitment,
+  publicAmount,
+  protocolFee = 0n,
+  relayerFee = 0n,
+  proof,
+  publicInputs,
+}) {
+  const [vault] = deriveWatcherVaultPda({ programId, config });
+  return buildWithdrawInstructionV1({
+    programId,
+    config,
+    commitments,
+    nullifiers,
+    rootHistory,
+    vault,
+    recipient,
+    relayer,
+    treasury,
+    statement: {
+      nullifier0,
+      nullifier1,
+      changeCommitment,
+      recipient,
+      publicAmount,
+      protocolFee,
+      relayerFee,
+    },
+    proof,
+    publicInputs,
+  });
 }
