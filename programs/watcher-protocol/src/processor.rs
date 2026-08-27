@@ -4,7 +4,11 @@ use solana_program::{
     program_error::ProgramError,
     pubkey::Pubkey,
 };
-use crate::{codec::{append_unique_32, contains_32, ConfigAccount, WatcherInstruction}, verify_withdrawal_proof, DepositRecord, WatcherError, WithdrawalStatement, STATE_VERSION};
+use crate::{
+    codec::{append_unique_32, contains_32, ConfigAccount, WatcherInstruction},
+    verifier::verify_circuit_v1,
+    DepositRecord, WatcherError, WithdrawalStatement, STATE_VERSION,
+};
 
 pub fn process_instruction(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
     match WatcherInstruction::unpack(data)? {
@@ -48,8 +52,6 @@ fn deposit(program_id: &Pubkey, accounts: &[AccountInfo], commitment: [u8; 32], 
     owned_by(config, program_id)?; owned_by(commitments, program_id)?;
     ConfigAccount::unpack(&config.try_borrow_data()?)?;
     append_unique_32(&mut commitments.try_borrow_mut_data()?, commitment)?;
-    // Asset custody transfer is deliberately not implemented in this checkpoint.
-    // Until custody is wired, this processor is dev/test-only and must not be deployed for funds.
     Ok(())
 }
 
@@ -68,13 +70,14 @@ fn withdraw(program_id: &Pubkey, accounts: &[AccountInfo], statement: Withdrawal
             return Err(WatcherError::NullifierAlreadySpent.into());
         }
     }
-    // Critical ordering: verify before mutating spent-state.
-    verify_withdrawal_proof(proof, public_inputs)?;
+    // Critical ordering: proof + public statement binding MUST pass before spent-state mutation.
+    verify_circuit_v1(&statement, proof, public_inputs)?;
     let mut n = nullifiers.try_borrow_mut_data()?;
     append_unique_32(&mut n, statement.nullifier_0).map_err(|e| match e { WatcherError::DuplicateCommitment => WatcherError::NullifierAlreadySpent, other => other })?;
     append_unique_32(&mut n, statement.nullifier_1).map_err(|e| match e { WatcherError::DuplicateCommitment => WatcherError::NullifierAlreadySpent, other => other })?;
     drop(n);
     if statement.change_commitment != [0u8; 32] { append_unique_32(&mut commitments.try_borrow_mut_data()?, statement.change_commitment)?; }
-    // Public SOL transfer is added only after proof verification is real and custody is wired.
+    // SOL custody transfer is deliberately still disabled until the verifier path
+    // and vault accounting are both validated together in program-test/devnet.
     Ok(())
 }
