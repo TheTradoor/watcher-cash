@@ -5,6 +5,9 @@ on:
     branches: [watcher-protocol]
     paths:
       - '.github/workflows/watcher-deploy-e2e.yml'
+      - 'scripts/watcher-devnet-e2e.mjs'
+      - 'client/watcher/**'
+      - 'programs/watcher-protocol/**'
   workflow_dispatch:
 
 permissions:
