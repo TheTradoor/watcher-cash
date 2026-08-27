@@ -63,6 +63,7 @@ async function send(connection, payer, instructions, signers = []) {
 
 async function main() {
   const rpcUrl = String(process.env.WATCHER_RPC_URL || DEFAULT_RPC).trim();
+  const publicRpcUrl = String(process.env.WATCHER_PUBLIC_RPC_URL || DEFAULT_RPC).trim();
   const outputPath = resolve(process.env.WATCHER_RUNTIME_OUT || 'public/watcher-protocol/devnet.json');
   const publicBasePath = String(process.env.WATCHER_PUBLIC_BASE_PATH || '').replace(/\/+$/, '');
   const payer = await loadKeypair(required('WATCHER_PAYER_KEYPAIR'));
@@ -72,7 +73,7 @@ async function main() {
 
   const program = await connection.getAccountInfo(programId, 'confirmed');
   if (!program?.executable) {
-    throw new Error(`Watcher program ${programId.toBase58()} is not executable on ${rpcUrl}`);
+    throw new Error(`Watcher program ${programId.toBase58()} is not executable on devnet`);
   }
 
   const config = Keypair.generate();
@@ -166,7 +167,7 @@ async function main() {
   const runtime = {
     version: 1,
     cluster: 'devnet',
-    rpcUrl,
+    rpcUrl: publicRpcUrl,
     genesisHash,
     programId: programId.toBase58(),
     config: config.publicKey.toBase58(),
