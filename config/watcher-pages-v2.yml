@@ -1,0 +1,66 @@
+name: Deploy Watcher Cash to GitHub Pages
+
+on:
+  push:
+    branches: [watcher-protocol]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+          cache-dependency-path: circuits/withdraw/go.sum
+
+      - uses: actions/configure-pages@v5
+
+      - name: Install application dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Prepare matched in-browser Groth16 prover
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/prepare-browser-prover.sh
+
+      - name: Test Watcher browser client
+        run: node --test client/watcher/*.test.mjs
+
+      - name: Build static Watcher application
+        env:
+          NEXT_PUBLIC_WATCHER_BASE_PATH: /watcher-cash
+          NEXT_PUBLIC_WATCHER_RPC_URL: https://api.devnet.solana.com
+          NEXT_PUBLIC_WATCHER_PROGRAM_ID: ${{ vars.WATCHER_PROGRAM_ID }}
+        run: npm run build
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: ./out
+
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
