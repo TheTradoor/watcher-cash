@@ -5,11 +5,12 @@ import (
 
 	"github.com/consensys/gnark-crypto/ecc"
 	"github.com/consensys/gnark/backend/groth16"
+	"github.com/consensys/gnark/constraint"
 	"github.com/consensys/gnark/frontend"
 	"github.com/consensys/gnark/frontend/cs/r1cs"
 )
 
-func compileAndSetup(t *testing.T) (frontend.CompiledConstraintSystem, groth16.ProvingKey, groth16.VerifyingKey) {
+func compileAndSetup(t *testing.T) (constraint.ConstraintSystem, groth16.ProvingKey, groth16.VerifyingKey) {
 	t.Helper()
 	ccs, err := frontend.Compile(ecc.BN254.ScalarField(), r1cs.NewBuilder, &CircuitV0{})
 	if err != nil { t.Fatal(err) }
@@ -18,7 +19,7 @@ func compileAndSetup(t *testing.T) (frontend.CompiledConstraintSystem, groth16.P
 	return ccs, pk, vk
 }
 
-func prove(t *testing.T, ccs frontend.CompiledConstraintSystem, pk groth16.ProvingKey, assignment CircuitV0) error {
+func prove(t *testing.T, ccs constraint.ConstraintSystem, pk groth16.ProvingKey, assignment CircuitV0) error {
 	t.Helper()
 	w, err := frontend.NewWitness(&assignment, ecc.BN254.ScalarField())
 	if err != nil { return err }
