@@ -18,6 +18,7 @@ import (
 	nativemimc "github.com/consensys/gnark-crypto/ecc/bn254/fr/mimc"
 	"github.com/consensys/gnark/backend/groth16"
 	bn254groth16 "github.com/consensys/gnark/backend/groth16/bn254"
+	"github.com/consensys/gnark/backend/witness"
 	"github.com/consensys/gnark/frontend"
 	"github.com/consensys/gnark/frontend/cs/r1cs"
 
@@ -45,15 +46,15 @@ type treeV1 struct {
 }
 
 type bundleManifest struct {
-	Version            int               `json:"version"`
-	Curve              string            `json:"curve"`
-	Scheme             string            `json:"scheme"`
-	Gnark               string            `json:"gnark"`
-	MerkleDepth         int               `json:"merkle_depth"`
-	DepositPublicInputs int               `json:"deposit_public_inputs"`
-	WithdrawPublicInputs int              `json:"withdraw_public_inputs"`
-	Files              map[string]string `json:"files_sha256"`
-	Warning            string            `json:"warning"`
+	Version              int               `json:"version"`
+	Curve                string            `json:"curve"`
+	Scheme               string            `json:"scheme"`
+	Gnark                string            `json:"gnark"`
+	MerkleDepth          int               `json:"merkle_depth"`
+	DepositPublicInputs  int               `json:"deposit_public_inputs"`
+	WithdrawPublicInputs int               `json:"withdraw_public_inputs"`
+	Files                map[string]string `json:"files_sha256"`
+	Warning              string            `json:"warning"`
 }
 
 func main() {
@@ -93,19 +94,21 @@ func run(args []string) error {
 	}
 
 	files := map[string][]byte{
-		"withdraw.pk":                         withdrawal.provingKey,
-		"withdraw.vk":                         withdrawal.verifyingKey,
-		"sample-withdraw-witness.json":        withdrawal.witnessJSON,
-		"sample-withdraw-proof.bin":           withdrawal.proof,
-		"sample-withdraw-public-inputs.bin":   withdrawal.publicInputs,
-		"deposit.pk":                          deposits.provingKey,
-		"deposit.vk":                          deposits.verifyingKey,
-		"sample-deposit-0-witness.json":       deposits.witness0JSON,
-		"sample-deposit-0-proof.bin":          deposits.proof0,
-		"sample-deposit-0-public-inputs.bin":  deposits.publicInputs0,
-		"sample-deposit-1-witness.json":       deposits.witness1JSON,
-		"sample-deposit-1-proof.bin":          deposits.proof1,
-		"sample-deposit-1-public-inputs.bin":  deposits.publicInputs1,
+		"withdraw.r1cs":                      withdrawal.constraintSystem,
+		"withdraw.pk":                        withdrawal.provingKey,
+		"withdraw.vk":                        withdrawal.verifyingKey,
+		"sample-withdraw-witness.json":       withdrawal.witnessJSON,
+		"sample-withdraw-proof.bin":          withdrawal.proof,
+		"sample-withdraw-public-inputs.bin":  withdrawal.publicInputs,
+		"deposit.r1cs":                       deposits.constraintSystem,
+		"deposit.pk":                         deposits.provingKey,
+		"deposit.vk":                         deposits.verifyingKey,
+		"sample-deposit-0-witness.json":      deposits.witness0JSON,
+		"sample-deposit-0-proof.bin":         deposits.proof0,
+		"sample-deposit-0-public-inputs.bin": deposits.publicInputs0,
+		"sample-deposit-1-witness.json":      deposits.witness1JSON,
+		"sample-deposit-1-proof.bin":         deposits.proof1,
+		"sample-deposit-1-public-inputs.bin": deposits.publicInputs1,
 	}
 	for name, value := range files {
 		if err := writeAtomic(filepath.Join(*bundleOutput, name), value, 0o600); err != nil {
@@ -114,9 +117,9 @@ func run(args []string) error {
 	}
 
 	manifest := bundleManifest{
-		Version:             1,
-		Curve:               "BN254",
-		Scheme:              "Groth16",
+		Version:              1,
+		Curve:                "BN254",
+		Scheme:               "Groth16",
 		Gnark:                "v0.14.x",
 		MerkleDepth:          withdraw.MerkleDepthV1,
 		DepositPublicInputs:  3,
@@ -153,11 +156,11 @@ func run(args []string) error {
 			}
 		}
 		programManifest := map[string]any{
-			"version":               1,
+			"version":                1,
 			"bundle_manifest_sha256": sha256Hex(manifestBytes),
-			"withdraw_vk_sha256":    sha256Hex(withdrawal.verifierWire),
-			"deposit_vk_sha256":     sha256Hex(deposits.verifierWire),
-			"warning":               manifest.Warning,
+			"withdraw_vk_sha256":     sha256Hex(withdrawal.verifierWire),
+			"deposit_vk_sha256":      sha256Hex(deposits.verifierWire),
+			"warning":                manifest.Warning,
 		}
 		encoded, err := json.MarshalIndent(programManifest, "", "  ")
 		if err != nil {
@@ -202,17 +205,18 @@ func makeFixture() fixtureValues {
 	path1, bits1 := tree.proof(1)
 	changeAmount, changeOwner, changeNonce := big.NewInt(6_000_000), big.NewInt(5555), big.NewInt(6666)
 	return fixtureValues{
-		asset: asset,
+		asset:   asset,
 		amount0: amount0, owner0: owner0, nonce0: nonce0,
 		amount1: amount1, owner1: owner1, nonce1: nonce1,
 		commitment0: commitment0, commitment1: commitment1,
 		changeAmount: changeAmount, changeOwner: changeOwner, changeNonce: changeNonce,
 		changeCommitment: note(asset, changeAmount, changeOwner, changeNonce),
-		tree: tree, path0: path0, bits0: bits0, path1: path1, bits1: bits1,
+		tree:             tree, path0: path0, bits0: bits0, path1: path1, bits1: bits1,
 	}
 }
 
 type setupResult struct {
+	constraintSystem         []byte
 	provingKey, verifyingKey []byte
 	verifierWire             []byte
 	proof, publicInputs      []byte
@@ -221,71 +225,99 @@ type setupResult struct {
 
 func buildWithdrawalSetup(fixture fixtureValues) (setupResult, error) {
 	assignment := withdraw.CircuitV1{
-		Input0Amount: fixture.amount0,
-		Input0Owner: fixture.owner0,
-		Input0Nonce: fixture.nonce0,
-		Input0Path: fixture.path0,
-		Input0Index: fixture.bits0,
-		Input1Amount: fixture.amount1,
-		Input1Owner: fixture.owner1,
-		Input1Nonce: fixture.nonce1,
-		Input1Path: fixture.path1,
-		Input1Index: fixture.bits1,
-		ChangeAmount: fixture.changeAmount,
-		ChangeOwner: fixture.changeOwner,
-		ChangeNonce: fixture.changeNonce,
-		MerkleRoot: fixture.tree.root(),
-		Nullifier0: nullifier(fixture.owner0, fixture.nonce0, fixture.commitment0),
-		Nullifier1: nullifier(fixture.owner1, fixture.nonce1, fixture.commitment1),
+		Input0Amount:     fixture.amount0,
+		Input0Owner:      fixture.owner0,
+		Input0Nonce:      fixture.nonce0,
+		Input0Path:       fixture.path0,
+		Input0Index:      fixture.bits0,
+		Input1Amount:     fixture.amount1,
+		Input1Owner:      fixture.owner1,
+		Input1Nonce:      fixture.nonce1,
+		Input1Path:       fixture.path1,
+		Input1Index:      fixture.bits1,
+		ChangeAmount:     fixture.changeAmount,
+		ChangeOwner:      fixture.changeOwner,
+		ChangeNonce:      fixture.changeNonce,
+		MerkleRoot:       fixture.tree.root(),
+		Nullifier0:       nullifier(fixture.owner0, fixture.nonce0, fixture.commitment0),
+		Nullifier1:       nullifier(fixture.owner1, fixture.nonce1, fixture.commitment1),
 		ChangeCommitment: fixture.changeCommitment,
-		PublicAmount: 4_000_000,
-		ProtocolFee: 0,
-		RelayerFee: 1_000_000,
+		PublicAmount:     4_000_000,
+		ProtocolFee:      0,
+		RelayerFee:       1_000_000,
 		RecipientBinding: recipientBinding(),
-		AssetID: 1,
-		ContextBinding: withdrawContextBinding(),
+		AssetID:          1,
+		ContextBinding:   withdrawContextBinding(),
 	}
 	ccs, err := frontend.Compile(ecc.BN254.ScalarField(), r1cs.NewBuilder, &withdraw.CircuitV1{})
-	if err != nil { return setupResult{}, err }
+	if err != nil {
+		return setupResult{}, err
+	}
 	pk, vk, err := groth16.Setup(ccs)
-	if err != nil { return setupResult{}, err }
+	if err != nil {
+		return setupResult{}, err
+	}
 	witness, err := frontend.NewWitness(&assignment, ecc.BN254.ScalarField())
-	if err != nil { return setupResult{}, err }
+	if err != nil {
+		return setupResult{}, err
+	}
 	publicWitness, err := witness.Public()
-	if err != nil { return setupResult{}, err }
+	if err != nil {
+		return setupResult{}, err
+	}
 	proof, err := groth16.Prove(ccs, pk, witness)
-	if err != nil { return setupResult{}, err }
-	if err := groth16.Verify(proof, vk, publicWitness); err != nil { return setupResult{}, err }
+	if err != nil {
+		return setupResult{}, err
+	}
+	if err := groth16.Verify(proof, vk, publicWitness); err != nil {
+		return setupResult{}, err
+	}
 
 	proofWire, err := xarkProof(proof)
-	if err != nil { return setupResult{}, err }
+	if err != nil {
+		return setupResult{}, err
+	}
 	vkWire, err := xarkVerifyingKey(vk)
-	if err != nil { return setupResult{}, err }
+	if err != nil {
+		return setupResult{}, err
+	}
 	publicWire, err := publicInputWire(publicWitness)
-	if err != nil { return setupResult{}, err }
-	if len(vkWire) != 1152 || len(publicWire) != 320 { return setupResult{}, errors.New("unexpected withdrawal wire length") }
+	if err != nil {
+		return setupResult{}, err
+	}
+	if len(vkWire) != 1152 || len(publicWire) != 320 {
+		return setupResult{}, errors.New("unexpected withdrawal wire length")
+	}
 	witnessJSON, err := json.MarshalIndent(withdrawWitnessMap(assignment), "", "  ")
-	if err != nil { return setupResult{}, err }
+	if err != nil {
+		return setupResult{}, err
+	}
 	witnessJSON = append(witnessJSON, '\n')
 	return setupResult{
-		provingKey: writeToBytes(pk), verifyingKey: writeToBytes(vk), verifierWire: vkWire,
+		constraintSystem: writeToBytes(ccs),
+		provingKey:       writeToBytes(pk), verifyingKey: writeToBytes(vk), verifierWire: vkWire,
 		proof: proofWire, publicInputs: publicWire, witnessJSON: witnessJSON,
 	}, nil
 }
 
 type depositSetupResult struct {
-	provingKey, verifyingKey []byte
-	verifierWire             []byte
-	proof0, publicInputs0    []byte
-	proof1, publicInputs1    []byte
+	constraintSystem           []byte
+	provingKey, verifyingKey   []byte
+	verifierWire               []byte
+	proof0, publicInputs0      []byte
+	proof1, publicInputs1      []byte
 	witness0JSON, witness1JSON []byte
 }
 
 func buildDepositSetup(fixture fixtureValues) (depositSetupResult, error) {
 	ccs, err := frontend.Compile(ecc.BN254.ScalarField(), r1cs.NewBuilder, &withdraw.DepositCircuitV1{})
-	if err != nil { return depositSetupResult{}, err }
+	if err != nil {
+		return depositSetupResult{}, err
+	}
 	pk, vk, err := groth16.Setup(ccs)
-	if err != nil { return depositSetupResult{}, err }
+	if err != nil {
+		return depositSetupResult{}, err
+	}
 	assignments := []withdraw.DepositCircuitV1{
 		{Owner: fixture.owner0, Nonce: fixture.nonce0, Commitment: fixture.commitment0, Amount: fixture.amount0, AssetID: fixture.asset},
 		{Owner: fixture.owner1, Nonce: fixture.nonce1, Commitment: fixture.commitment1, Amount: fixture.amount1, AssetID: fixture.asset},
@@ -295,27 +327,44 @@ func buildDepositSetup(fixture fixtureValues) (depositSetupResult, error) {
 	witnessJSON := make([][]byte, 2)
 	for index := range assignments {
 		witness, err := frontend.NewWitness(&assignments[index], ecc.BN254.ScalarField())
-		if err != nil { return depositSetupResult{}, err }
+		if err != nil {
+			return depositSetupResult{}, err
+		}
 		publicWitness, err := witness.Public()
-		if err != nil { return depositSetupResult{}, err }
+		if err != nil {
+			return depositSetupResult{}, err
+		}
 		proof, err := groth16.Prove(ccs, pk, witness)
-		if err != nil { return depositSetupResult{}, err }
-		if err := groth16.Verify(proof, vk, publicWitness); err != nil { return depositSetupResult{}, err }
+		if err != nil {
+			return depositSetupResult{}, err
+		}
+		if err := groth16.Verify(proof, vk, publicWitness); err != nil {
+			return depositSetupResult{}, err
+		}
 		proofs[index], err = xarkProof(proof)
-		if err != nil { return depositSetupResult{}, err }
+		if err != nil {
+			return depositSetupResult{}, err
+		}
 		publicInputs[index], err = publicInputWire(publicWitness)
-		if err != nil { return depositSetupResult{}, err }
+		if err != nil {
+			return depositSetupResult{}, err
+		}
 		witnessJSON[index], err = json.MarshalIndent(depositWitnessMap(assignments[index]), "", "  ")
-		if err != nil { return depositSetupResult{}, err }
+		if err != nil {
+			return depositSetupResult{}, err
+		}
 		witnessJSON[index] = append(witnessJSON[index], '\n')
 	}
 	vkWire, err := xarkVerifyingKey(vk)
-	if err != nil { return depositSetupResult{}, err }
+	if err != nil {
+		return depositSetupResult{}, err
+	}
 	if len(vkWire) != 704 || len(publicInputs[0]) != 96 || len(publicInputs[1]) != 96 {
 		return depositSetupResult{}, errors.New("unexpected deposit wire length")
 	}
 	return depositSetupResult{
-		provingKey: writeToBytes(pk), verifyingKey: writeToBytes(vk), verifierWire: vkWire,
+		constraintSystem: writeToBytes(ccs),
+		provingKey:       writeToBytes(pk), verifyingKey: writeToBytes(vk), verifierWire: vkWire,
 		proof0: proofs[0], publicInputs0: publicInputs[0], witness0JSON: witnessJSON[0],
 		proof1: proofs[1], publicInputs1: publicInputs[1], witness1JSON: witnessJSON[1],
 	}, nil
@@ -323,11 +372,14 @@ func buildDepositSetup(fixture fixtureValues) (depositSetupResult, error) {
 
 func writeToBytes(writer io.WriterTo) []byte {
 	var buffer byteBuffer
-	if _, err := writer.WriteTo(&buffer); err != nil { panic(err) }
+	if _, err := writer.WriteTo(&buffer); err != nil {
+		panic(err)
+	}
 	return buffer.bytes
 }
 
-type byteBuffer struct { bytes []byte }
+type byteBuffer struct{ bytes []byte }
+
 func (buffer *byteBuffer) Write(value []byte) (int, error) {
 	buffer.bytes = append(buffer.bytes, value...)
 	return len(value), nil
@@ -335,10 +387,14 @@ func (buffer *byteBuffer) Write(value []byte) (int, error) {
 
 func xarkProof(proof groth16.Proof) ([]byte, error) {
 	value, ok := proof.(*bn254groth16.Proof)
-	if !ok { return nil, fmt.Errorf("unexpected proof type %T", proof) }
+	if !ok {
+		return nil, fmt.Errorf("unexpected proof type %T", proof)
+	}
 	output := make([]byte, 0, 256)
 	appendLE := func(encoded [32]byte) {
-		for left, right := 0, 31; left < right; left, right = left+1, right-1 { encoded[left], encoded[right] = encoded[right], encoded[left] }
+		for left, right := 0, 31; left < right; left, right = left+1, right-1 {
+			encoded[left], encoded[right] = encoded[right], encoded[left]
+		}
 		output = append(output, encoded[:]...)
 	}
 	appendLE(value.Ar.X.Bytes())
@@ -360,10 +416,14 @@ func xarkProof(proof groth16.Proof) ([]byte, error) {
 
 func xarkVerifyingKey(verifyingKey groth16.VerifyingKey) ([]byte, error) {
 	value, ok := verifyingKey.(*bn254groth16.VerifyingKey)
-	if !ok { return nil, fmt.Errorf("unexpected verifying key type %T", verifyingKey) }
+	if !ok {
+		return nil, fmt.Errorf("unexpected verifying key type %T", verifyingKey)
+	}
 	output := make([]byte, 0, 64*(len(value.G1.K)+7))
 	appendLE := func(encoded [32]byte) {
-		for left, right := 0, 31; left < right; left, right = left+1, right-1 { encoded[left], encoded[right] = encoded[right], encoded[left] }
+		for left, right := 0, 31; left < right; left, right = left+1, right-1 {
+			encoded[left], encoded[right] = encoded[right], encoded[left]
+		}
 		output = append(output, encoded[:]...)
 	}
 	appendLE(value.G1.Alpha.X.Bytes())
@@ -373,7 +433,10 @@ func xarkVerifyingKey(verifyingKey groth16.VerifyingKey) ([]byte, error) {
 		{value.G2.Gamma.X.A0.Bytes(), value.G2.Gamma.X.A1.Bytes(), value.G2.Gamma.Y.A0.Bytes(), value.G2.Gamma.Y.A1.Bytes()},
 		{value.G2.Delta.X.A0.Bytes(), value.G2.Delta.X.A1.Bytes(), value.G2.Delta.Y.A0.Bytes(), value.G2.Delta.Y.A1.Bytes()},
 	} {
-		appendLE(point.x0); appendLE(point.x1); appendLE(point.y0); appendLE(point.y1)
+		appendLE(point.x0)
+		appendLE(point.x1)
+		appendLE(point.y0)
+		appendLE(point.y1)
 	}
 	for index := range value.G1.K {
 		appendLE(value.G1.K[index].X.Bytes())
@@ -382,13 +445,17 @@ func xarkVerifyingKey(verifyingKey groth16.VerifyingKey) ([]byte, error) {
 	return output, nil
 }
 
-func publicInputWire(publicWitness frontend.Witness) ([]byte, error) {
+func publicInputWire(publicWitness witness.Witness) ([]byte, error) {
 	vector, ok := publicWitness.Vector().(fr.Vector)
-	if !ok { return nil, fmt.Errorf("unexpected public vector type %T", publicWitness.Vector()) }
+	if !ok {
+		return nil, fmt.Errorf("unexpected public vector type %T", publicWitness.Vector())
+	}
 	output := make([]byte, 0, len(vector)*32)
 	for index := range vector {
 		encoded := vector[index].Bytes()
-		for left, right := 0, 31; left < right; left, right = left+1, right-1 { encoded[left], encoded[right] = encoded[right], encoded[left] }
+		for left, right := 0, 31; left < right; left, right = left+1, right-1 {
+			encoded[left], encoded[right] = encoded[right], encoded[left]
+		}
 		output = append(output, encoded[:]...)
 	}
 	return output, nil
@@ -400,22 +467,32 @@ func hash(values ...*big.Int) *big.Int {
 		var element fr.Element
 		element.SetBigInt(value)
 		encoded := element.Bytes()
-		if _, err := hasher.Write(encoded[:]); err != nil { panic(err) }
+		if _, err := hasher.Write(encoded[:]); err != nil {
+			panic(err)
+		}
 	}
 	return new(big.Int).SetBytes(hasher.Sum(nil))
 }
 
-func note(asset, amount, owner, nonce *big.Int) *big.Int { return hash(big.NewInt(domainNote), asset, amount, owner, nonce) }
-func nullifier(owner, nonce, commitment *big.Int) *big.Int { return hash(big.NewInt(domainNullifier), owner, nonce, commitment) }
+func note(asset, amount, owner, nonce *big.Int) *big.Int {
+	return hash(big.NewInt(domainNote), asset, amount, owner, nonce)
+}
+func nullifier(owner, nonce, commitment *big.Int) *big.Int {
+	return hash(big.NewInt(domainNullifier), owner, nonce, commitment)
+}
 func parent(left, right *big.Int) *big.Int { return hash(big.NewInt(domainMerkle), left, right) }
 
 func makeTree(leaves []*big.Int) treeV1 {
 	levels := make([][]*big.Int, withdraw.MerkleDepthV1+1)
 	levels[0] = make([]*big.Int, len(leaves))
-	for index := range leaves { levels[0][index] = new(big.Int).Set(leaves[index]) }
+	for index := range leaves {
+		levels[0][index] = new(big.Int).Set(leaves[index])
+	}
 	for depth := 0; depth < withdraw.MerkleDepthV1; depth++ {
 		next := make([]*big.Int, len(levels[depth])/2)
-		for index := range next { next[index] = parent(levels[depth][2*index], levels[depth][2*index+1]) }
+		for index := range next {
+			next[index] = parent(levels[depth][2*index], levels[depth][2*index+1])
+		}
 		levels[depth+1] = next
 	}
 	return treeV1{levels: levels}
@@ -427,41 +504,69 @@ func (tree treeV1) proof(index int) ([withdraw.MerkleDepthV1]frontend.Variable, 
 	var bits [withdraw.MerkleDepthV1]frontend.Variable
 	position := index
 	for depth := 0; depth < withdraw.MerkleDepthV1; depth++ {
-		if position%2 == 0 { path[depth] = new(big.Int).Set(tree.levels[depth][position+1]); bits[depth] = 0 } else { path[depth] = new(big.Int).Set(tree.levels[depth][position-1]); bits[depth] = 1 }
+		if position%2 == 0 {
+			path[depth] = new(big.Int).Set(tree.levels[depth][position+1])
+			bits[depth] = 0
+		} else {
+			path[depth] = new(big.Int).Set(tree.levels[depth][position-1])
+			bits[depth] = 1
+		}
 		position /= 2
 	}
 	return path, bits
 }
 
-func fixed(value byte) []byte { output := make([]byte, 32); for index := range output { output[index] = value }; return output }
+func fixed(value byte) []byte {
+	output := make([]byte, 32)
+	for index := range output {
+		output[index] = value
+	}
+	return output
+}
 func hashBytesToField(domain string, values ...[]byte) *big.Int {
 	hasher := sha256.New()
 	_, _ = hasher.Write([]byte(domain))
-	for _, value := range values { _, _ = hasher.Write(value) }
+	for _, value := range values {
+		_, _ = hasher.Write(value)
+	}
 	digest := hasher.Sum(nil)
 	digest[31] &= 0x1f
-	for left, right := 0, 31; left < right; left, right = left+1, right-1 { digest[left], digest[right] = digest[right], digest[left] }
+	for left, right := 0, 31; left < right; left, right = left+1, right-1 {
+		digest[left], digest[right] = digest[right], digest[left]
+	}
 	return new(big.Int).SetBytes(digest)
 }
 func recipientBinding() *big.Int { return hashBytesToField("watcher-recipient-v1", fixed(7)) }
 func withdrawContextBinding() *big.Int {
-	asset := make([]byte, 32); asset[0] = 1
+	asset := make([]byte, 32)
+	asset[0] = 1
 	return hashBytesToField("watcher-withdraw-context-v1", fixed(42), fixed(43), fixtureVault, fixed(44), fixed(45), asset)
 }
 
 func variableString(value frontend.Variable) string {
 	switch typed := value.(type) {
-	case *big.Int: return typed.String()
-	case big.Int: return typed.String()
-	case int: return fmt.Sprintf("%d", typed)
-	case int64: return fmt.Sprintf("%d", typed)
-	case uint64: return fmt.Sprintf("%d", typed)
-	case string: return typed
-	default: return fmt.Sprint(typed)
+	case *big.Int:
+		return typed.String()
+	case big.Int:
+		return typed.String()
+	case int:
+		return fmt.Sprintf("%d", typed)
+	case int64:
+		return fmt.Sprintf("%d", typed)
+	case uint64:
+		return fmt.Sprintf("%d", typed)
+	case string:
+		return typed
+	default:
+		return fmt.Sprint(typed)
 	}
 }
 func variableStrings(values [withdraw.MerkleDepthV1]frontend.Variable) []string {
-	output := make([]string, len(values)); for index := range values { output[index] = variableString(values[index]) }; return output
+	output := make([]string, len(values))
+	for index := range values {
+		output[index] = variableString(values[index])
+	}
+	return output
 }
 func withdrawWitnessMap(value withdraw.CircuitV1) map[string]any {
 	return map[string]any{
@@ -480,7 +585,9 @@ func rustArray(value []byte) []byte {
 	output := make([]byte, 0, len(value)*5+4)
 	output = append(output, '[')
 	for index, current := range value {
-		if index > 0 { output = append(output, ',') }
+		if index > 0 {
+			output = append(output, ',')
+		}
 		output = append(output, fmt.Sprintf("0x%02x", current)...)
 	}
 	output = append(output, ']', '\n')
@@ -489,13 +596,32 @@ func rustArray(value []byte) []byte {
 
 func writeAtomic(path string, value []byte, mode os.FileMode) error {
 	temporary := path + ".tmp"
-	if err := os.WriteFile(temporary, value, mode); err != nil { return err }
-	if err := os.Rename(temporary, path); err != nil { _ = os.Remove(temporary); return err }
+	if err := os.WriteFile(temporary, value, mode); err != nil {
+		return err
+	}
+	if err := os.Rename(temporary, path); err != nil {
+		_ = os.Remove(temporary)
+		return err
+	}
 	return nil
 }
-func sha256Hex(value []byte) string { digest := sha256.Sum256(value); return hex.EncodeToString(digest[:]) }
-func mustBigInt(value string) *big.Int { result, ok := new(big.Int).SetString(value, 10); if !ok { panic(value) }; return result }
+func sha256Hex(value []byte) string {
+	digest := sha256.Sum256(value)
+	return hex.EncodeToString(digest[:])
+}
+func mustBigInt(value string) *big.Int {
+	result, ok := new(big.Int).SetString(value, 10)
+	if !ok {
+		panic(value)
+	}
+	return result
+}
 
 func sortedKeys(values map[string]string) []string {
-	keys := make([]string, 0, len(values)); for key := range values { keys = append(keys, key) }; sort.Strings(keys); return keys
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }

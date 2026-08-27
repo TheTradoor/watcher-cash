@@ -24,8 +24,8 @@ import (
 )
 
 const (
-	XarkProofBytesV1          = 256
-	DepositPublicInputBytesV1 = 3 * 32
+	XarkProofBytesV1           = 256
+	DepositPublicInputBytesV1  = 3 * 32
 	WithdrawPublicInputBytesV1 = 10 * 32
 )
 
@@ -211,54 +211,100 @@ func withdrawAssignmentFromJSONV1(data []byte) (CircuitV1, error) {
 		return CircuitV1{}, fmt.Errorf("decode withdrawal witness: %w", err)
 	}
 	input0Amount, err := parseU64V1(encoded.Input0Amount, "Input0Amount", true)
-	if err != nil { return CircuitV1{}, err }
+	if err != nil {
+		return CircuitV1{}, err
+	}
 	input0Owner, err := parseFieldV1(encoded.Input0Owner, "Input0Owner", true)
-	if err != nil { return CircuitV1{}, err }
+	if err != nil {
+		return CircuitV1{}, err
+	}
 	input0Nonce, err := parseFieldV1(encoded.Input0Nonce, "Input0Nonce", true)
-	if err != nil { return CircuitV1{}, err }
+	if err != nil {
+		return CircuitV1{}, err
+	}
 	input0Path, err := parsePathV1(encoded.Input0Path, "Input0Path")
-	if err != nil { return CircuitV1{}, err }
+	if err != nil {
+		return CircuitV1{}, err
+	}
 	input0Index, err := parseIndexV1(encoded.Input0Index, "Input0Index")
-	if err != nil { return CircuitV1{}, err }
+	if err != nil {
+		return CircuitV1{}, err
+	}
 
 	input1Amount, err := parseU64V1(encoded.Input1Amount, "Input1Amount", true)
-	if err != nil { return CircuitV1{}, err }
+	if err != nil {
+		return CircuitV1{}, err
+	}
 	input1Owner, err := parseFieldV1(encoded.Input1Owner, "Input1Owner", true)
-	if err != nil { return CircuitV1{}, err }
+	if err != nil {
+		return CircuitV1{}, err
+	}
 	input1Nonce, err := parseFieldV1(encoded.Input1Nonce, "Input1Nonce", true)
-	if err != nil { return CircuitV1{}, err }
+	if err != nil {
+		return CircuitV1{}, err
+	}
 	input1Path, err := parsePathV1(encoded.Input1Path, "Input1Path")
-	if err != nil { return CircuitV1{}, err }
+	if err != nil {
+		return CircuitV1{}, err
+	}
 	input1Index, err := parseIndexV1(encoded.Input1Index, "Input1Index")
-	if err != nil { return CircuitV1{}, err }
+	if err != nil {
+		return CircuitV1{}, err
+	}
 
 	changeAmount, err := parseU64V1(encoded.ChangeAmount, "ChangeAmount", false)
-	if err != nil { return CircuitV1{}, err }
+	if err != nil {
+		return CircuitV1{}, err
+	}
 	changeOwner, err := parseFieldV1(encoded.ChangeOwner, "ChangeOwner", true)
-	if err != nil { return CircuitV1{}, err }
+	if err != nil {
+		return CircuitV1{}, err
+	}
 	changeNonce, err := parseFieldV1(encoded.ChangeNonce, "ChangeNonce", true)
-	if err != nil { return CircuitV1{}, err }
+	if err != nil {
+		return CircuitV1{}, err
+	}
 
 	merkleRoot, err := parseFieldV1(encoded.MerkleRoot, "MerkleRoot", true)
-	if err != nil { return CircuitV1{}, err }
+	if err != nil {
+		return CircuitV1{}, err
+	}
 	nullifier0, err := parseFieldV1(encoded.Nullifier0, "Nullifier0", true)
-	if err != nil { return CircuitV1{}, err }
+	if err != nil {
+		return CircuitV1{}, err
+	}
 	nullifier1, err := parseFieldV1(encoded.Nullifier1, "Nullifier1", true)
-	if err != nil { return CircuitV1{}, err }
+	if err != nil {
+		return CircuitV1{}, err
+	}
 	changeCommitment, err := parseFieldV1(encoded.ChangeCommitment, "ChangeCommitment", true)
-	if err != nil { return CircuitV1{}, err }
+	if err != nil {
+		return CircuitV1{}, err
+	}
 	publicAmount, err := parseU64V1(encoded.PublicAmount, "PublicAmount", true)
-	if err != nil { return CircuitV1{}, err }
+	if err != nil {
+		return CircuitV1{}, err
+	}
 	protocolFee, err := parseU64V1(encoded.ProtocolFee, "ProtocolFee", false)
-	if err != nil { return CircuitV1{}, err }
+	if err != nil {
+		return CircuitV1{}, err
+	}
 	relayerFee, err := parseU64V1(encoded.RelayerFee, "RelayerFee", false)
-	if err != nil { return CircuitV1{}, err }
+	if err != nil {
+		return CircuitV1{}, err
+	}
 	recipientBinding, err := parseFieldV1(encoded.RecipientBinding, "RecipientBinding", true)
-	if err != nil { return CircuitV1{}, err }
+	if err != nil {
+		return CircuitV1{}, err
+	}
 	assetID, err := parseFieldV1(encoded.AssetID, "AssetID", true)
-	if err != nil { return CircuitV1{}, err }
+	if err != nil {
+		return CircuitV1{}, err
+	}
 	contextBinding, err := parseFieldV1(encoded.ContextBinding, "ContextBinding", true)
-	if err != nil { return CircuitV1{}, err }
+	if err != nil {
+		return CircuitV1{}, err
+	}
 
 	return CircuitV1{
 		Input0Amount: input0Amount, Input0Owner: input0Owner, Input0Nonce: input0Nonce,
@@ -274,14 +320,14 @@ func withdrawAssignmentFromJSONV1(data []byte) (CircuitV1, error) {
 }
 
 type ProverBundleV1 struct {
-	DepositCS constraint.ConstraintSystem
-	DepositPK groth16.ProvingKey
-	DepositVK groth16.VerifyingKey
+	DepositCS  constraint.ConstraintSystem
+	DepositPK  groth16.ProvingKey
+	DepositVK  groth16.VerifyingKey
 	WithdrawCS constraint.ConstraintSystem
 	WithdrawPK groth16.ProvingKey
 	WithdrawVK groth16.VerifyingKey
-	Digest string
-	mutex sync.Mutex
+	Digest     string
+	mutex      sync.Mutex
 }
 
 type ProofResponseV1 struct {
@@ -293,22 +339,29 @@ type ProofResponseV1 struct {
 	BundleDigest     string `json:"bundleDigest"`
 }
 
-func readArtifactV1(path string, destination io.ReaderFrom) error {
-	file, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-	if _, err := destination.ReadFrom(file); err != nil {
-		return err
-	}
-	return nil
+const proverBundleArtifactNamesV1 = "deposit.r1cs,deposit.pk,deposit.vk,withdraw.r1cs,withdraw.pk,withdraw.vk"
+
+func proverBundleNamesV1() []string {
+	return strings.Split(proverBundleArtifactNamesV1, ",")
 }
 
-func bundleDigestV1(directory string, names []string) (string, error) {
+func requiredArtifactV1(artifacts map[string][]byte, name string) ([]byte, error) {
+	value, ok := artifacts[name]
+	if !ok || len(value) == 0 {
+		return nil, fmt.Errorf("prover bundle artifact %s is missing or empty", name)
+	}
+	return value, nil
+}
+
+func readArtifactBytesV1(data []byte, destination io.ReaderFrom) error {
+	_, err := destination.ReadFrom(bytes.NewReader(data))
+	return err
+}
+
+func bundleDigestBytesV1(artifacts map[string][]byte) (string, error) {
 	hasher := sha256.New()
-	for _, name := range names {
-		data, err := os.ReadFile(filepath.Join(directory, name))
+	for _, name := range proverBundleNamesV1() {
+		data, err := requiredArtifactV1(artifacts, name)
 		if err != nil {
 			return "", err
 		}
@@ -319,28 +372,47 @@ func bundleDigestV1(directory string, names []string) (string, error) {
 	return hex.EncodeToString(hasher.Sum(nil)), nil
 }
 
-func loadCircuitArtifactsV1(directory, prefix string) (constraint.ConstraintSystem, groth16.ProvingKey, groth16.VerifyingKey, error) {
+func loadCircuitArtifactsBytesV1(
+	artifacts map[string][]byte,
+	prefix string,
+) (constraint.ConstraintSystem, groth16.ProvingKey, groth16.VerifyingKey, error) {
 	ccs := groth16.NewCS(ecc.BN254)
 	provingKey := groth16.NewProvingKey(ecc.BN254)
 	verifyingKey := groth16.NewVerifyingKey(ecc.BN254)
-	if err := readArtifactV1(filepath.Join(directory, prefix+".r1cs"), ccs); err != nil {
+
+	r1cs, err := requiredArtifactV1(artifacts, prefix+".r1cs")
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if err := readArtifactBytesV1(r1cs, ccs); err != nil {
 		return nil, nil, nil, fmt.Errorf("load %s r1cs: %w", prefix, err)
 	}
-	if err := readArtifactV1(filepath.Join(directory, prefix+".pk"), provingKey); err != nil {
+	pk, err := requiredArtifactV1(artifacts, prefix+".pk")
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if err := readArtifactBytesV1(pk, provingKey); err != nil {
 		return nil, nil, nil, fmt.Errorf("load %s proving key: %w", prefix, err)
 	}
-	if err := readArtifactV1(filepath.Join(directory, prefix+".vk"), verifyingKey); err != nil {
+	vk, err := requiredArtifactV1(artifacts, prefix+".vk")
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if err := readArtifactBytesV1(vk, verifyingKey); err != nil {
 		return nil, nil, nil, fmt.Errorf("load %s verifying key: %w", prefix, err)
 	}
 	return ccs, provingKey, verifyingKey, nil
 }
 
-func LoadProverBundleV1(directory string) (*ProverBundleV1, error) {
-	depositCS, depositPK, depositVK, err := loadCircuitArtifactsV1(directory, "deposit")
+// LoadProverBundleBytesV1 loads the matched development bundle entirely from
+// memory. The browser WebAssembly entrypoint uses this path so private witness
+// data never leaves the user's device and no virtual filesystem is required.
+func LoadProverBundleBytesV1(artifacts map[string][]byte) (*ProverBundleV1, error) {
+	depositCS, depositPK, depositVK, err := loadCircuitArtifactsBytesV1(artifacts, "deposit")
 	if err != nil {
 		return nil, err
 	}
-	withdrawCS, withdrawPK, withdrawVK, err := loadCircuitArtifactsV1(directory, "withdraw")
+	withdrawCS, withdrawPK, withdrawVK, err := loadCircuitArtifactsBytesV1(artifacts, "withdraw")
 	if err != nil {
 		return nil, err
 	}
@@ -350,8 +422,7 @@ func LoadProverBundleV1(directory string) (*ProverBundleV1, error) {
 	if withdrawVK.NbPublicWitness() != 10 {
 		return nil, fmt.Errorf("withdraw verifying key expects %d public inputs, want 10", withdrawVK.NbPublicWitness())
 	}
-	names := []string{"deposit.r1cs", "deposit.pk", "deposit.vk", "withdraw.r1cs", "withdraw.pk", "withdraw.vk"}
-	digest, err := bundleDigestV1(directory, names)
+	digest, err := bundleDigestBytesV1(artifacts)
 	if err != nil {
 		return nil, fmt.Errorf("hash prover bundle: %w", err)
 	}
@@ -360,6 +431,18 @@ func LoadProverBundleV1(directory string) (*ProverBundleV1, error) {
 		WithdrawCS: withdrawCS, WithdrawPK: withdrawPK, WithdrawVK: withdrawVK,
 		Digest: digest,
 	}, nil
+}
+
+func LoadProverBundleV1(directory string) (*ProverBundleV1, error) {
+	artifacts := make(map[string][]byte, 6)
+	for _, name := range proverBundleNamesV1() {
+		data, err := os.ReadFile(filepath.Join(directory, name))
+		if err != nil {
+			return nil, fmt.Errorf("read prover bundle artifact %s: %w", name, err)
+		}
+		artifacts[name] = data
+	}
+	return LoadProverBundleBytesV1(artifacts)
 }
 
 func appendCoordinateLittleEndianV1(destination []byte, value interface{ Bytes() [32]byte }) []byte {
@@ -438,12 +521,12 @@ func proveAssignmentV1(
 		return ProofResponseV1{}, err
 	}
 	return ProofResponseV1{
-		Circuit: circuit,
-		ProofHex: hex.EncodeToString(wireProof),
-		PublicInputsHex: hex.EncodeToString(publicInputs),
-		ProofBytes: len(wireProof),
+		Circuit:          circuit,
+		ProofHex:         hex.EncodeToString(wireProof),
+		PublicInputsHex:  hex.EncodeToString(publicInputs),
+		ProofBytes:       len(wireProof),
 		PublicInputBytes: len(publicInputs),
-		BundleDigest: bundleDigest,
+		BundleDigest:     bundleDigest,
 	}, nil
 }
 
