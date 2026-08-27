@@ -1,0 +1,28 @@
+name: Watcher Protocol Client CI
+
+on:
+  push:
+    branches: [watcher-protocol]
+    paths:
+      - 'client/watcher/**'
+      - 'package.json'
+      - '.github/workflows/watcher-client.yml'
+  pull_request:
+    paths:
+      - 'client/watcher/**'
+      - 'package.json'
+      - '.github/workflows/watcher-client.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  test-client-witness:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Test registry, Merkle paths, and Circuit V1 witness generation
+        run: node --test client/watcher/*.test.mjs
