@@ -1,0 +1,20 @@
+name: Trigger Watcher Local Prover Sync
+
+on:
+  push:
+    branches: [watcher-protocol]
+    paths:
+      - '.github/workflows/watcher-prover-sync-trigger.yml'
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch matched prover sync
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run watcher-prover-sync.yml --repo "$GITHUB_REPOSITORY" --ref watcher-protocol
