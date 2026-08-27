@@ -16,7 +16,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 75
     env:
-      SOLANA_VERSION: v2.3.13
+      SOLANA_VERSION: v4.0.0
       MATCHED_PROVER_RUN_ID: '33078034559'
     steps:
       - uses: actions/checkout@v4
@@ -27,7 +27,7 @@ jobs:
         with:
           node-version: 24
 
-      - name: Install matched Agave toolchain
+      - name: Install Agave SBF toolchain
         shell: bash
         run: |
           set -euo pipefail
@@ -45,14 +45,6 @@ jobs:
         run: |
           set -euo pipefail
           cargo generate-lockfile --manifest-path programs/watcher-protocol/Cargo.toml
-          cargo update \
-            --manifest-path programs/watcher-protocol/Cargo.toml \
-            -p zeroize \
-            --precise 1.8.2
-          cargo update \
-            --manifest-path programs/watcher-protocol/Cargo.toml \
-            -p zeroize_derive \
-            --precise 1.4.2
           test -s programs/watcher-protocol/Cargo.lock
           mkdir -p target/deploy
           cargo build-sbf \
