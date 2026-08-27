@@ -31,7 +31,7 @@ jobs:
 
       - name: Build static site
         env:
-          NEXT_PUBLIC_RPC_URL: https://api.mainnet-beta.solana.com
+          NEXT_PUBLIC_RPC_URL: ${{ secrets.NEXT_PUBLIC_RPC_URL }}
           NEXT_PUBLIC_RELAYER_API_URL: https://api3.privacycash.org
           NEXT_PUBLIC_CIRCUIT_BASE_PATH: https://cdn.jsdelivr.net/gh/Privacy-Cash/solana-sdk-demo-interface@df7df0198dc202ba8d13292fd07a05b55f5d7cd3/public/circuit2
         run: npm run build
