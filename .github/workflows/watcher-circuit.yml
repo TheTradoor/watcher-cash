@@ -31,12 +31,30 @@ jobs:
         run: go test -v ./...
       - name: Generate development Groth16 fixture
         run: go run ./cmd/genfixture
+      - name: Export coordinate fixture
+        env:
+          WATCHER_EXPORT_COORDS: '1'
+        run: go test -run TestExportCoordinateFixture -v
+      - name: Validate coordinate fixture
+        run: |
+          python - <<'PY'
+          import json
+          p='fixture-out/coordinates.json'
+          d=json.load(open(p))
+          assert len(d['public_inputs']) == 10, len(d['public_inputs'])
+          assert len(d['vk']['ic']) == 11, len(d['vk']['ic'])
+          assert all(len(v)==64 for v in d['proof'].values())
+          assert all(len(v)==64 for v in d['public_inputs'])
+          print('coordinate fixture valid: 10 inputs, 11 IC points')
+          PY
       - name: Show fixture manifest
         run: cat testdata/v1_fixture/manifest.json
       - name: Upload development fixture
         uses: actions/upload-artifact@v4
         with:
           name: watcher-circuit-v1-dev-fixture
-          path: circuits/withdraw/testdata/v1_fixture/
+          path: |
+            circuits/withdraw/testdata/v1_fixture/
+            circuits/withdraw/fixture-out/coordinates.json
           if-no-files-found: error
           retention-days: 7
