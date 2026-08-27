@@ -6,16 +6,14 @@ use crate::{
     },
     WatcherError, WithdrawalStatement,
 };
-use groth16_solana::groth16::verify_groth16_strict;
+use groth16_solana::groth16::{Groth16Verifier, Groth16Verifyingkey};
 
 pub const GROTH16_BN254_PROOF_BYTES: usize = 256;
-const DEPOSIT_PUBLIC_INPUT_BYTES: usize = 3 * 32;
-const WITHDRAW_PUBLIC_INPUT_BYTES: usize = 10 * 32;
 
 // The existing circuit/exporter wire format is little-endian per 32-byte field.
 // groth16-solana consumes the same point/component order in big-endian form.
 // Converting the static VKs in const-eval keeps the on-chain hot path limited to
-// the proof/public-input conversion plus the native alt_bn128 syscalls.
+// proof/public-input conversion plus the native alt_bn128 syscalls.
 const fn field_chunks_le_to_be<const N: usize>(input: [u8; N]) -> [u8; N] {
     let mut output = [0u8; N];
     let mut chunk = 0usize;
@@ -30,8 +28,63 @@ const fn field_chunks_le_to_be<const N: usize>(input: [u8; N]) -> [u8; N] {
     output
 }
 
+const fn take_bytes<const SOURCE: usize, const OUTPUT: usize>(
+    source: &[u8; SOURCE],
+    start: usize,
+) -> [u8; OUTPUT] {
+    let mut output = [0u8; OUTPUT];
+    let mut index = 0usize;
+    while index < OUTPUT {
+        output[index] = source[start + index];
+        index += 1;
+    }
+    output
+}
+
+const fn take_g1_points<const SOURCE: usize, const POINTS: usize>(
+    source: &[u8; SOURCE],
+    start: usize,
+) -> [[u8; 64]; POINTS] {
+    let mut output = [[0u8; 64]; POINTS];
+    let mut point = 0usize;
+    while point < POINTS {
+        let mut byte = 0usize;
+        while byte < 64 {
+            output[point][byte] = source[start + point * 64 + byte];
+            byte += 1;
+        }
+        point += 1;
+    }
+    output
+}
+
 const DEV_DEPOSIT_VK_BE_BYTES: [u8; 704] = field_chunks_le_to_be(DEV_DEPOSIT_VK_BYTES);
 const DEV_WITHDRAW_VK_BE_BYTES: [u8; 1152] = field_chunks_le_to_be(DEV_VK_BYTES);
+
+static DEV_DEPOSIT_IC_BE: [[u8; 64]; 4] =
+    take_g1_points::<704, 4>(&DEV_DEPOSIT_VK_BE_BYTES, 448);
+static DEV_WITHDRAW_IC_BE: [[u8; 64]; 11] =
+    take_g1_points::<1152, 11>(&DEV_WITHDRAW_VK_BE_BYTES, 448);
+
+static DEV_DEPOSIT_VERIFYING_KEY: Groth16Verifyingkey<'static> = Groth16Verifyingkey {
+    nr_pubinputs: 3,
+    vk_alpha_g1: take_bytes::<704, 64>(&DEV_DEPOSIT_VK_BE_BYTES, 0),
+    vk_beta_g2: take_bytes::<704, 128>(&DEV_DEPOSIT_VK_BE_BYTES, 64),
+    vk_gamma_g2: take_bytes::<704, 128>(&DEV_DEPOSIT_VK_BE_BYTES, 192),
+    vk_delta_g2: take_bytes::<704, 128>(&DEV_DEPOSIT_VK_BE_BYTES, 320),
+    vk_ic: &DEV_DEPOSIT_IC_BE,
+    vk_commitment: None,
+};
+
+static DEV_WITHDRAW_VERIFYING_KEY: Groth16Verifyingkey<'static> = Groth16Verifyingkey {
+    nr_pubinputs: 10,
+    vk_alpha_g1: take_bytes::<1152, 64>(&DEV_WITHDRAW_VK_BE_BYTES, 0),
+    vk_beta_g2: take_bytes::<1152, 128>(&DEV_WITHDRAW_VK_BE_BYTES, 64),
+    vk_gamma_g2: take_bytes::<1152, 128>(&DEV_WITHDRAW_VK_BE_BYTES, 192),
+    vk_delta_g2: take_bytes::<1152, 128>(&DEV_WITHDRAW_VK_BE_BYTES, 320),
+    vk_ic: &DEV_WITHDRAW_IC_BE,
+    vk_commitment: None,
+};
 
 fn proof_le_to_be(proof: &[u8]) -> Result<[u8; GROTH16_BN254_PROOF_BYTES], WatcherError> {
     if proof.len() != GROTH16_BN254_PROOF_BYTES {
@@ -50,55 +103,66 @@ fn proof_le_to_be(proof: &[u8]) -> Result<[u8; GROTH16_BN254_PROOF_BYTES], Watch
     Ok(output)
 }
 
-fn write_be_field(output: &mut [u8], index: usize, field_le: &[u8; 32]) {
-    let start = index * 32;
-    let mut offset = 0usize;
-    while offset < 32 {
-        output[start + offset] = field_le[31 - offset];
-        offset += 1;
-    }
-}
-
-fn deposit_public_inputs_be(inputs: &DepositV1PublicInputs) -> [u8; DEPOSIT_PUBLIC_INPUT_BYTES] {
-    let mut output = [0u8; DEPOSIT_PUBLIC_INPUT_BYTES];
-    write_be_field(&mut output, 0, &inputs.commitment);
-    write_be_field(&mut output, 1, &inputs.amount);
-    write_be_field(&mut output, 2, &inputs.asset_id);
-    output
-}
-
-fn withdraw_public_inputs_be(inputs: &CircuitV1PublicInputs) -> [u8; WITHDRAW_PUBLIC_INPUT_BYTES] {
-    let mut output = [0u8; WITHDRAW_PUBLIC_INPUT_BYTES];
-    let fields = [
-        inputs.merkle_root,
-        inputs.nullifier_0,
-        inputs.nullifier_1,
-        inputs.change_commitment,
-        inputs.public_amount,
-        inputs.protocol_fee,
-        inputs.relayer_fee,
-        inputs.recipient_binding,
-        inputs.asset_id,
-        inputs.context_binding,
-    ];
+fn field_le_to_be(field_le: &[u8; 32]) -> [u8; 32] {
+    let mut output = [0u8; 32];
     let mut index = 0usize;
-    while index < fields.len() {
-        write_be_field(&mut output, index, &fields[index]);
+    while index < 32 {
+        output[index] = field_le[31 - index];
         index += 1;
     }
     output
 }
 
-fn verify_native(
-    verifying_key: &[u8],
+fn deposit_public_inputs_be(inputs: &DepositV1PublicInputs) -> [[u8; 32]; 3] {
+    [
+        field_le_to_be(&inputs.commitment),
+        field_le_to_be(&inputs.amount),
+        field_le_to_be(&inputs.asset_id),
+    ]
+}
+
+fn withdraw_public_inputs_be(inputs: &CircuitV1PublicInputs) -> [[u8; 32]; 10] {
+    [
+        field_le_to_be(&inputs.merkle_root),
+        field_le_to_be(&inputs.nullifier_0),
+        field_le_to_be(&inputs.nullifier_1),
+        field_le_to_be(&inputs.change_commitment),
+        field_le_to_be(&inputs.public_amount),
+        field_le_to_be(&inputs.protocol_fee),
+        field_le_to_be(&inputs.relayer_fee),
+        field_le_to_be(&inputs.recipient_binding),
+        field_le_to_be(&inputs.asset_id),
+        field_le_to_be(&inputs.context_binding),
+    ]
+}
+
+fn verify_native<const INPUTS: usize>(
+    verifying_key: &'static Groth16Verifyingkey<'static>,
     proof_le: &[u8],
-    public_inputs_be: &[u8],
+    public_inputs_be: &[[u8; 32]; INPUTS],
 ) -> Result<(), WatcherError> {
     let proof_be = proof_le_to_be(proof_le)?;
-    match verify_groth16_strict(verifying_key, &proof_be, public_inputs_be) {
-        Ok(true) => Ok(()),
-        Ok(false) | Err(_) => Err(WatcherError::InvalidGroth16Proof),
-    }
+    let proof_a: &[u8; 64] = proof_be[0..64]
+        .try_into()
+        .map_err(|_| WatcherError::InvalidProofEncoding)?;
+    let proof_b: &[u8; 128] = proof_be[64..192]
+        .try_into()
+        .map_err(|_| WatcherError::InvalidProofEncoding)?;
+    let proof_c: &[u8; 64] = proof_be[192..256]
+        .try_into()
+        .map_err(|_| WatcherError::InvalidProofEncoding)?;
+
+    let mut verifier = Groth16Verifier::<INPUTS>::new(
+        proof_a,
+        proof_b,
+        proof_c,
+        public_inputs_be,
+        verifying_key,
+    )
+    .map_err(|_| WatcherError::InvalidGroth16Proof)?;
+    verifier
+        .verify()
+        .map_err(|_| WatcherError::InvalidGroth16Proof)
 }
 
 pub fn verify_deposit_v1(
@@ -111,7 +175,7 @@ pub fn verify_deposit_v1(
     let inputs = DepositV1PublicInputs::decode(public_input_bytes)?;
     validate_deposit_binding(commitment, amount, expected_asset_id, &inputs)?;
     let public_inputs_be = deposit_public_inputs_be(&inputs);
-    verify_native(&DEV_DEPOSIT_VK_BE_BYTES, proof, &public_inputs_be)
+    verify_native(&DEV_DEPOSIT_VERIFYING_KEY, proof, &public_inputs_be)
 }
 
 pub fn verify_circuit_v1(
@@ -131,5 +195,5 @@ pub fn verify_circuit_v1(
         &inputs,
     )?;
     let public_inputs_be = withdraw_public_inputs_be(&inputs);
-    verify_native(&DEV_WITHDRAW_VK_BE_BYTES, proof, &public_inputs_be)
+    verify_native(&DEV_WITHDRAW_VERIFYING_KEY, proof, &public_inputs_be)
 }
