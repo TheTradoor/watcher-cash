@@ -1,0 +1,205 @@
+name: Watcher BPF End-to-End Validation
+
+on:
+  push:
+    branches: [watcher-protocol]
+    paths:
+      - '.github/workflows/watcher-bpf-e2e.yml'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: watcher-bpf-e2e
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: watcher-protocol
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Install Node dependencies
+        id: npm
+        continue-on-error: true
+        run: |
+          mkdir -p .github/bpf-e2e-diagnostics
+          npm install > .github/bpf-e2e-diagnostics/npm.log 2>&1
+
+      - name: Install Agave CLI
+        id: agave
+        continue-on-error: true
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSfL https://release.anza.xyz/v2.3.13/install | sh > .github/bpf-e2e-diagnostics/agave-install.log 2>&1
+          echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/share/solana/install/active_release/bin/solana" --version >> .github/bpf-e2e-diagnostics/agave-install.log
+
+      - name: Build Watcher SBF program
+        id: build
+        if: steps.npm.outcome == 'success' && steps.agave.outcome == 'success'
+        continue-on-error: true
+        env:
+          PATH: ${{ env.HOME }}/.local/share/solana/install/active_release/bin:${{ env.PATH }}
+        run: |
+          cargo build-sbf \
+            --manifest-path programs/watcher-protocol/Cargo.toml \
+            --sbf-out-dir target/deploy \
+            > .github/bpf-e2e-diagnostics/build-sbf.log 2>&1
+          test -s target/deploy/watcher_protocol_program.so
+          ls -lh target/deploy/watcher_protocol_program.so >> .github/bpf-e2e-diagnostics/build-sbf.log
+
+      - name: Deploy to local validator
+        id: deploy
+        if: steps.build.outcome == 'success'
+        continue-on-error: true
+        env:
+          PATH: ${{ env.HOME }}/.local/share/solana/install/active_release/bin:${{ env.PATH }}
+        run: |
+          set -euo pipefail
+          solana-keygen new --no-bip39-passphrase --force --silent -o /tmp/watcher-payer.json
+          solana-keygen new --no-bip39-passphrase --force --silent -o /tmp/watcher-program.json
+          solana-test-validator \
+            --reset \
+            --quiet \
+            --ledger /tmp/watcher-ledger \
+            > .github/bpf-e2e-diagnostics/validator.log 2>&1 &
+          echo $! > /tmp/watcher-validator.pid
+          for attempt in $(seq 1 60); do
+            if solana cluster-version --url http://127.0.0.1:8899 >/dev/null 2>&1; then
+              break
+            fi
+            sleep 1
+          done
+          solana cluster-version --url http://127.0.0.1:8899 >> .github/bpf-e2e-diagnostics/deploy.log
+          solana airdrop 100 \
+            --url http://127.0.0.1:8899 \
+            --keypair /tmp/watcher-payer.json \
+            >> .github/bpf-e2e-diagnostics/deploy.log
+          solana program deploy target/deploy/watcher_protocol_program.so \
+            --url http://127.0.0.1:8899 \
+            --keypair /tmp/watcher-payer.json \
+            --program-id /tmp/watcher-program.json \
+            >> .github/bpf-e2e-diagnostics/deploy.log 2>&1
+          solana address -k /tmp/watcher-program.json > /tmp/watcher-program-id
+          printf 'program_id=%s\n' "$(cat /tmp/watcher-program-id)" >> "$GITHUB_OUTPUT"
+
+      - name: Execute proof-bound deposits and withdrawal
+        id: e2e
+        if: steps.deploy.outcome == 'success'
+        continue-on-error: true
+        env:
+          PATH: ${{ env.HOME }}/.local/share/solana/install/active_release/bin:${{ env.PATH }}
+          WATCHER_RPC_URL: http://127.0.0.1:8899
+          WATCHER_ALLOW_NON_DEVNET: I_UNDERSTAND_THIS_IS_A_DEVELOPMENT_SETUP
+          WATCHER_PAYER_KEYPAIR: /tmp/watcher-payer.json
+          WATCHER_PROGRAM_ID: ${{ steps.deploy.outputs.program_id }}
+          WATCHER_BUNDLE_CACHE: /tmp/watcher-prover-cache
+          WATCHER_RECOVERY_FILE: /tmp/watcher-e2e-recovery.json
+        run: |
+          node scripts/watcher-devnet-e2e.mjs \
+            > .github/bpf-e2e-diagnostics/e2e-output.json \
+            2> .github/bpf-e2e-diagnostics/e2e-error.log
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          result = json.loads(Path('.github/bpf-e2e-diagnostics/e2e-output.json').read_text())
+          assert result['deltas']['recipient'] == result['expected']['recipient']
+          assert result['deltas']['relayer'] == result['expected']['relayer']
+          assert result['deltas']['vault'] == result['expected']['vault']
+          sanitized = {
+              'cluster': result['cluster'],
+              'signatures': result['signatures'],
+              'accounts': result['accounts'],
+              'deltas': result['deltas'],
+              'expected': result['expected'],
+          }
+          Path('.github/bpf-e2e-diagnostics/e2e-result.json').write_text(
+              json.dumps(sanitized, indent=2) + '\n'
+          )
+          Path('.github/bpf-e2e-diagnostics/e2e-output.json').unlink()
+          PY
+
+      - name: Stop validator and remove private material
+        if: always()
+        run: |
+          if test -f /tmp/watcher-validator.pid; then
+            kill "$(cat /tmp/watcher-validator.pid)" >/dev/null 2>&1 || true
+          fi
+          rm -rf \
+            /tmp/watcher-payer.json \
+            /tmp/watcher-program.json \
+            /tmp/watcher-e2e-recovery.json \
+            /tmp/watcher-prover-cache \
+            /tmp/watcher-ledger
+
+      - name: Record validation result
+        if: always()
+        env:
+          NPM: ${{ steps.npm.outcome }}
+          AGAVE: ${{ steps.agave.outcome }}
+          BUILD: ${{ steps.build.outcome }}
+          DEPLOY: ${{ steps.deploy.outcome }}
+          E2E: ${{ steps.e2e.outcome }}
+        run: |
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+
+          root = Path('.github/bpf-e2e-diagnostics')
+          root.mkdir(parents=True, exist_ok=True)
+          outcomes = {
+              'npm': os.environ.get('NPM', 'skipped'),
+              'agave': os.environ.get('AGAVE', 'skipped'),
+              'build_sbf': os.environ.get('BUILD', 'skipped'),
+              'deploy_local_validator': os.environ.get('DEPLOY', 'skipped'),
+              'proof_bound_e2e': os.environ.get('E2E', 'skipped'),
+          }
+          (root / 'status.json').write_text(json.dumps(outcomes, indent=2) + '\n')
+          all_green = all(value == 'success' for value in outcomes.values())
+          if all_green:
+              Path('client/watcher/.bpf-e2e-ready').write_text(
+                  'SBF build: pass\n'
+                  'local validator deployment: pass\n'
+                  'proof-bound deposits: pass\n'
+                  'proof-bound withdrawal and payouts: pass\n'
+              )
+              for path in root.glob('*.log'):
+                  path.unlink()
+              Path('.github/workflows/watcher-bpf-e2e.yml').unlink(missing_ok=True)
+          else:
+              for path in root.glob('*.log'):
+                  lines = path.read_text(errors='replace').splitlines()
+                  path.write_text('\n'.join(lines[-160:]) + '\n')
+          PY
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'Record Watcher BPF end-to-end validation'
+          git push origin HEAD:watcher-protocol || {
+            git pull --rebase origin watcher-protocol
+            git push origin HEAD:watcher-protocol
+          }
+
+      - name: Fail when any validation stage failed
+        if: always()
+        env:
+          NPM: ${{ steps.npm.outcome }}
+          AGAVE: ${{ steps.agave.outcome }}
+          BUILD: ${{ steps.build.outcome }}
+          DEPLOY: ${{ steps.deploy.outcome }}
+          E2E: ${{ steps.e2e.outcome }}
+        run: |
+          test "$NPM" = success
+          test "$AGAVE" = success
+          test "$BUILD" = success
+          test "$DEPLOY" = success
+          test "$E2E" = success
