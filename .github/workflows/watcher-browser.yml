@@ -1,0 +1,117 @@
+name: Watcher Browser Prover CI
+
+on:
+  push:
+    branches: [watcher-protocol]
+    paths:
+      - 'app/**'
+      - 'client/watcher/**'
+      - 'circuits/withdraw/**'
+      - 'scripts/test-browser-prover-wasm.mjs'
+      - 'scripts/watcher-devnet-bootstrap.mjs'
+      - 'package.json'
+      - 'next.config.mjs'
+      - '.github/workflows/watcher-browser.yml'
+  pull_request:
+    paths:
+      - 'app/**'
+      - 'client/watcher/**'
+      - 'circuits/withdraw/**'
+      - 'scripts/test-browser-prover-wasm.mjs'
+      - 'package.json'
+      - 'next.config.mjs'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: watcher-browser-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  browser-prover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+          cache-dependency-path: circuits/withdraw/go.sum
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Test Go circuits and browser bridge
+        working-directory: circuits/withdraw
+        run: |
+          go mod tidy
+          go test ./...
+          rm -rf fixture-out/browser-prover
+          go run ./cmd/watcher-setup \
+            --bundle-out fixture-out/browser-prover \
+            --rust-out ../../programs/watcher-protocol/src
+          GOOS=js GOARCH=wasm go build \
+            -trimpath \
+            -ldflags='-s -w' \
+            -o fixture-out/browser-prover/watcher-prover.wasm \
+            ./cmd/watcher-prover-wasm
+          WASM_EXEC="$(go env GOROOT)/lib/wasm/wasm_exec.js"
+          if [ ! -f "$WASM_EXEC" ]; then
+            WASM_EXEC="$(go env GOROOT)/misc/wasm/wasm_exec.js"
+          fi
+          test -f "$WASM_EXEC"
+          cp "$WASM_EXEC" fixture-out/browser-prover/wasm_exec.js
+          cp ../../client/watcher/browser-prover.worker.js fixture-out/browser-prover/worker.js
+
+      - name: Prove deposit and withdrawal inside WebAssembly
+        run: |
+          node scripts/test-browser-prover-wasm.mjs \
+            circuits/withdraw/fixture-out/browser-prover \
+            circuits/withdraw/fixture-out/browser-prover/watcher-prover.wasm \
+            circuits/withdraw/fixture-out/browser-prover/wasm_exec.js
+
+      - name: Install web dependencies and test client
+        run: |
+          npm install
+          npm run test:watcher-client
+          node --check client/watcher/browser-prover.worker.js
+          node --check client/watcher/browser-prover.mjs
+          node --check client/watcher/vault.mjs
+
+      - name: Test matched Solana verifier
+        working-directory: programs/watcher-protocol
+        run: cargo test --all-targets
+
+      - name: Assemble static browser assets
+        run: |
+          rm -rf public/watcher-prover
+          mkdir -p public/watcher-prover/assets
+          cp circuits/withdraw/fixture-out/browser-prover/watcher-prover.wasm public/watcher-prover/
+          cp circuits/withdraw/fixture-out/browser-prover/wasm_exec.js public/watcher-prover/
+          cp client/watcher/browser-prover.worker.js public/watcher-prover/worker.js
+          for name in deposit.r1cs deposit.pk deposit.vk withdraw.r1cs withdraw.pk withdraw.vk manifest.json; do
+            cp "circuits/withdraw/fixture-out/browser-prover/$name" public/watcher-prover/assets/
+          done
+          du -h public/watcher-prover/* public/watcher-prover/assets/*
+
+      - name: Build static Watcher site
+        env:
+          NEXT_PUBLIC_RPC_URL: https://api.devnet.solana.com
+          NEXT_PUBLIC_WATCHER_RUNTIME_URL: /watcher-cash/watcher-protocol/devnet.json
+          NEXT_PUBLIC_WATCHER_PROVER_BASE: /watcher-cash/watcher-prover
+        run: npm run build
+
+      - name: Upload browser proof bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: watcher-browser-prover
+          path: |
+            public/watcher-prover/
+            out/
+          if-no-files-found: error
+          retention-days: 7
