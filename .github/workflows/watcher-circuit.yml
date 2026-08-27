@@ -51,7 +51,6 @@ jobs:
           python - <<'PY'
           import json, pathlib
           d=json.load(open('fixture-out/coordinates.json'))
-          # BN254 base-field modulus. xark requires proof A pre-negated.
           q=21888242871839275222246405745257275088696311157297823662689037894645226208583
           def le(h): return bytes.fromhex(h)[::-1]
           def arr(b): return '['+','.join(f'0x{x:02x}' for x in b)+']\n'
@@ -81,6 +80,8 @@ jobs:
             echo 'fixture unchanged'
           else
             git commit -m 'Sync matched Circuit V1 verifier fixture [skip circuit]'
+            git fetch origin watcher-protocol
+            git rebase origin/watcher-protocol
             git push origin HEAD:watcher-protocol
           fi
       - name: Show fixture manifest
