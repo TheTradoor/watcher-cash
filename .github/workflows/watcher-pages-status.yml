@@ -1,0 +1,95 @@
+name: Record Watcher Pages Deployment
+
+on:
+  workflow_run:
+    workflows: ['Deploy Watcher Cash to GitHub Pages']
+    types: [completed]
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  success:
+    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'watcher-protocol'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: watcher-protocol
+          fetch-depth: 0
+      - name: Record live deployment
+        env:
+          DEPLOYED_SHA: ${{ github.event.workflow_run.head_sha }}
+          DEPLOY_RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          cat > WATCHER_PAGES_STATUS.md <<EOF
+          # Watcher Pages Status
+
+          Status: LIVE
+          Branch: watcher-protocol
+          Commit: ${DEPLOYED_SHA}
+          Pages workflow run: ${DEPLOY_RUN_ID}
+          URL: https://thetradoor.github.io/watcher-cash/
+
+          Deployment includes:
+          - migrated Watcher Protocol UI
+          - matched Groth16 proving artifacts
+          - Go WebAssembly prover
+          - isolated browser Web Worker
+          - devnet-only transaction guard
+          EOF
+      - name: Publish live marker
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add WATCHER_PAGES_STATUS.md
+          if git diff --cached --quiet; then exit 0; fi
+          git commit -m 'Record live Watcher browser prover deployment'
+          git pull --rebase origin watcher-protocol
+          git push origin HEAD:watcher-protocol
+
+  failure:
+    if: github.event.workflow_run.conclusion == 'failure' && github.event.workflow_run.head_branch == 'watcher-protocol'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: watcher-protocol
+          fetch-depth: 0
+      - name: Download Pages workflow logs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          mkdir -p /tmp/pages-logs
+          curl --fail --silent --show-error --location \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H 'Accept: application/vnd.github+json' \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}/logs" \
+            --output /tmp/pages-logs.zip
+          unzip -q /tmp/pages-logs.zip -d /tmp/pages-logs
+      - name: Record bounded deployment failure
+        env:
+          FAILED_SHA: ${{ github.event.workflow_run.head_sha }}
+          FAILED_RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          {
+            echo '# Watcher Pages Failure'
+            echo
+            echo "Commit: ${FAILED_SHA}"
+            echo "Run: ${FAILED_RUN_ID}"
+            echo
+            echo '```text'
+            grep -R -n -E 'error|failed|failure|not found|missing|panic' /tmp/pages-logs | tail -n 240 || true
+            echo '```'
+          } > WATCHER_PAGES_FAILURE.md
+      - name: Publish failure marker
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add WATCHER_PAGES_FAILURE.md
+          if git diff --cached --quiet; then exit 0; fi
+          git commit -m 'Record Watcher Pages deployment failure'
+          git pull --rebase origin watcher-protocol
+          git push origin HEAD:watcher-protocol
