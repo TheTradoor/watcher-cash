@@ -1,0 +1,26 @@
+name: Watcher Protocol Program CI
+
+on:
+  push:
+    branches: [watcher-protocol]
+    paths:
+      - 'programs/watcher-protocol/**'
+      - '.github/workflows/watcher-program.yml'
+  pull_request:
+    paths:
+      - 'programs/watcher-protocol/**'
+
+permissions:
+  contents: read
+
+jobs:
+  test-program-core:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: programs/watcher-protocol
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Test state machine
+        run: cargo test --all-targets --locked || cargo test --all-targets
