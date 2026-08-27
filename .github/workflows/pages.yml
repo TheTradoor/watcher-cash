@@ -1,8 +1,18 @@
-name: Deploy Watcher Cash to GitHub Pages
+name: Deploy Watcher Protocol to GitHub Pages
 
 on:
   push:
-    branches: [main]
+    branches: [watcher-protocol]
+    paths:
+      - 'app/**'
+      - 'client/watcher/**'
+      - 'circuits/withdraw/**'
+      - 'programs/watcher-protocol/**'
+      - 'scripts/watcher-devnet-bootstrap.mjs'
+      - 'scripts/test-browser-prover-wasm.mjs'
+      - 'package.json'
+      - 'next.config.mjs'
+      - '.github/workflows/pages.yml'
   workflow_dispatch:
 
 permissions:
@@ -11,37 +21,219 @@ permissions:
   id-token: write
 
 concurrency:
-  group: pages
+  group: watcher-pages
   cancel-in-progress: true
+
+env:
+  SOLANA_VERSION: v4.0.0
+  PUBLIC_DEVNET_RPC: https://api.devnet.solana.com
+  NEXT_PUBLIC_BASE_PATH: /watcher-cash
+  NEXT_PUBLIC_RPC_URL: https://api.devnet.solana.com
+  NEXT_PUBLIC_WATCHER_RUNTIME_URL: /watcher-cash/watcher-protocol/devnet.json
+  NEXT_PUBLIC_WATCHER_PROVER_BASE: /watcher-cash/watcher-prover
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 120
     steps:
-      - name: Checkout
+      - name: Checkout Watcher protocol branch
         uses: actions/checkout@v4
 
-      - name: Setup Node
+      - name: Setup Node 24
         uses: actions/setup-node@v4
         with:
           node-version: 24
 
-      - name: Install dependencies
-        run: npm install
+      - name: Setup Go 1.25
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+          cache-dependency-path: circuits/withdraw/go.sum
 
-      - name: Build static site
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Agave SBF toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 \
+            "https://github.com/anza-xyz/agave/releases/download/${SOLANA_VERSION}/solana-release-x86_64-unknown-linux-gnu.tar.bz2" \
+            --output /tmp/solana-release.tar.bz2
+          mkdir -p /tmp/solana-release
+          tar -xjf /tmp/solana-release.tar.bz2 -C /tmp/solana-release --strip-components=1
+          echo "/tmp/solana-release/bin" >> "$GITHUB_PATH"
+          /tmp/solana-release/bin/solana --version
+          /tmp/solana-release/bin/cargo-build-sbf --version
+
+      - name: Install web dependencies
+        run: npm install --ignore-scripts --no-audit --no-fund
+
+      - name: Generate one matched circuit, prover, and verifier bundle
+        working-directory: circuits/withdraw
+        run: |
+          set -euo pipefail
+          go mod tidy
+          go test ./...
+          rm -rf fixture-out/pages-prover
+          go run ./cmd/watcher-setup \
+            --bundle-out fixture-out/pages-prover \
+            --rust-out ../../programs/watcher-protocol/src
+          GOOS=js GOARCH=wasm go build \
+            -trimpath \
+            -ldflags='-s -w' \
+            -o fixture-out/pages-prover/watcher-prover.wasm \
+            ./cmd/watcher-prover-wasm
+          WASM_EXEC="$(go env GOROOT)/lib/wasm/wasm_exec.js"
+          if [ ! -f "$WASM_EXEC" ]; then
+            WASM_EXEC="$(go env GOROOT)/misc/wasm/wasm_exec.js"
+          fi
+          test -f "$WASM_EXEC"
+          cp "$WASM_EXEC" fixture-out/pages-prover/wasm_exec.js
+
+      - name: Verify browser-local deposit and withdrawal proving
+        run: |
+          node scripts/test-browser-prover-wasm.mjs \
+            circuits/withdraw/fixture-out/pages-prover \
+            circuits/withdraw/fixture-out/pages-prover/watcher-prover.wasm \
+            circuits/withdraw/fixture-out/pages-prover/wasm_exec.js
+          npm run test:watcher-client
+
+      - name: Build and test the exact matched Solana program
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --manifest-path programs/watcher-protocol/Cargo.toml --all-targets
+          cargo generate-lockfile --manifest-path programs/watcher-protocol/Cargo.toml
+          rm -rf target/deploy
+          mkdir -p target/deploy
+          cargo build-sbf \
+            --arch v3 \
+            --manifest-path programs/watcher-protocol/Cargo.toml \
+            --sbf-out-dir target/deploy
+          test -s target/deploy/watcher_protocol_program.so
+          readelf --header target/deploy/watcher_protocol_program.so | grep 'Flags:.*0x3'
+          sha256sum target/deploy/watcher_protocol_program.so | tee /tmp/watcher-program-sha256.txt
+
+      - name: Deploy an ephemeral immutable-by-key-loss devnet instance
         env:
-          NEXT_PUBLIC_RPC_URL: ${{ secrets.NEXT_PUBLIC_RPC_URL }}
-          NEXT_PUBLIC_RELAYER_API_URL: https://api3.privacycash.org
-          NEXT_PUBLIC_CIRCUIT_BASE_PATH: https://cdn.jsdelivr.net/gh/Privacy-Cash/solana-sdk-demo-interface@df7df0198dc202ba8d13292fd07a05b55f5d7cd3/public/circuit2
+          WATCHER_DEPLOY_RPC: ${{ secrets.NEXT_PUBLIC_RPC_URL }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          RPC="${WATCHER_DEPLOY_RPC:-$PUBLIC_DEVNET_RPC}"
+          PAYER=/tmp/watcher-pages-payer.json
+          PROGRAM=/tmp/watcher-pages-program.json
+          trap 'rm -f "$PAYER" "$PROGRAM"' EXIT
+
+          solana-keygen new --silent --no-bip39-passphrase --force --outfile "$PAYER"
+          solana-keygen new --silent --no-bip39-passphrase --force --outfile "$PROGRAM"
+          PAYER_ADDRESS=$(solana address --keypair "$PAYER")
+          PROGRAM_ID=$(solana address --keypair "$PROGRAM")
+          echo "program_id=$PROGRAM_ID" | tee /tmp/watcher-public-deployment.txt
+
+          required_lamports=4500000000
+          for attempt in $(seq 1 15); do
+            current=$(solana balance "$PAYER_ADDRESS" --url "$RPC" --lamports 2>/dev/null | awk '{print $1}' || echo 0)
+            current=${current:-0}
+            echo "Devnet payer balance attempt ${attempt}: ${current} lamports"
+            if [ "$current" -ge "$required_lamports" ]; then
+              break
+            fi
+            solana airdrop 2 "$PAYER_ADDRESS" --url "$RPC" --commitment confirmed || true
+            sleep $((attempt < 5 ? 8 : 18))
+          done
+          current=$(solana balance "$PAYER_ADDRESS" --url "$RPC" --lamports | awk '{print $1}')
+          if [ "$current" -lt "$required_lamports" ]; then
+            echo "Devnet faucet did not fund the ephemeral deployment payer." >&2
+            exit 1
+          fi
+
+          solana program deploy \
+            --url "$RPC" \
+            --keypair "$PAYER" \
+            --program-id "$PROGRAM" \
+            target/deploy/watcher_protocol_program.so \
+            | tee /tmp/watcher-deploy.log
+
+          WATCHER_PROGRAM_ID="$PROGRAM_ID" \
+          WATCHER_PAYER_KEYPAIR="$PAYER" \
+          WATCHER_RPC_URL="$RPC" \
+          WATCHER_PUBLIC_RPC_URL="$PUBLIC_DEVNET_RPC" \
+          WATCHER_PUBLIC_BASE_PATH="$NEXT_PUBLIC_BASE_PATH" \
+          WATCHER_RUNTIME_OUT=public/watcher-protocol/devnet.json \
+          node scripts/watcher-devnet-bootstrap.mjs \
+            | tee /tmp/watcher-bootstrap.log
+
+          jq '{
+            cluster,
+            genesisHash,
+            programId,
+            config,
+            commitments,
+            nullifiers,
+            rootHistory,
+            vault,
+            treasury,
+            relayer,
+            commitmentCapacity,
+            createdAt,
+            transactions
+          }' public/watcher-protocol/devnet.json > /tmp/watcher-deployment-evidence.json
+
+          rm -f "$PAYER" "$PROGRAM"
+          test ! -e "$PAYER"
+          test ! -e "$PROGRAM"
+
+      - name: Assemble matched browser prover assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf public/watcher-prover
+          mkdir -p public/watcher-prover/assets
+          cp circuits/withdraw/fixture-out/pages-prover/watcher-prover.wasm public/watcher-prover/
+          cp circuits/withdraw/fixture-out/pages-prover/wasm_exec.js public/watcher-prover/
+          cp client/watcher/browser-prover.worker.js public/watcher-prover/worker.js
+          for name in deposit.r1cs deposit.pk deposit.vk withdraw.r1cs withdraw.pk withdraw.vk manifest.json; do
+            cp "circuits/withdraw/fixture-out/pages-prover/$name" public/watcher-prover/assets/
+          done
+          test -s public/watcher-prover/watcher-prover.wasm
+          test -s public/watcher-prover/assets/manifest.json
+          du -h public/watcher-prover/* public/watcher-prover/assets/*
+
+      - name: Build static Watcher interface
         run: npm run build
 
-      - name: Configure Pages
+      - name: Verify exported runtime and prover paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s out/watcher-protocol/devnet.json
+          test -s out/watcher-prover/worker.js
+          test -s out/watcher-prover/wasm_exec.js
+          test -s out/watcher-prover/watcher-prover.wasm
+          test -s out/watcher-prover/assets/deposit.pk
+          test -s out/watcher-prover/assets/withdraw.pk
+          ! grep -R --line-number --fixed-strings 'privacycash' out/_next/static || true
+
+      - name: Upload sanitized deployment evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: watcher-pages-devnet-deployment
+          path: |
+            /tmp/watcher-public-deployment.txt
+            /tmp/watcher-program-sha256.txt
+            /tmp/watcher-deployment-evidence.json
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Configure GitHub Pages
         uses: actions/configure-pages@v5
         with:
           enablement: true
 
-      - name: Upload artifact
+      - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
           path: ./out
@@ -53,6 +245,6 @@ jobs:
     runs-on: ubuntu-latest
     needs: build
     steps:
-      - name: Deploy to GitHub Pages
+      - name: Deploy matched Watcher interface
         id: deployment
         uses: actions/deploy-pages@v4
