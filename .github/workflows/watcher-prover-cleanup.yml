@@ -1,0 +1,30 @@
+name: Clean Watcher Prover Diagnostics
+
+on:
+  push:
+    branches: [watcher-protocol]
+    paths:
+      - '.github/workflows/watcher-prover-cleanup.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: watcher-protocol
+          fetch-depth: 0
+      - name: Remove one-time diagnostics
+        run: |
+          rm -rf .github/prover-diagnostics
+          rm -f \
+            .github/workflows/watcher-prover-diagnostics.yml \
+            .github/workflows/watcher-prover-cleanup.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'Remove temporary Watcher prover diagnostics'
+          git push origin HEAD:watcher-protocol
