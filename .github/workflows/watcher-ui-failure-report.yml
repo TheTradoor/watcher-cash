@@ -1,0 +1,65 @@
+name: Record Watcher Browser UI Failure
+
+on:
+  workflow_run:
+    workflows: ['Watcher Protocol Browser UI CI']
+    types: [completed]
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  report:
+    if: github.event.workflow_run.conclusion == 'failure' && github.event.workflow_run.head_branch == 'watcher-protocol'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: watcher-protocol
+          fetch-depth: 0
+
+      - name: Download failed workflow logs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          mkdir -p /tmp/watcher-ui-logs
+          curl --fail --silent --show-error --location \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H 'Accept: application/vnd.github+json' \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}/logs" \
+            --output /tmp/watcher-ui-logs.zip
+          unzip -q /tmp/watcher-ui-logs.zip -d /tmp/watcher-ui-logs
+
+      - name: Write a bounded diagnostic report
+        env:
+          FAILED_SHA: ${{ github.event.workflow_run.head_sha }}
+          FAILED_RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          {
+            echo '# Watcher Browser UI Failure'
+            echo
+            echo "Commit: ${FAILED_SHA}"
+            echo "Run: ${FAILED_RUN_ID}"
+            echo
+            echo '```text'
+            grep -R -n -E '(^|[^a-z])(error|failed|failure|panic|cannot find|not found|undefined|mismatch)([^a-z]|$)' /tmp/watcher-ui-logs \
+              | tail -n 240 \
+              | sed -E 's#(/home/runner/work/)[^ ]+#<runner-path>#g' \
+              || true
+            echo '```'
+          } > WATCHER_UI_FAILURE.md
+
+      - name: Publish failure report
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add WATCHER_UI_FAILURE.md
+          if git diff --cached --quiet; then
+            echo 'Failure report is unchanged.'
+            exit 0
+          fi
+          git commit -m 'Record Watcher browser UI failure diagnostics'
+          git pull --rebase origin watcher-protocol
+          git push origin HEAD:watcher-protocol
