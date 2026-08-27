@@ -32,6 +32,11 @@ function requireAccounts(accounts, names) {
   }
 }
 
+function requireProver(value, label) {
+  if (typeof value !== 'function') throw new TypeError(`${label} must be a proving function`);
+  return value;
+}
+
 export async function prepareDepositV1({
   accounts,
   owner,
@@ -40,16 +45,19 @@ export async function prepareDepositV1({
   assetId = 1n,
   proverEndpoint,
   fetchImpl,
+  proveDeposit = proveDepositWithLocalProverV1,
+  proverOptions = {},
 }) {
   requireAccounts(accounts, [
     'programId', 'depositor', 'config', 'commitments', 'rootHistory', 'vault', 'systemProgram',
   ]);
   const witness = buildDepositWitnessV1({ owner, nonce, amount, assetId });
-  const generated = await proveDepositWithLocalProverV1({
+  const generated = await requireProver(proveDeposit, 'proveDeposit')({
     endpoint: proverEndpoint,
     fetchImpl,
     witness: witness.witness,
     expectedPublicInputs: witness.publicInputs,
+    ...proverOptions,
   });
   const instruction = buildDepositInstructionV1({
     ...accounts,
@@ -79,6 +87,8 @@ export async function prepareWithdrawV1({
   rpcCommitment = 'confirmed',
   proverEndpoint,
   fetchImpl,
+  proveWithdraw = proveWithdrawWithLocalProverV1,
+  proverOptions = {},
 }) {
   if (!connection || typeof connection.getAccountInfo !== 'function') {
     throw new TypeError('connection.getAccountInfo is required');
@@ -109,11 +119,12 @@ export async function prepareWithdrawV1({
     assetId,
     contextBinding,
   });
-  const generated = await proveWithdrawWithLocalProverV1({
+  const generated = await requireProver(proveWithdraw, 'proveWithdraw')({
     endpoint: proverEndpoint,
     fetchImpl,
     witness: witness.witness,
     expectedPublicInputs: witness.publicInputs,
+    ...proverOptions,
   });
   const instruction = buildWithdrawInstructionV1({
     ...accounts,
