@@ -1,0 +1,82 @@
+name: Complete Clean-Room Watcher Browser UI
+
+on:
+  push:
+    branches: [watcher-protocol]
+    paths:
+      - '.github/workflows/patch-watcher-ui-v6.yml'
+      - 'scripts/remove-legacy-privacycash-runtime.mjs'
+      - 'scripts/harden-watcher-browser-page.mjs'
+      - 'scripts/patch-watcher-direct-imports.mjs'
+      - 'config/watcher-page-entry-v2.jsx'
+      - 'config/watcher-pages-v2.yml'
+      - 'config/watcher-ui-ci.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  complete:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: watcher-protocol
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+          cache-dependency-path: circuits/withdraw/go.sum
+
+      - name: Apply the final live route and pipelines
+        run: |
+          cp config/watcher-page-entry-v2.jsx app/page.jsx
+          cp config/watcher-pages-v2.yml .github/workflows/pages.yml
+          cp config/watcher-ui-ci.yml .github/workflows/watcher-ui.yml
+          node scripts/harden-watcher-browser-page.mjs
+          node scripts/patch-watcher-direct-imports.mjs
+          node scripts/remove-legacy-privacycash-runtime.mjs
+
+      - name: Verify no legacy runtime import remains
+        run: |
+          if grep -R -n -E "from ['\"]privacycash|require\(['\"]privacycash|@lightprotocol/hasher.rs" app client src package.json 2>/dev/null; then
+            echo 'legacy Privacy Cash runtime reference remains' >&2
+            exit 1
+          fi
+
+      - name: Install the clean dependency graph
+        run: npm install --no-audit --no-fund
+
+      - name: Validate browser client and production export
+        env:
+          NEXT_PUBLIC_WATCHER_BASE_PATH: /watcher-cash
+          NEXT_PUBLIC_WATCHER_RPC_URL: https://api.devnet.solana.com
+        run: |
+          node --test client/watcher/*.test.mjs
+          node --check public/watcher-prover-worker.js
+          npm run build
+
+      - name: Validate native and WebAssembly provers
+        working-directory: circuits/withdraw
+        run: |
+          go test ./...
+          GOOS=js GOARCH=wasm go build -trimpath -o /tmp/watcher-prover.wasm ./cmd/watcher-prover-wasm
+
+      - name: Commit the completed migration
+        run: |
+          if git diff --quiet; then
+            echo 'Clean-room Watcher browser UI is already complete.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A app client src package.json LICENSE_AUDIT.md .github/workflows/pages.yml .github/workflows/watcher-ui.yml
+          git commit -m 'Complete clean-room Watcher browser proving UI'
+          git pull --rebase origin watcher-protocol
+          git push origin HEAD:watcher-protocol
