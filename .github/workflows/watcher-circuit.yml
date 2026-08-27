@@ -29,3 +29,14 @@ jobs:
         run: go mod tidy
       - name: Test
         run: go test -v ./...
+      - name: Generate development Groth16 fixture
+        run: go run ./cmd/genfixture
+      - name: Show fixture manifest
+        run: cat testdata/v1_fixture/manifest.json
+      - name: Upload development fixture
+        uses: actions/upload-artifact@v4
+        with:
+          name: watcher-circuit-v1-dev-fixture
+          path: circuits/withdraw/testdata/v1_fixture/
+          if-no-files-found: error
+          retention-days: 7
