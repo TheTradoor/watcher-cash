@@ -345,8 +345,15 @@ export default function Page() {
   const minimumWithdrawal = Number(relayerConfig?.minimum_withdrawal?.[tokenName] || 0);
   const belowMinimum = mode === 'withdraw' && minimumWithdrawal > 0 && numericAmount > 0 && numericAmount < minimumWithdrawal;
 
+  const balanceBelowMinimum = mode === 'withdraw' && balance !== null && minimumWithdrawal > 0 && balance < minimumWithdrawal;
+
   const setMaxAmount = () => {
-    if (balance !== null && balance > 0) setAmount(String(balance));
+    if (balance === null || balance <= 0) return;
+    if (minimumWithdrawal > 0 && balance < minimumWithdrawal) {
+      setStatus(`Private balance is below the ${minimumWithdrawal} ${tokenMeta.label} protocol minimum.`);
+      return;
+    }
+    setAmount(String(balance));
   };
 
   const stageCopy = {
@@ -499,7 +506,7 @@ export default function Page() {
     }
   };
 
-  const withdrawReady = mode !== 'withdraw' || (relayerStatus === 'online' && estimatedReceive > 0 && !belowMinimum && (balance === null || numericAmount <= balance));
+  const withdrawReady = mode !== 'withdraw' || (relayerStatus === 'online' && !balanceBelowMinimum && estimatedReceive > 0 && !belowMinimum && (balance === null || numericAmount <= balance));
   const actionReady = connected && signature && sdkReady && network !== 'wrong-network' && !busy && normalizeAmount(amount).length > 0 && withdrawReady;
 
   return (
@@ -615,7 +622,8 @@ export default function Page() {
                       <div><span>Protocol fee</span><strong>{relayerConfig && numericAmount > 0 ? `~${estimatedFee.toLocaleString(undefined, { maximumFractionDigits: 6 })} ${tokenMeta.label}` : 'Enter amount'}</strong></div>
                       <div className="receive-row"><span>You receive</span><strong>{relayerConfig && numericAmount > 0 ? `~${estimatedReceive.toLocaleString(undefined, { maximumFractionDigits: 6 })} ${tokenMeta.label}` : '—'}</strong></div>
                       {minimumWithdrawal > 0 && <small>Protocol minimum: {minimumWithdrawal} {tokenMeta.label}</small>}
-                      {belowMinimum && <small className="fee-warning">Amount is below the current protocol minimum.</small>}
+                      {balanceBelowMinimum && <small className="fee-warning balance-warning">Your private balance is below the minimum withdrawal. Deposit at least {(minimumWithdrawal - balance).toLocaleString(undefined, { maximumFractionDigits: 6 })} {tokenMeta.label} more before withdrawing.</small>}
+                      {!balanceBelowMinimum && belowMinimum && <small className="fee-warning">Amount is below the current protocol minimum.</small>}
                     </div>
                   </>
                 )}
