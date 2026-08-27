@@ -80,14 +80,16 @@ jobs:
             echo 'fixture unchanged'
           else
             git commit -m 'Sync matched Circuit V1 verifier fixture [skip circuit]'
-            # go mod tidy / fixture generation can leave unrelated tracked or untracked
-            # files dirty. The verifier arrays are already committed, so discard the rest
-            # before rebasing the generated commit onto the latest branch head.
+            cp -a circuits/withdraw/testdata /tmp/watcher-testdata
+            cp -a circuits/withdraw/fixture-out /tmp/watcher-fixture-out
             git reset --hard HEAD
             git clean -fd
             git fetch origin watcher-protocol
             git rebase origin/watcher-protocol
             git push origin HEAD:watcher-protocol
+            mkdir -p circuits/withdraw
+            cp -a /tmp/watcher-testdata circuits/withdraw/testdata
+            cp -a /tmp/watcher-fixture-out circuits/withdraw/fixture-out
           fi
       - name: Show fixture manifest
         run: cat testdata/v1_fixture/manifest.json
