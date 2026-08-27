@@ -28,12 +28,8 @@ export function buildMerkleTreeV1(commitments) {
     throw new RangeError(`Circuit V1 tree is full at ${MERKLE_LEAVES_V1} commitments`);
   }
   if (commitments.length === 0) {
-    return {
-      depth: MERKLE_DEPTH_V1,
-      levels: [new Array(MERKLE_LEAVES_V1).fill(0n)],
-      root: 0n,
-      commitmentCount: 0,
-    };
+    const empty = buildMerkleTreeFromLeavesV1(new Array(MERKLE_LEAVES_V1).fill(0n));
+    return { ...empty, root: 0n, commitmentCount: 0 };
   }
   const leaves = new Array(MERKLE_LEAVES_V1).fill(0n);
   const seen = new Set();
@@ -46,6 +42,38 @@ export function buildMerkleTreeV1(commitments) {
     leaves[index] = field;
   });
   return { ...buildMerkleTreeFromLeavesV1(leaves), commitmentCount: commitments.length };
+}
+
+export function getMerkleAppendTransitionV1(commitments, rawCommitment) {
+  if (!Array.isArray(commitments)) throw new TypeError('commitments must be an array');
+  if (commitments.length >= MERKLE_LEAVES_V1) {
+    throw new RangeError(`Circuit V1 tree is full at ${MERKLE_LEAVES_V1} commitments`);
+  }
+  const commitment = assertFieldV1(rawCommitment, 'new commitment');
+  if (commitment === 0n) throw new RangeError('new commitment must be non-zero');
+  const tree = buildMerkleTreeV1(commitments);
+  if (commitments.some((value, index) => assertFieldV1(value, `commitment ${index}`) === commitment)) {
+    throw new Error('new commitment is already present in the registry');
+  }
+  const index = commitments.length;
+  const path = [];
+  const indexBits = [];
+  let position = index;
+  for (let depth = 0; depth < MERKLE_DEPTH_V1; depth += 1) {
+    path.push(tree.levels[depth][position ^ 1]);
+    indexBits.push(position & 1);
+    position = Math.floor(position / 2);
+  }
+  const nextLeaves = tree.levels[0].slice();
+  nextLeaves[index] = commitment;
+  const nextTree = buildMerkleTreeFromLeavesV1(nextLeaves);
+  return {
+    index,
+    path,
+    indexBits,
+    oldRoot: tree.root,
+    newRoot: nextTree.root,
+  };
 }
 
 export function getMerkleProofV1(treeOrCommitments, index) {

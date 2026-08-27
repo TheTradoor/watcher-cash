@@ -25,8 +25,8 @@ import (
 
 const (
 	XarkProofBytesV1           = 256
-	DepositPublicInputBytesV1  = 3 * 32
-	WithdrawPublicInputBytesV1 = 10 * 32
+	DepositPublicInputBytesV1  = 6 * 32
+	WithdrawPublicInputBytesV1 = 13 * 32
 )
 
 var errTrailingJSON = errors.New("request contains trailing JSON data")
@@ -110,11 +110,16 @@ func decodeStrictJSONV1(data []byte, destination any) error {
 }
 
 type depositWitnessJSONV1 struct {
-	Owner      decimalV1 `json:"Owner"`
-	Nonce      decimalV1 `json:"Nonce"`
-	Commitment decimalV1 `json:"Commitment"`
-	Amount     decimalV1 `json:"Amount"`
-	AssetID    decimalV1 `json:"AssetID"`
+	Owner      decimalV1   `json:"Owner"`
+	Nonce      decimalV1   `json:"Nonce"`
+	Path       []decimalV1 `json:"Path"`
+	Index      []uint8     `json:"Index"`
+	Commitment decimalV1   `json:"Commitment"`
+	Amount     decimalV1   `json:"Amount"`
+	AssetID    decimalV1   `json:"AssetID"`
+	OldRoot    decimalV1   `json:"OldRoot"`
+	NewRoot    decimalV1   `json:"NewRoot"`
+	LeafIndex  decimalV1   `json:"LeafIndex"`
 }
 
 func depositAssignmentFromJSONV1(data []byte) (DepositCircuitV1, error) {
@@ -130,6 +135,14 @@ func depositAssignmentFromJSONV1(data []byte) (DepositCircuitV1, error) {
 	if err != nil {
 		return DepositCircuitV1{}, err
 	}
+	path, err := parsePathV1(encoded.Path, "Path")
+	if err != nil {
+		return DepositCircuitV1{}, err
+	}
+	index, err := parseIndexV1(encoded.Index, "Index")
+	if err != nil {
+		return DepositCircuitV1{}, err
+	}
 	commitment, err := parseFieldV1(encoded.Commitment, "Commitment", true)
 	if err != nil {
 		return DepositCircuitV1{}, err
@@ -142,8 +155,22 @@ func depositAssignmentFromJSONV1(data []byte) (DepositCircuitV1, error) {
 	if err != nil {
 		return DepositCircuitV1{}, err
 	}
+	oldRoot, err := parseFieldV1(encoded.OldRoot, "OldRoot", false)
+	if err != nil {
+		return DepositCircuitV1{}, err
+	}
+	newRoot, err := parseFieldV1(encoded.NewRoot, "NewRoot", true)
+	if err != nil {
+		return DepositCircuitV1{}, err
+	}
+	leafIndex, err := parseU64V1(encoded.LeafIndex, "LeafIndex", false)
+	if err != nil {
+		return DepositCircuitV1{}, err
+	}
 	return DepositCircuitV1{
-		Owner: owner, Nonce: nonce, Commitment: commitment, Amount: amount, AssetID: assetID,
+		Owner: owner, Nonce: nonce, Path: path, Index: index,
+		Commitment: commitment, Amount: amount, AssetID: assetID,
+		OldRoot: oldRoot, NewRoot: newRoot, LeafIndex: leafIndex,
 	}, nil
 }
 
@@ -160,9 +187,11 @@ type withdrawWitnessJSONV1 struct {
 	Input1Path   []decimalV1 `json:"Input1Path"`
 	Input1Index  []uint8     `json:"Input1Index"`
 
-	ChangeAmount decimalV1 `json:"ChangeAmount"`
-	ChangeOwner  decimalV1 `json:"ChangeOwner"`
-	ChangeNonce  decimalV1 `json:"ChangeNonce"`
+	ChangeAmount decimalV1   `json:"ChangeAmount"`
+	ChangeOwner  decimalV1   `json:"ChangeOwner"`
+	ChangeNonce  decimalV1   `json:"ChangeNonce"`
+	ChangePath   []decimalV1 `json:"ChangePath"`
+	ChangeIndex  []uint8     `json:"ChangeIndex"`
 
 	MerkleRoot       decimalV1 `json:"MerkleRoot"`
 	Nullifier0       decimalV1 `json:"Nullifier0"`
@@ -174,6 +203,9 @@ type withdrawWitnessJSONV1 struct {
 	RecipientBinding decimalV1 `json:"RecipientBinding"`
 	AssetID          decimalV1 `json:"AssetID"`
 	ContextBinding   decimalV1 `json:"ContextBinding"`
+	CurrentRoot      decimalV1 `json:"CurrentRoot"`
+	NewMerkleRoot    decimalV1 `json:"NewMerkleRoot"`
+	ChangeLeafIndex  decimalV1 `json:"ChangeLeafIndex"`
 }
 
 func parsePathV1(values []decimalV1, label string) ([MerkleDepthV1]frontend.Variable, error) {
@@ -264,6 +296,14 @@ func withdrawAssignmentFromJSONV1(data []byte) (CircuitV1, error) {
 	if err != nil {
 		return CircuitV1{}, err
 	}
+	changePath, err := parsePathV1(encoded.ChangePath, "ChangePath")
+	if err != nil {
+		return CircuitV1{}, err
+	}
+	changeIndex, err := parseIndexV1(encoded.ChangeIndex, "ChangeIndex")
+	if err != nil {
+		return CircuitV1{}, err
+	}
 
 	merkleRoot, err := parseFieldV1(encoded.MerkleRoot, "MerkleRoot", true)
 	if err != nil {
@@ -305,6 +345,18 @@ func withdrawAssignmentFromJSONV1(data []byte) (CircuitV1, error) {
 	if err != nil {
 		return CircuitV1{}, err
 	}
+	currentRoot, err := parseFieldV1(encoded.CurrentRoot, "CurrentRoot", true)
+	if err != nil {
+		return CircuitV1{}, err
+	}
+	newMerkleRoot, err := parseFieldV1(encoded.NewMerkleRoot, "NewMerkleRoot", true)
+	if err != nil {
+		return CircuitV1{}, err
+	}
+	changeLeafIndex, err := parseU64V1(encoded.ChangeLeafIndex, "ChangeLeafIndex", false)
+	if err != nil {
+		return CircuitV1{}, err
+	}
 
 	return CircuitV1{
 		Input0Amount: input0Amount, Input0Owner: input0Owner, Input0Nonce: input0Nonce,
@@ -312,10 +364,12 @@ func withdrawAssignmentFromJSONV1(data []byte) (CircuitV1, error) {
 		Input1Amount: input1Amount, Input1Owner: input1Owner, Input1Nonce: input1Nonce,
 		Input1Path: input1Path, Input1Index: input1Index,
 		ChangeAmount: changeAmount, ChangeOwner: changeOwner, ChangeNonce: changeNonce,
+		ChangePath: changePath, ChangeIndex: changeIndex,
 		MerkleRoot: merkleRoot, Nullifier0: nullifier0, Nullifier1: nullifier1,
 		ChangeCommitment: changeCommitment, PublicAmount: publicAmount,
 		ProtocolFee: protocolFee, RelayerFee: relayerFee,
 		RecipientBinding: recipientBinding, AssetID: assetID, ContextBinding: contextBinding,
+		CurrentRoot: currentRoot, NewMerkleRoot: newMerkleRoot, ChangeLeafIndex: changeLeafIndex,
 	}, nil
 }
 
@@ -416,11 +470,11 @@ func LoadProverBundleBytesV1(artifacts map[string][]byte) (*ProverBundleV1, erro
 	if err != nil {
 		return nil, err
 	}
-	if depositVK.NbPublicWitness() != 3 {
-		return nil, fmt.Errorf("deposit verifying key expects %d public inputs, want 3", depositVK.NbPublicWitness())
+	if depositVK.NbPublicWitness() != 6 {
+		return nil, fmt.Errorf("deposit verifying key expects %d public inputs, want 6", depositVK.NbPublicWitness())
 	}
-	if withdrawVK.NbPublicWitness() != 10 {
-		return nil, fmt.Errorf("withdraw verifying key expects %d public inputs, want 10", withdrawVK.NbPublicWitness())
+	if withdrawVK.NbPublicWitness() != 13 {
+		return nil, fmt.Errorf("withdraw verifying key expects %d public inputs, want 13", withdrawVK.NbPublicWitness())
 	}
 	digest, err := bundleDigestBytesV1(artifacts)
 	if err != nil {

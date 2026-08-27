@@ -11,18 +11,26 @@ import {
   encodeCommitmentRegistryV1,
   fetchCommitmentRegistryV1,
   findCommitmentIndexV1,
+  getMerkleAppendTransitionV1,
   getMerkleProofV1,
 } from './merkle.mjs';
 
-export const DEPOSIT_PUBLIC_INPUT_COUNT_V1 = 3;
+export const DEPOSIT_PUBLIC_INPUT_COUNT_V1 = 6;
 export const DEPOSIT_PUBLIC_INPUT_BYTES_V1 = DEPOSIT_PUBLIC_INPUT_COUNT_V1 * 32;
-export const PUBLIC_INPUT_COUNT_V1 = 10;
+export const PUBLIC_INPUT_COUNT_V1 = 13;
 export const PUBLIC_INPUT_BYTES_V1 = PUBLIC_INPUT_COUNT_V1 * 32;
 
 export function encodeDepositPublicInputsV1(fields) {
   const ordered = Array.isArray(fields)
     ? fields
-    : [fields.commitment, fields.amount, fields.assetId];
+    : [
+        fields.commitment,
+        fields.amount,
+        fields.assetId,
+        fields.oldRoot,
+        fields.newRoot,
+        fields.leafIndex,
+      ];
   if (ordered.length !== DEPOSIT_PUBLIC_INPUT_COUNT_V1) {
     throw new RangeError(`Deposit V1 requires ${DEPOSIT_PUBLIC_INPUT_COUNT_V1} public inputs`);
   }
@@ -45,6 +53,9 @@ export function encodePublicInputsV1(fields) {
         fields.recipientBinding,
         fields.assetId,
         fields.contextBinding,
+        fields.currentRoot,
+        fields.newMerkleRoot,
+        fields.changeLeafIndex,
       ];
   if (ordered.length !== PUBLIC_INPUT_COUNT_V1) {
     throw new RangeError(`Circuit V1 requires ${PUBLIC_INPUT_COUNT_V1} public inputs`);
@@ -79,29 +90,61 @@ function decimals(values) {
   return values.map((value) => value.toString(10));
 }
 
-export function buildDepositWitnessV1({ owner, nonce, amount, assetId = 1n }) {
+export function buildDepositWitnessV1({
+  registryAccountData = encodeCommitmentRegistryV1([]),
+  owner,
+  nonce,
+  amount,
+  assetId = 1n,
+}) {
+  const registry = decodeCommitmentRegistryV1(registryAccountData);
   const asset = assertFieldV1(assetId, 'assetId');
   if (asset === 0n) throw new RangeError('assetId must be non-zero');
   const note = normalizeInputNote({ owner, nonce, amount }, 'deposit', asset);
+  const transition = getMerkleAppendTransitionV1(registry.commitments, note.commitment);
+  const leafIndex = BigInt(transition.index);
   const publicFields = {
     commitment: note.commitment,
     amount: note.amount,
     assetId: asset,
+    oldRoot: transition.oldRoot,
+    newRoot: transition.newRoot,
+    leafIndex,
   };
   return {
+    registry,
+    transition,
     note,
     witness: {
       Owner: note.owner.toString(10),
       Nonce: note.nonce.toString(10),
+      Path: decimals(transition.path),
+      Index: transition.indexBits,
       Commitment: note.commitment.toString(10),
       Amount: note.amount.toString(10),
       AssetID: asset.toString(10),
+      OldRoot: transition.oldRoot.toString(10),
+      NewRoot: transition.newRoot.toString(10),
+      LeafIndex: leafIndex.toString(10),
     },
     publicFields,
     publicInputs: encodeDepositPublicInputsV1(publicFields),
     commitment: fieldToLe32(note.commitment),
     amount: note.amount,
   };
+}
+
+export async function buildDepositWitnessFromChainV1({
+  connection,
+  commitmentsAccount,
+  commitment = 'confirmed',
+  ...witnessOptions
+}) {
+  const registry = await fetchCommitmentRegistryV1(connection, commitmentsAccount, commitment);
+  return buildDepositWitnessV1({
+    ...witnessOptions,
+    registryAccountData: encodeCommitmentRegistryV1(registry.commitments),
+  });
 }
 
 export async function buildWithdrawWitnessV1({
@@ -133,6 +176,7 @@ export async function buildWithdrawWitnessV1({
   const secondProof = getMerkleProofV1(registry.tree, secondIndex);
 
   const changeNote = normalizeChangeNote(change, asset);
+  const transition = getMerkleAppendTransitionV1(registry.commitments, changeNote.commitment);
   const publicValue = assertU64(publicAmount, 'publicAmount');
   if (publicValue === 0n) throw new RangeError('publicAmount must be non-zero');
   const protocolValue = assertU64(protocolFee, 'protocolFee');
@@ -150,6 +194,7 @@ export async function buildWithdrawWitnessV1({
   const nullifier0 = nullifierV1(first);
   const nullifier1 = nullifierV1(second);
   if (nullifier0 === nullifier1) throw new Error('input notes produce the same nullifier');
+  const changeLeafIndex = BigInt(transition.index);
 
   const publicFields = {
     merkleRoot: registry.root,
@@ -162,6 +207,9 @@ export async function buildWithdrawWitnessV1({
     recipientBinding: binding,
     assetId: asset,
     contextBinding: context,
+    currentRoot: registry.root,
+    newMerkleRoot: transition.newRoot,
+    changeLeafIndex,
   };
   const witness = {
     Input0Amount: first.amount.toString(10),
@@ -177,6 +225,8 @@ export async function buildWithdrawWitnessV1({
     ChangeAmount: changeNote.amount.toString(10),
     ChangeOwner: changeNote.owner.toString(10),
     ChangeNonce: changeNote.nonce.toString(10),
+    ChangePath: decimals(transition.path),
+    ChangeIndex: transition.indexBits,
     MerkleRoot: registry.root.toString(10),
     Nullifier0: nullifier0.toString(10),
     Nullifier1: nullifier1.toString(10),
@@ -187,9 +237,13 @@ export async function buildWithdrawWitnessV1({
     RecipientBinding: binding.toString(10),
     AssetID: asset.toString(10),
     ContextBinding: context.toString(10),
+    CurrentRoot: registry.root.toString(10),
+    NewMerkleRoot: transition.newRoot.toString(10),
+    ChangeLeafIndex: changeLeafIndex.toString(10),
   };
   return {
     registry,
+    transition,
     depositIndices: { input0: firstIndex, input1: secondIndex },
     proofs: { input0: firstProof, input1: secondProof },
     witness,

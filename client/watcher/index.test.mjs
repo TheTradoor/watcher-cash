@@ -100,8 +100,11 @@ test('withdraw witness is derived from the real registry rather than manual path
   assert.deepEqual(result.depositIndices, { input0: 3, input1: 1 });
   assert.equal(result.witness.Input0Index.join(','), '1,1,0,0');
   assert.equal(result.witness.Input1Index.join(','), '1,0,0,0');
-  assert.equal(result.publicInputs.length, 320);
+  assert.equal(result.publicInputs.length, 416);
   assert.equal(result.witness.MerkleRoot, result.registry.root.toString(10));
+  assert.equal(result.witness.CurrentRoot, result.registry.root.toString(10));
+  assert.equal(result.witness.NewMerkleRoot, result.transition.newRoot.toString(10));
+  assert.equal(result.witness.ChangeLeafIndex, '4');
   assert.equal(
     verifyMerkleProofV1({
       leaf: commitment0,

@@ -213,6 +213,7 @@ async function main() {
     systemProgram: SystemProgram.programId,
   };
   const firstDeposit = await prepareDepositV1({
+    connection,
     accounts: sharedDepositAccounts,
     ...input0,
     proverEndpoint,
@@ -229,6 +230,7 @@ async function main() {
   console.log(`Deposit 8,000,000 lamports: ${firstDepositTx}`);
 
   const secondDeposit = await prepareDepositV1({
+    connection,
     accounts: sharedDepositAccounts,
     ...input1,
     proverEndpoint,

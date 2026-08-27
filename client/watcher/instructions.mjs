@@ -15,8 +15,8 @@ export const ROOT_HISTORY_ACCOUNT_LEN_V1 = 1 + 4 + 4 + (32 * 32);
 export const VAULT_ACCOUNT_LEN_V1 = 50;
 
 export const XARK_PROOF_BYTES_V1 = 256;
-export const DEPOSIT_INSTRUCTION_PUBLIC_INPUT_BYTES_V1 = 96;
-export const WITHDRAW_PUBLIC_INPUT_BYTES_V1 = 320;
+export const DEPOSIT_INSTRUCTION_PUBLIC_INPUT_BYTES_V1 = 192;
+export const WITHDRAW_PUBLIC_INPUT_BYTES_V1 = 416;
 
 // Canonical names used by the browser-facing client. Keep the versioned names
 // above for backwards compatibility with the original clean-room SDK.

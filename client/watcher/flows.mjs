@@ -9,6 +9,7 @@ import {
   proveWithdrawWithLocalProverV1,
 } from './prover.mjs';
 import {
+  buildDepositWitnessFromChainV1,
   buildDepositWitnessV1,
   buildWithdrawWitnessFromChainV1,
 } from './witness.mjs';
@@ -38,11 +39,13 @@ function requireProver(value, label) {
 }
 
 export async function prepareDepositV1({
+  connection,
   accounts,
   owner,
   nonce,
   amount,
   assetId = 1n,
+  rpcCommitment = 'confirmed',
   proverEndpoint,
   fetchImpl,
   proveDeposit = proveDepositWithLocalProverV1,
@@ -51,7 +54,17 @@ export async function prepareDepositV1({
   requireAccounts(accounts, [
     'programId', 'depositor', 'config', 'commitments', 'rootHistory', 'vault', 'systemProgram',
   ]);
-  const witness = buildDepositWitnessV1({ owner, nonce, amount, assetId });
+  const witness = connection && typeof connection.getAccountInfo === 'function'
+    ? await buildDepositWitnessFromChainV1({
+        connection,
+        commitmentsAccount: accounts.commitments,
+        commitment: rpcCommitment,
+        owner,
+        nonce,
+        amount,
+        assetId,
+      })
+    : buildDepositWitnessV1({ owner, nonce, amount, assetId });
   const generated = await requireProver(proveDeposit, 'proveDeposit')({
     endpoint: proverEndpoint,
     fetchImpl,

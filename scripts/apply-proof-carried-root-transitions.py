@@ -24,7 +24,7 @@ def replace_once(path: str, old: str, new: str, label: str) -> None:
 
 def replace_regex(path: str, pattern: str, replacement: str, label: str) -> None:
     content = read(path)
-    updated, count = re.subn(pattern, replacement, content, count=1, flags=re.S)
+    updated, count = re.subn(pattern, lambda _match: replacement, content, count=1, flags=re.S)
     if count != 1:
         raise RuntimeError(f"{label}: expected one regex match in {path}, found {count}")
     write(path, updated)
@@ -76,8 +76,13 @@ func (c *DepositCircuitV1) Define(api frontend.API) error {
 		return err
 	}
 	isFirst := api.IsZero(c.LeafIndex)
+	emptySibling := frontend.Variable(0)
 	for i := 0; i < MerkleDepthV1; i++ {
-		api.AssertIsEqual(api.Mul(isFirst, c.Path[i]), 0)
+		api.AssertIsEqual(api.Mul(isFirst, api.Sub(c.Path[i], emptySibling)), 0)
+		emptySibling, err = hashV1(api, domainMerkleV1, emptySibling, emptySibling)
+		if err != nil {
+			return err
+		}
 	}
 	api.AssertIsEqual(api.Mul(isFirst, c.OldRoot), 0)
 	api.AssertIsEqual(

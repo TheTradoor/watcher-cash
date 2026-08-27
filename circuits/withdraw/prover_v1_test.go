@@ -21,15 +21,18 @@ func TestDepositWitnessJSONRejectsUnknownFields(t *testing.T) {
 func TestWithdrawWitnessJSONRejectsInvalidIndexBit(t *testing.T) {
 	encoded, err := json.Marshal(withdrawWitnessJSONV1{
 		Input0Amount: "8", Input0Owner: "11", Input0Nonce: "12",
-		Input0Path: []decimalV1{"0", "0", "0", "0"},
-		Input0Index: []uint8{0, 2, 0, 0},
+		Input0Path:   []decimalV1{"0", "0", "0", "0"},
+		Input0Index:  []uint8{0, 2, 0, 0},
 		Input1Amount: "3", Input1Owner: "13", Input1Nonce: "14",
-		Input1Path: []decimalV1{"0", "0", "0", "0"},
-		Input1Index: []uint8{1, 0, 0, 0},
+		Input1Path:   []decimalV1{"0", "0", "0", "0"},
+		Input1Index:  []uint8{1, 0, 0, 0},
 		ChangeAmount: "6", ChangeOwner: "15", ChangeNonce: "16",
-		MerkleRoot: "17", Nullifier0: "18", Nullifier1: "19",
+		ChangePath:  []decimalV1{"0", "0", "0", "0"},
+		ChangeIndex: []uint8{0, 0, 0, 0},
+		MerkleRoot:  "17", Nullifier0: "18", Nullifier1: "19",
 		ChangeCommitment: "20", PublicAmount: "4", ProtocolFee: "0",
 		RelayerFee: "1", RecipientBinding: "21", AssetID: "1", ContextBinding: "22",
+		CurrentRoot: "23", NewMerkleRoot: "24", ChangeLeafIndex: "2",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -68,7 +71,7 @@ func TestExportedProverBundleRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	expectedDepositPublic, err := os.ReadFile(filepath.Join(directory, "deposit.public.xark"))
+	expectedDepositPublic, err := os.ReadFile(filepath.Join(directory, "sample-deposit-0-public-inputs.bin"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,7 +94,7 @@ func TestExportedProverBundleRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	expectedWithdrawPublic, err := os.ReadFile(filepath.Join(directory, "withdraw.public.xark"))
+	expectedWithdrawPublic, err := os.ReadFile(filepath.Join(directory, "sample-withdraw-public-inputs.bin"))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -54,6 +54,9 @@ function publicInputBytesFromWitness(path, witness) {
       commitment: BigInt(witness.Commitment),
       amount: BigInt(witness.Amount),
       assetId: BigInt(witness.AssetID),
+      oldRoot: BigInt(witness.OldRoot),
+      newRoot: BigInt(witness.NewRoot),
+      leafIndex: BigInt(witness.LeafIndex),
     });
   }
   return encodePublicInputsV1({
@@ -67,6 +70,9 @@ function publicInputBytesFromWitness(path, witness) {
     recipientBinding: BigInt(witness.RecipientBinding),
     assetId: BigInt(witness.AssetID),
     contextBinding: BigInt(witness.ContextBinding),
+    currentRoot: BigInt(witness.CurrentRoot),
+    newMerkleRoot: BigInt(witness.NewMerkleRoot),
+    changeLeafIndex: BigInt(witness.ChangeLeafIndex),
   });
 }
 
@@ -112,7 +118,7 @@ test('withdraw context binding matches the Rust and Go custody fixture', async (
   );
 });
 
-test('deposit witness exposes exact commitment, amount, and asset public inputs', () => {
+test('deposit witness exposes commitment, amount, asset, and append transition inputs', () => {
   const result = buildDepositWitnessV1({
     owner: 1111n,
     nonce: 2222n,
@@ -124,6 +130,9 @@ test('deposit witness exposes exact commitment, amount, and asset public inputs'
   assert.equal(bytesToHex(result.publicInputs.slice(32, 64)).slice(0, 16), '00127a0000000000');
   assert.equal(result.witness.Amount, '8000000');
   assert.equal(result.witness.AssetID, '1');
+  assert.equal(result.witness.OldRoot, '0');
+  assert.equal(result.witness.NewRoot, result.transition.newRoot.toString(10));
+  assert.equal(result.witness.LeafIndex, '0');
 });
 
 test('instruction encoders match the Rust codec byte layout exactly', () => {
@@ -136,12 +145,12 @@ test('instruction encoders match the Rust codec byte layout exactly', () => {
     proof,
     publicInputs: depositInputs,
   });
-  assert.equal(deposit.length, 397);
+  assert.equal(deposit.length, 493);
   assert.equal(deposit[0], 1);
   assert.deepEqual(deposit.slice(1, 33), commitment);
   assert.deepEqual(deposit.slice(33, 41), Uint8Array.of(0x00, 0x12, 0x7a, 0x00, 0, 0, 0, 0));
   assert.deepEqual(deposit.slice(41, 43), Uint8Array.of(0x00, 0x01));
-  assert.deepEqual(deposit.slice(299, 301), Uint8Array.of(0x60, 0x00));
+  assert.deepEqual(deposit.slice(299, 301), Uint8Array.of(0xc0, 0x00));
 
   const withdrawInputs = new Uint8Array(WITHDRAW_PUBLIC_INPUT_BYTES_V1).fill(4);
   const withdrawal = encodeWithdrawDataV1({
@@ -155,11 +164,11 @@ test('instruction encoders match the Rust codec byte layout exactly', () => {
     proof,
     publicInputs: withdrawInputs,
   });
-  assert.equal(withdrawal.length, 733);
+  assert.equal(withdrawal.length, 829);
   assert.equal(withdrawal[0], 2);
   assert.deepEqual(withdrawal.slice(129, 137), Uint8Array.of(0x00, 0x09, 0x3d, 0, 0, 0, 0, 0));
   assert.deepEqual(withdrawal.slice(153, 155), Uint8Array.of(0x00, 0x01));
-  assert.deepEqual(withdrawal.slice(411, 413), Uint8Array.of(0x40, 0x01));
+  assert.deepEqual(withdrawal.slice(411, 413), Uint8Array.of(0xa0, 0x01));
 });
 
 test('instruction builders preserve the exact account order and mutability', () => {

@@ -3,9 +3,9 @@ use solana_program::{hash::hashv, pubkey::Pubkey};
 use crate::{WatcherError, WithdrawalStatement, SOL_ASSET_ID_V1};
 
 pub const FIELD_BYTES: usize = 32;
-pub const DEPOSIT_V1_PUBLIC_INPUTS: usize = 3;
+pub const DEPOSIT_V1_PUBLIC_INPUTS: usize = 6;
 pub const DEPOSIT_V1_PUBLIC_INPUT_BYTES: usize = FIELD_BYTES * DEPOSIT_V1_PUBLIC_INPUTS;
-pub const CIRCUIT_V1_PUBLIC_INPUTS: usize = 10;
+pub const CIRCUIT_V1_PUBLIC_INPUTS: usize = 13;
 pub const CIRCUIT_V1_PUBLIC_INPUT_BYTES: usize = FIELD_BYTES * CIRCUIT_V1_PUBLIC_INPUTS;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -13,6 +13,9 @@ pub struct DepositV1PublicInputs {
     pub commitment: [u8; 32],
     pub amount: [u8; 32],
     pub asset_id: [u8; 32],
+    pub old_root: [u8; 32],
+    pub new_root: [u8; 32],
+    pub leaf_index: [u8; 32],
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -27,6 +30,9 @@ pub struct CircuitV1PublicInputs {
     pub recipient_binding: [u8; 32],
     pub asset_id: [u8; 32],
     pub context_binding: [u8; 32],
+    pub current_root: [u8; 32],
+    pub new_merkle_root: [u8; 32],
+    pub change_leaf_index: [u8; 32],
 }
 
 pub fn field_from_u64_v1(value: u64) -> [u8; 32] {
@@ -39,9 +45,6 @@ pub fn sol_asset_id_field_v1() -> [u8; 32] {
     field_from_u64_v1(SOL_ASSET_ID_V1)
 }
 
-/// Domain-separated hash-to-field used by the program for recipient binding.
-/// Masking to 253 bits guarantees the little-endian value is below the BN254
-/// scalar modulus.
 pub fn recipient_binding_v1(recipient: &Pubkey) -> [u8; 32] {
     let digest = hashv(&[b"watcher-recipient-v1", recipient.as_ref()]);
     let mut output = digest.to_bytes();
@@ -49,9 +52,6 @@ pub fn recipient_binding_v1(recipient: &Pubkey) -> [u8; 32] {
     output
 }
 
-/// Binds a withdrawal proof to one concrete Watcher deployment, vault, relayer,
-/// treasury, and asset. This prevents a valid proof from being replayed with
-/// substituted payout accounts or against a different protocol instance.
 pub fn withdraw_context_binding_v1(
     program_id: &Pubkey,
     config: &Pubkey,
@@ -78,11 +78,16 @@ pub fn validate_deposit_binding(
     commitment: &[u8; 32],
     amount: u64,
     expected_asset_id: &[u8; 32],
+    expected_old_root: &[u8; 32],
+    expected_leaf_index: u64,
     inputs: &DepositV1PublicInputs,
 ) -> Result<(), WatcherError> {
     if inputs.commitment != *commitment
         || inputs.amount != field_from_u64_v1(amount)
         || inputs.asset_id != *expected_asset_id
+        || inputs.old_root != *expected_old_root
+        || inputs.leaf_index != field_from_u64_v1(expected_leaf_index)
+        || inputs.new_root == [0u8; 32]
     {
         return Err(WatcherError::PublicInputMismatch);
     }
@@ -91,12 +96,21 @@ pub fn validate_deposit_binding(
 
 pub fn validate_statement_binding(
     statement: &WithdrawalStatement,
-    trusted_merkle_root: &[u8; 32],
+    trusted_spend_root: &[u8; 32],
+    expected_current_root: &[u8; 32],
+    expected_change_leaf_index: u64,
     expected_asset_id: &[u8; 32],
     expected_context_binding: &[u8; 32],
     inputs: &CircuitV1PublicInputs,
 ) -> Result<(), WatcherError> {
-    if *trusted_merkle_root == [0u8; 32] || inputs.merkle_root != *trusted_merkle_root {
+    if *trusted_spend_root == [0u8; 32] || inputs.merkle_root != *trusted_spend_root {
+        return Err(WatcherError::PublicInputMismatch);
+    }
+    if *expected_current_root == [0u8; 32]
+        || inputs.current_root != *expected_current_root
+        || inputs.new_merkle_root == [0u8; 32]
+        || inputs.change_leaf_index != field_from_u64_v1(expected_change_leaf_index)
+    {
         return Err(WatcherError::PublicInputMismatch);
     }
     if inputs.recipient_binding != recipient_binding_v1(&statement.recipient) {
@@ -132,11 +146,21 @@ impl DepositV1PublicInputs {
             commitment: field(0),
             amount: field(1),
             asset_id: field(2),
+            old_root: field(3),
+            new_root: field(4),
+            leaf_index: field(5),
         })
     }
 
     pub fn encode(&self) -> [u8; DEPOSIT_V1_PUBLIC_INPUT_BYTES] {
-        let fields = [self.commitment, self.amount, self.asset_id];
+        let fields = [
+            self.commitment,
+            self.amount,
+            self.asset_id,
+            self.old_root,
+            self.new_root,
+            self.leaf_index,
+        ];
         let mut output = [0u8; DEPOSIT_V1_PUBLIC_INPUT_BYTES];
         for (index, field) in fields.iter().enumerate() {
             output[index * 32..(index + 1) * 32].copy_from_slice(field);
@@ -163,6 +187,9 @@ impl CircuitV1PublicInputs {
             recipient_binding: field(7),
             asset_id: field(8),
             context_binding: field(9),
+            current_root: field(10),
+            new_merkle_root: field(11),
+            change_leaf_index: field(12),
         })
     }
 
@@ -178,6 +205,9 @@ impl CircuitV1PublicInputs {
             self.recipient_binding,
             self.asset_id,
             self.context_binding,
+            self.current_root,
+            self.new_merkle_root,
+            self.change_leaf_index,
         ];
         let mut output = [0u8; CIRCUIT_V1_PUBLIC_INPUT_BYTES];
         for (index, field) in fields.iter().enumerate() {

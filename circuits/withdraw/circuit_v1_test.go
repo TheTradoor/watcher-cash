@@ -171,8 +171,6 @@ func validV1() CircuitV1 {
 	for index := range leaves {
 		leaves[index] = new(big.Int)
 	}
-	// The on-chain commitment registry is append-only, so fixture deposits occupy
-	// the first two real indices rather than unreachable sparse positions.
 	leaves[0] = commitment0
 	leaves[1] = commitment1
 	tree := makeTreeV1(leaves)
@@ -180,13 +178,18 @@ func validV1() CircuitV1 {
 	path1, bits1 := tree.proof(1)
 	changeAmount, changeOwner, changeNonce := bi(6_000_000), bi(5555), bi(6666)
 	changeCommitment := noteNativeV1(asset, changeAmount, changeOwner, changeNonce)
+	changePath, changeBits := tree.proof(2)
+	leaves[2] = changeCommitment
+	newTree := makeTreeV1(leaves)
 	return CircuitV1{
 		Input0Amount: amount0, Input0Owner: owner0, Input0Nonce: nonce0, Input0Path: path0, Input0Index: bits0,
 		Input1Amount: amount1, Input1Owner: owner1, Input1Nonce: nonce1, Input1Path: path1, Input1Index: bits1,
 		ChangeAmount: changeAmount, ChangeOwner: changeOwner, ChangeNonce: changeNonce,
+		ChangePath: changePath, ChangeIndex: changeBits,
 		MerkleRoot: tree.root(), Nullifier0: nullifierNativeV1(owner0, nonce0, commitment0), Nullifier1: nullifierNativeV1(owner1, nonce1, commitment1),
 		ChangeCommitment: changeCommitment, PublicAmount: 4_000_000, ProtocolFee: 0, RelayerFee: 1_000_000,
 		RecipientBinding: fixtureRecipientBinding(), AssetID: 1, ContextBinding: fixtureWithdrawContextBinding(),
+		CurrentRoot: tree.root(), NewMerkleRoot: newTree.root(), ChangeLeafIndex: 2,
 	}
 }
 

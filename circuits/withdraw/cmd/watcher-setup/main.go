@@ -34,10 +34,10 @@ const (
 var (
 	baseFieldModulus = mustBigInt("21888242871839275222246405745257275088696311157297823662689037894645226208583")
 	fixtureVault     = []byte{
-		0x2b, 0x33, 0xe5, 0x98, 0xef, 0xa1, 0xe8, 0x79,
-		0x99, 0xf0, 0x53, 0xa3, 0xee, 0xc6, 0x1a, 0x80,
-		0xb8, 0x74, 0xda, 0x7f, 0x60, 0x85, 0xa0, 0xa1,
-		0x98, 0xda, 0x89, 0xea, 0xe5, 0x47, 0x71, 0xfe,
+		0x53, 0x00, 0x97, 0x5d, 0xd0, 0xc0, 0x7b, 0x8b,
+		0xc9, 0x07, 0x1d, 0x94, 0xad, 0x6f, 0xcd, 0x4d,
+		0x6e, 0x87, 0xb5, 0xf1, 0xef, 0x54, 0xe1, 0x8d,
+		0xd9, 0x6f, 0x65, 0x42, 0xba, 0x55, 0x31, 0xf1,
 	}
 )
 
@@ -122,8 +122,8 @@ func run(args []string) error {
 		Scheme:               "Groth16",
 		Gnark:                "v0.14.x",
 		MerkleDepth:          withdraw.MerkleDepthV1,
-		DepositPublicInputs:  3,
-		WithdrawPublicInputs: 10,
+		DepositPublicInputs:  6,
+		WithdrawPublicInputs: 13,
 		Files:                make(map[string]string, len(files)),
 		Warning:              "DEVELOPMENT SINGLE-PARTY SETUP ONLY. Never use this bundle with production funds.",
 	}
@@ -183,9 +183,13 @@ type fixtureValues struct {
 	commitment0, commitment1      *big.Int
 	changeAmount, changeOwner     *big.Int
 	changeNonce, changeCommitment *big.Int
-	tree                          treeV1
+	treeAfter0, treeAfter1        treeV1
+	treeAfterChange               treeV1
 	path0, path1                  [withdraw.MerkleDepthV1]frontend.Variable
 	bits0, bits1                  [withdraw.MerkleDepthV1]frontend.Variable
+	depositPath0, depositPath1    [withdraw.MerkleDepthV1]frontend.Variable
+	depositBits0, depositBits1    [withdraw.MerkleDepthV1]frontend.Variable
+	changePath, changeBits        [withdraw.MerkleDepthV1]frontend.Variable
 }
 
 func makeFixture() fixtureValues {
@@ -194,24 +198,36 @@ func makeFixture() fixtureValues {
 	amount1, owner1, nonce1 := big.NewInt(3_000_000), big.NewInt(3333), big.NewInt(4444)
 	commitment0 := note(asset, amount0, owner0, nonce0)
 	commitment1 := note(asset, amount1, owner1, nonce1)
+	changeAmount, changeOwner, changeNonce := big.NewInt(6_000_000), big.NewInt(5555), big.NewInt(6666)
+	changeCommitment := note(asset, changeAmount, changeOwner, changeNonce)
 	leaves := make([]*big.Int, 1<<withdraw.MerkleDepthV1)
 	for index := range leaves {
 		leaves[index] = new(big.Int)
 	}
+	emptyTree := makeTree(leaves)
+	depositPath0, depositBits0 := emptyTree.proof(0)
 	leaves[0] = commitment0
+	treeAfter0 := makeTree(leaves)
+	depositPath1, depositBits1 := treeAfter0.proof(1)
 	leaves[1] = commitment1
-	tree := makeTree(leaves)
-	path0, bits0 := tree.proof(0)
-	path1, bits1 := tree.proof(1)
-	changeAmount, changeOwner, changeNonce := big.NewInt(6_000_000), big.NewInt(5555), big.NewInt(6666)
+	treeAfter1 := makeTree(leaves)
+	path0, bits0 := treeAfter1.proof(0)
+	path1, bits1 := treeAfter1.proof(1)
+	changePath, changeBits := treeAfter1.proof(2)
+	leaves[2] = changeCommitment
+	treeAfterChange := makeTree(leaves)
 	return fixtureValues{
 		asset:   asset,
 		amount0: amount0, owner0: owner0, nonce0: nonce0,
 		amount1: amount1, owner1: owner1, nonce1: nonce1,
 		commitment0: commitment0, commitment1: commitment1,
 		changeAmount: changeAmount, changeOwner: changeOwner, changeNonce: changeNonce,
-		changeCommitment: note(asset, changeAmount, changeOwner, changeNonce),
-		tree:             tree, path0: path0, bits0: bits0, path1: path1, bits1: bits1,
+		changeCommitment: changeCommitment,
+		treeAfter0:       treeAfter0, treeAfter1: treeAfter1, treeAfterChange: treeAfterChange,
+		path0: path0, bits0: bits0, path1: path1, bits1: bits1,
+		depositPath0: depositPath0, depositBits0: depositBits0,
+		depositPath1: depositPath1, depositBits1: depositBits1,
+		changePath: changePath, changeBits: changeBits,
 	}
 }
 
@@ -225,29 +241,19 @@ type setupResult struct {
 
 func buildWithdrawalSetup(fixture fixtureValues) (setupResult, error) {
 	assignment := withdraw.CircuitV1{
-		Input0Amount:     fixture.amount0,
-		Input0Owner:      fixture.owner0,
-		Input0Nonce:      fixture.nonce0,
-		Input0Path:       fixture.path0,
-		Input0Index:      fixture.bits0,
-		Input1Amount:     fixture.amount1,
-		Input1Owner:      fixture.owner1,
-		Input1Nonce:      fixture.nonce1,
-		Input1Path:       fixture.path1,
-		Input1Index:      fixture.bits1,
-		ChangeAmount:     fixture.changeAmount,
-		ChangeOwner:      fixture.changeOwner,
-		ChangeNonce:      fixture.changeNonce,
-		MerkleRoot:       fixture.tree.root(),
+		Input0Amount: fixture.amount0, Input0Owner: fixture.owner0, Input0Nonce: fixture.nonce0,
+		Input0Path: fixture.path0, Input0Index: fixture.bits0,
+		Input1Amount: fixture.amount1, Input1Owner: fixture.owner1, Input1Nonce: fixture.nonce1,
+		Input1Path: fixture.path1, Input1Index: fixture.bits1,
+		ChangeAmount: fixture.changeAmount, ChangeOwner: fixture.changeOwner, ChangeNonce: fixture.changeNonce,
+		ChangePath: fixture.changePath, ChangeIndex: fixture.changeBits,
+		MerkleRoot:       fixture.treeAfter1.root(),
 		Nullifier0:       nullifier(fixture.owner0, fixture.nonce0, fixture.commitment0),
 		Nullifier1:       nullifier(fixture.owner1, fixture.nonce1, fixture.commitment1),
 		ChangeCommitment: fixture.changeCommitment,
-		PublicAmount:     4_000_000,
-		ProtocolFee:      0,
-		RelayerFee:       1_000_000,
-		RecipientBinding: recipientBinding(),
-		AssetID:          1,
-		ContextBinding:   withdrawContextBinding(),
+		PublicAmount:     4_000_000, ProtocolFee: 0, RelayerFee: 1_000_000,
+		RecipientBinding: recipientBinding(), AssetID: 1, ContextBinding: withdrawContextBinding(),
+		CurrentRoot: fixture.treeAfter1.root(), NewMerkleRoot: fixture.treeAfterChange.root(), ChangeLeafIndex: 2,
 	}
 	ccs, err := frontend.Compile(ecc.BN254.ScalarField(), r1cs.NewBuilder, &withdraw.CircuitV1{})
 	if err != nil {
@@ -257,22 +263,21 @@ func buildWithdrawalSetup(fixture fixtureValues) (setupResult, error) {
 	if err != nil {
 		return setupResult{}, err
 	}
-	witness, err := frontend.NewWitness(&assignment, ecc.BN254.ScalarField())
+	fullWitness, err := frontend.NewWitness(&assignment, ecc.BN254.ScalarField())
 	if err != nil {
 		return setupResult{}, err
 	}
-	publicWitness, err := witness.Public()
+	publicWitness, err := fullWitness.Public()
 	if err != nil {
 		return setupResult{}, err
 	}
-	proof, err := groth16.Prove(ccs, pk, witness)
+	proof, err := groth16.Prove(ccs, pk, fullWitness)
 	if err != nil {
 		return setupResult{}, err
 	}
 	if err := groth16.Verify(proof, vk, publicWitness); err != nil {
 		return setupResult{}, err
 	}
-
 	proofWire, err := xarkProof(proof)
 	if err != nil {
 		return setupResult{}, err
@@ -285,7 +290,7 @@ func buildWithdrawalSetup(fixture fixtureValues) (setupResult, error) {
 	if err != nil {
 		return setupResult{}, err
 	}
-	if len(vkWire) != 1152 || len(publicWire) != 320 {
+	if len(vkWire) != 1344 || len(publicWire) != 416 {
 		return setupResult{}, errors.New("unexpected withdrawal wire length")
 	}
 	witnessJSON, err := json.MarshalIndent(withdrawWitnessMap(assignment), "", "  ")
@@ -319,22 +324,32 @@ func buildDepositSetup(fixture fixtureValues) (depositSetupResult, error) {
 		return depositSetupResult{}, err
 	}
 	assignments := []withdraw.DepositCircuitV1{
-		{Owner: fixture.owner0, Nonce: fixture.nonce0, Commitment: fixture.commitment0, Amount: fixture.amount0, AssetID: fixture.asset},
-		{Owner: fixture.owner1, Nonce: fixture.nonce1, Commitment: fixture.commitment1, Amount: fixture.amount1, AssetID: fixture.asset},
+		{
+			Owner: fixture.owner0, Nonce: fixture.nonce0,
+			Path: fixture.depositPath0, Index: fixture.depositBits0,
+			Commitment: fixture.commitment0, Amount: fixture.amount0, AssetID: fixture.asset,
+			OldRoot: 0, NewRoot: fixture.treeAfter0.root(), LeafIndex: 0,
+		},
+		{
+			Owner: fixture.owner1, Nonce: fixture.nonce1,
+			Path: fixture.depositPath1, Index: fixture.depositBits1,
+			Commitment: fixture.commitment1, Amount: fixture.amount1, AssetID: fixture.asset,
+			OldRoot: fixture.treeAfter0.root(), NewRoot: fixture.treeAfter1.root(), LeafIndex: 1,
+		},
 	}
 	proofs := make([][]byte, 2)
 	publicInputs := make([][]byte, 2)
 	witnessJSON := make([][]byte, 2)
 	for index := range assignments {
-		witness, err := frontend.NewWitness(&assignments[index], ecc.BN254.ScalarField())
+		fullWitness, err := frontend.NewWitness(&assignments[index], ecc.BN254.ScalarField())
 		if err != nil {
 			return depositSetupResult{}, err
 		}
-		publicWitness, err := witness.Public()
+		publicWitness, err := fullWitness.Public()
 		if err != nil {
 			return depositSetupResult{}, err
 		}
-		proof, err := groth16.Prove(ccs, pk, witness)
+		proof, err := groth16.Prove(ccs, pk, fullWitness)
 		if err != nil {
 			return depositSetupResult{}, err
 		}
@@ -359,7 +374,7 @@ func buildDepositSetup(fixture fixtureValues) (depositSetupResult, error) {
 	if err != nil {
 		return depositSetupResult{}, err
 	}
-	if len(vkWire) != 704 || len(publicInputs[0]) != 96 || len(publicInputs[1]) != 96 {
+	if len(vkWire) != 896 || len(publicInputs[0]) != 192 || len(publicInputs[1]) != 192 {
 		return depositSetupResult{}, errors.New("unexpected deposit wire length")
 	}
 	return depositSetupResult{
@@ -572,13 +587,19 @@ func withdrawWitnessMap(value withdraw.CircuitV1) map[string]any {
 	return map[string]any{
 		"Input0Amount": variableString(value.Input0Amount), "Input0Owner": variableString(value.Input0Owner), "Input0Nonce": variableString(value.Input0Nonce), "Input0Path": variableStrings(value.Input0Path), "Input0Index": variableStrings(value.Input0Index),
 		"Input1Amount": variableString(value.Input1Amount), "Input1Owner": variableString(value.Input1Owner), "Input1Nonce": variableString(value.Input1Nonce), "Input1Path": variableStrings(value.Input1Path), "Input1Index": variableStrings(value.Input1Index),
-		"ChangeAmount": variableString(value.ChangeAmount), "ChangeOwner": variableString(value.ChangeOwner), "ChangeNonce": variableString(value.ChangeNonce),
+		"ChangeAmount": variableString(value.ChangeAmount), "ChangeOwner": variableString(value.ChangeOwner), "ChangeNonce": variableString(value.ChangeNonce), "ChangePath": variableStrings(value.ChangePath), "ChangeIndex": variableStrings(value.ChangeIndex),
 		"MerkleRoot": variableString(value.MerkleRoot), "Nullifier0": variableString(value.Nullifier0), "Nullifier1": variableString(value.Nullifier1), "ChangeCommitment": variableString(value.ChangeCommitment),
 		"PublicAmount": variableString(value.PublicAmount), "ProtocolFee": variableString(value.ProtocolFee), "RelayerFee": variableString(value.RelayerFee), "RecipientBinding": variableString(value.RecipientBinding), "AssetID": variableString(value.AssetID), "ContextBinding": variableString(value.ContextBinding),
+		"CurrentRoot": variableString(value.CurrentRoot), "NewMerkleRoot": variableString(value.NewMerkleRoot), "ChangeLeafIndex": variableString(value.ChangeLeafIndex),
 	}
 }
 func depositWitnessMap(value withdraw.DepositCircuitV1) map[string]any {
-	return map[string]any{"Owner": variableString(value.Owner), "Nonce": variableString(value.Nonce), "Commitment": variableString(value.Commitment), "Amount": variableString(value.Amount), "AssetID": variableString(value.AssetID)}
+	return map[string]any{
+		"Owner": variableString(value.Owner), "Nonce": variableString(value.Nonce),
+		"Path": variableStrings(value.Path), "Index": variableStrings(value.Index),
+		"Commitment": variableString(value.Commitment), "Amount": variableString(value.Amount), "AssetID": variableString(value.AssetID),
+		"OldRoot": variableString(value.OldRoot), "NewRoot": variableString(value.NewRoot), "LeafIndex": variableString(value.LeafIndex),
+	}
 }
 
 func rustArray(value []byte) []byte {

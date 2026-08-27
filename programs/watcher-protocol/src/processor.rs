@@ -1,5 +1,3 @@
-use ark_bn254::Fr;
-use ark_ff::{AdditiveGroup, BigInteger, Field, PrimeField};
 use solana_program::{
     account_info::{next_account_info, AccountInfo},
     entrypoint::ProgramResult,
@@ -15,7 +13,10 @@ use crate::{
         append_unique_32, contains_32, ConfigAccount, VaultAccount, WatcherInstruction,
         CONFIG_ACCOUNT_LEN, REGISTRY_HEADER_LEN, VAULT_ACCOUNT_LEN,
     },
-    public_inputs::{sol_asset_id_field_v1, withdraw_context_binding_v1, CircuitV1PublicInputs},
+    public_inputs::{
+        sol_asset_id_field_v1, withdraw_context_binding_v1, CircuitV1PublicInputs,
+        DepositV1PublicInputs,
+    },
     root_history::{
         initialize_root_history, latest_root, push_root, require_recent_root,
         ROOT_HISTORY_ACCOUNT_LEN,
@@ -27,25 +28,8 @@ use crate::{
 pub const VAULT_SEED_V1: &[u8] = b"watcher-vault-v1";
 const MERKLE_DEPTH_V1: usize = 4;
 const MERKLE_LEAVES_V1: usize = 1 << MERKLE_DEPTH_V1;
-const DOMAIN_NOTE_V1: u64 = 91_001;
-const DOMAIN_MERKLE_V1: u64 = 91_003;
 pub const COMMITMENT_REGISTRY_ACCOUNT_LEN: usize =
     REGISTRY_HEADER_LEN + MERKLE_LEAVES_V1 * 32 + MERKLE_DEPTH_V1 * 32;
-const COMMITMENT_FRONTIER_OFFSET_V1: usize = REGISTRY_HEADER_LEN + MERKLE_LEAVES_V1 * 32;
-const MIMC_CONSTANTS_BN254: [Fr; 110] = include!("mimc_constants_array.in");
-const ZERO_SUBTREES_V1: [Fr; MERKLE_DEPTH_V1] = [
-    ark_ff::MontFp!("0"),
-    ark_ff::MontFp!(
-        "13944871254576092688407995039196385293275829255317419112130051225496143636462"
-    ),
-    ark_ff::MontFp!(
-        "16343093116817376678535597198206140961913989012995557384633161644309886798874"
-    ),
-    ark_ff::MontFp!(
-        "21733524612354527147942681386006398610659529737868531993862559850617141653616"
-    ),
-];
-
 pub fn vault_address_v1(program_id: &Pubkey, config: &Pubkey) -> (Pubkey, u8) {
     Pubkey::find_program_address(&[VAULT_SEED_V1, config.as_ref()], program_id)
 }
@@ -311,53 +295,6 @@ fn initialize(program_id: &Pubkey, accounts: &[AccountInfo], treasury: Pubkey) -
     replace_account_data(vault, &next_vault)
 }
 
-pub fn mimc_hash_v1(values: &[Fr]) -> Fr {
-    let mut hash = Fr::ZERO;
-    for value in values {
-        let data = *value;
-        let mut message = data;
-        for constant in &MIMC_CONSTANTS_BN254 {
-            let temporary = message + hash + *constant;
-            let squared = temporary.square();
-            let fourth = squared.square();
-            message = fourth * temporary;
-        }
-        message += hash;
-        hash = message + hash + data;
-    }
-    hash
-}
-
-fn fr_to_le32(value: Fr) -> [u8; 32] {
-    let raw = value.into_bigint().to_bytes_le();
-    let mut output = [0u8; 32];
-    output[..raw.len()].copy_from_slice(&raw);
-    output
-}
-
-fn fr_from_canonical_le32(bytes: &[u8; 32]) -> Result<Fr, WatcherError> {
-    let value = Fr::from_le_bytes_mod_order(bytes);
-    if fr_to_le32(value) != *bytes {
-        return Err(WatcherError::InvalidCommitmentField);
-    }
-    Ok(value)
-}
-
-fn parent_v1(left: Fr, right: Fr) -> Fr {
-    mimc_hash_v1(&[Fr::from(DOMAIN_MERKLE_V1), left, right])
-}
-
-pub fn merkle_root_from_leaves_v1(mut leaves: [Fr; MERKLE_LEAVES_V1]) -> Fr {
-    let mut width = MERKLE_LEAVES_V1;
-    while width > 1 {
-        for index in 0..(width / 2) {
-            leaves[index] = parent_v1(leaves[index * 2], leaves[index * 2 + 1]);
-        }
-        width /= 2;
-    }
-    leaves[0]
-}
-
 fn commitment_count(registry: &[u8]) -> Result<usize, WatcherError> {
     if registry.len() < REGISTRY_HEADER_LEN || registry[0] != STATE_VERSION {
         return Err(WatcherError::InvalidAccountData);
@@ -374,71 +311,6 @@ fn commitment_count(registry: &[u8]) -> Result<usize, WatcherError> {
         return Err(WatcherError::InvalidAccountData);
     }
     Ok(count)
-}
-
-/// Append one commitment and update the fixed-depth frontier in O(log N).
-///
-/// The four trailing field elements hold filled subtrees. The first count
-/// commitment slots remain append-only and keep the existing client codec.
-pub fn append_commitment_v1(
-    registry: &mut [u8],
-    commitment: [u8; 32],
-) -> Result<[u8; 32], WatcherError> {
-    if registry.len() < COMMITMENT_REGISTRY_ACCOUNT_LEN || registry[0] != STATE_VERSION {
-        return Err(WatcherError::InvalidAccountData);
-    }
-    let count = commitment_count(registry)?;
-    if count >= MERKLE_LEAVES_V1 {
-        return Err(WatcherError::MerkleTreeFull);
-    }
-    if contains_32(registry, &commitment)? {
-        return Err(WatcherError::DuplicateCommitment);
-    }
-
-    let mut current = fr_from_canonical_le32(&commitment)?;
-    let mut position = count;
-    for level in 0..MERKLE_DEPTH_V1 {
-        let frontier_offset = COMMITMENT_FRONTIER_OFFSET_V1 + level * 32;
-        if position & 1 == 0 {
-            registry[frontier_offset..frontier_offset + 32].copy_from_slice(&fr_to_le32(current));
-            current = parent_v1(current, ZERO_SUBTREES_V1[level]);
-        } else {
-            let left_bytes: [u8; 32] = registry[frontier_offset..frontier_offset + 32]
-                .try_into()
-                .unwrap();
-            let left = fr_from_canonical_le32(&left_bytes)?;
-            current = parent_v1(left, current);
-        }
-        position >>= 1;
-    }
-
-    let leaf_offset = REGISTRY_HEADER_LEN + count * 32;
-    registry[leaf_offset..leaf_offset + 32].copy_from_slice(&commitment);
-    registry[1..5].copy_from_slice(&((count + 1) as u32).to_le_bytes());
-    Ok(fr_to_le32(current))
-}
-
-/// Circuit V1-compatible Merkle root. Commitments are canonical little-endian
-/// BN254 scalar field elements, placed sequentially into a fixed 16-leaf tree.
-pub fn commitment_root(registry: &[u8]) -> Result<[u8; 32], WatcherError> {
-    let count = commitment_count(registry)?;
-    if count == 0 {
-        return Ok([0u8; 32]);
-    }
-    if count > MERKLE_LEAVES_V1 {
-        return Err(WatcherError::MerkleTreeFull);
-    }
-
-    let mut leaves = [Fr::ZERO; MERKLE_LEAVES_V1];
-    let end = REGISTRY_HEADER_LEN + count * 32;
-    for (index, chunk) in registry[REGISTRY_HEADER_LEN..end]
-        .chunks_exact(32)
-        .enumerate()
-    {
-        let bytes: [u8; 32] = chunk.try_into().unwrap();
-        leaves[index] = fr_from_canonical_le32(&bytes)?;
-    }
-    Ok(fr_to_le32(merkle_root_from_leaves_v1(leaves)))
 }
 
 fn validate_root_state(
@@ -468,8 +340,6 @@ fn deposit(
     public_inputs: &[u8],
 ) -> ProgramResult {
     DepositRecord { commitment, amount }.validate()?;
-    fr_from_canonical_le32(&commitment)?;
-
     let mut iterator = accounts.iter();
     let depositor = next_account_info(&mut iterator)?;
     let config = next_account_info(&mut iterator)?;
@@ -495,20 +365,30 @@ fn deposit(
     let root_history_data = root_history.try_borrow_data()?.to_vec();
     let mut parsed_config = ConfigAccount::unpack(&config_data)?;
     validate_root_state(&parsed_config, &root_history_data)?;
+    let append_index = commitment_count(&commitments_data)?;
+    if append_index >= MERKLE_LEAVES_V1 {
+        return Err(WatcherError::MerkleTreeFull.into());
+    }
+    let decoded_inputs = DepositV1PublicInputs::decode(public_inputs)?;
 
     let rent_reserve = rent_reserve_v1()?;
     let mut vault_state = validate_vault_state(program_id, config.key, vault)?;
     validate_vault_balance(vault, &vault_state, rent_reserve)?;
 
     let asset_id = sol_asset_id_field_v1();
-    verify_deposit_v1(&commitment, amount, &asset_id, proof, public_inputs)?;
-
-    if commitment_count(&commitments_data)? >= MERKLE_LEAVES_V1 {
-        return Err(WatcherError::MerkleTreeFull.into());
-    }
+    verify_deposit_v1(
+        &commitment,
+        amount,
+        &asset_id,
+        &parsed_config.merkle_root,
+        append_index as u64,
+        proof,
+        public_inputs,
+    )?;
 
     let mut next_commitments = commitments_data;
-    let new_root = append_commitment_v1(&mut next_commitments, commitment)?;
+    append_unique_32(&mut next_commitments, commitment)?;
+    let new_root = decoded_inputs.new_root;
 
     let mut next_root_history = root_history_data;
     push_root(&mut next_root_history, new_root)?;
@@ -553,9 +433,6 @@ fn withdraw(
     public_inputs: &[u8],
 ) -> ProgramResult {
     statement.validate_development()?;
-    if statement.change_commitment != [0u8; 32] {
-        fr_from_canonical_le32(&statement.change_commitment)?;
-    }
 
     let decoded_inputs = CircuitV1PublicInputs::decode(public_inputs)?;
 
@@ -613,9 +490,8 @@ fn withdraw(
     {
         return Err(WatcherError::NullifierAlreadySpent.into());
     }
-    if statement.change_commitment != [0u8; 32]
-        && commitment_count(&commitments_data)? >= MERKLE_LEAVES_V1
-    {
+    let append_index = commitment_count(&commitments_data)?;
+    if statement.change_commitment != [0u8; 32] && append_index >= MERKLE_LEAVES_V1 {
         return Err(WatcherError::MerkleTreeFull.into());
     }
 
@@ -631,6 +507,8 @@ fn withdraw(
     verify_circuit_v1(
         &statement,
         &decoded_inputs.merkle_root,
+        &parsed_config.merkle_root,
+        append_index as u64,
         &asset_id,
         &context_binding,
         proof,
@@ -654,7 +532,8 @@ fn withdraw(
     let mut next_root_history = root_history_data;
     let mut next_config = config_data;
     if statement.change_commitment != [0u8; 32] {
-        let new_root = append_commitment_v1(&mut next_commitments, statement.change_commitment)?;
+        append_unique_32(&mut next_commitments, statement.change_commitment)?;
+        let new_root = decoded_inputs.new_merkle_root;
         push_root(&mut next_root_history, new_root)?;
         parsed_config.merkle_root = new_root;
         parsed_config.pack(&mut next_config)?;
@@ -705,29 +584,6 @@ fn withdraw(
 mod tests {
     use super::*;
     use crate::dev_fixture::DEV_PUBLIC_INPUT_BYTES;
-
-    #[test]
-    fn rust_mimc_tree_matches_sequential_circuit_v1_fixture_root() {
-        let commitment_0 = mimc_hash_v1(&[
-            Fr::from(DOMAIN_NOTE_V1),
-            Fr::from(1u64),
-            Fr::from(8_000_000u64),
-            Fr::from(1111u64),
-            Fr::from(2222u64),
-        ]);
-        let commitment_1 = mimc_hash_v1(&[
-            Fr::from(DOMAIN_NOTE_V1),
-            Fr::from(1u64),
-            Fr::from(3_000_000u64),
-            Fr::from(3333u64),
-            Fr::from(4444u64),
-        ]);
-        let mut leaves = [Fr::ZERO; MERKLE_LEAVES_V1];
-        leaves[0] = commitment_0;
-        leaves[1] = commitment_1;
-        let root = fr_to_le32(merkle_root_from_leaves_v1(leaves));
-        assert_eq!(root, DEV_PUBLIC_INPUT_BYTES[..32]);
-    }
 
     #[test]
     fn fixed_custody_fixture_uses_the_real_vault_pda() {

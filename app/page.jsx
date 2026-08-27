@@ -521,6 +521,7 @@ export default function Home() {
       const opening = noteRecordToInputV1(pendingRecord);
       setActionStage('Generating a private deposit proof in this browser…');
       const prepared = await prepareDepositV1({
+        connection,
         accounts: {
           programId: runtimeKeys.programId,
           depositor: publicKey,

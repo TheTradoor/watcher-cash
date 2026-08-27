@@ -34,12 +34,12 @@ test('deposit payload matches the Rust codec layout', () => {
   assert.equal(new DataView(encoded.buffer, encoded.byteOffset + 41, 2).getUint16(0, true), 256);
   assert.equal(
     new DataView(encoded.buffer, encoded.byteOffset + 41 + 2 + 256, 2).getUint16(0, true),
-    96,
+    192,
   );
-  assert.equal(encoded.length, 1 + 32 + 8 + 2 + 256 + 2 + 96);
+  assert.equal(encoded.length, 1 + 32 + 8 + 2 + 256 + 2 + 192);
 });
 
-test('withdraw payload binds recipient, fees, proof and ten public fields', () => {
+test('withdraw payload binds recipient, fees, proof and thirteen public fields', () => {
   const encoded = encodeWithdrawData({
     nullifier0: bytes(32, 1),
     nullifier1: bytes(32, 2),
@@ -56,7 +56,7 @@ test('withdraw payload binds recipient, fees, proof and ten public fields', () =
   assert.deepEqual(encoded.slice(97, 129), key(4).toBytes());
   assert.equal(new DataView(encoded.buffer, encoded.byteOffset + 129, 8).getBigUint64(0, true), 4_000_000n);
   assert.equal(new DataView(encoded.buffer, encoded.byteOffset + 145, 8).getBigUint64(0, true), 1_000_000n);
-  assert.equal(encoded.length, 1 + 32 * 4 + 8 * 3 + 2 + 256 + 2 + 320);
+  assert.equal(encoded.length, 1 + 32 * 4 + 8 * 3 + 2 + 256 + 2 + 416);
 });
 
 test('instruction builders use the exact custody account order', () => {
@@ -98,7 +98,7 @@ test('instruction builders use the exact custody account order', () => {
     commitment: bytes(32, 7),
     amount: 8_000_000n,
     proof: bytes(256, 8),
-    publicInputs: bytes(96, 9),
+    publicInputs: bytes(192, 9),
   });
   assert.deepEqual(
     deposit.keys.map(({ pubkey }) => pubkey.toBase58()),
@@ -123,7 +123,7 @@ test('instruction builders use the exact custody account order', () => {
     publicAmount: 4_000_000n,
     relayerFee: 1_000_000n,
     proof: bytes(256, 4),
-    publicInputs: bytes(320, 5),
+    publicInputs: bytes(416, 5),
   });
   assert.deepEqual(
     withdraw.keys.map(({ pubkey }) => pubkey.toBase58()),
@@ -141,7 +141,7 @@ test('malformed proof and public-input lengths fail closed', () => {
         commitment: bytes(32, 1),
         amount: 1n,
         proof: bytes(255, 2),
-        publicInputs: bytes(96, 3),
+        publicInputs: bytes(192, 3),
       }),
     /256 bytes/,
   );
@@ -154,8 +154,8 @@ test('malformed proof and public-input lengths fail closed', () => {
         recipient: key(4),
         publicAmount: 1n,
         proof: bytes(256, 5),
-        publicInputs: bytes(319, 6),
+        publicInputs: bytes(415, 6),
       }),
-    /320 bytes/,
+    /416 bytes/,
   );
 });
