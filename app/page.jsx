@@ -43,10 +43,15 @@ function loadHasher() {
   return hasherPromise;
 }
 
+function normalizeAmount(value) {
+  return String(value ?? '').trim().replace(',', '.');
+}
+
 function toBaseUnits(value, decimals) {
+  const normalized = normalizeAmount(value);
   const rx = new RegExp(`^\\d+(\\.\\d{1,${decimals}})?$`);
-  if (!rx.test(value)) throw new Error('Enter a valid amount');
-  const [whole, fraction = ''] = value.split('.');
+  if (!rx.test(normalized)) throw new Error('Enter a valid amount');
+  const [whole, fraction = ''] = normalized.split('.');
   const scale = 10n ** BigInt(decimals);
   const result = BigInt(whole) * scale + BigInt((fraction + '0'.repeat(decimals)).slice(0, decimals));
   const n = Number(result);
@@ -162,10 +167,22 @@ export default function Page() {
   const tokenMeta = TOKEN_META[tokenName];
 
   useEffect(() => {
-    connection
-      .getGenesisHash()
-      .then((hash) => setNetwork(hash === GENESIS ? 'mainnet' : 'wrong-network'))
-      .catch(() => setNetwork('offline'));
+    let cancelled = false;
+    const checkNetwork = async () => {
+      try {
+        const hash = await connection.getGenesisHash();
+        if (!cancelled) setNetwork(hash === GENESIS ? 'mainnet' : 'wrong-network');
+      } catch {
+        try {
+          await connection.getLatestBlockhash('confirmed');
+          if (!cancelled) setNetwork('mainnet');
+        } catch {
+          if (!cancelled) setNetwork('offline');
+        }
+      }
+    };
+    checkNetwork();
+    return () => { cancelled = true; };
   }, [connection]);
 
   useEffect(() => {
@@ -288,7 +305,12 @@ export default function Page() {
     setError('');
     setTx('');
     try {
-      if (network !== 'mainnet') throw new Error('Watcher Cash is configured for Solana Mainnet.');
+      if (network === 'wrong-network') throw new Error('Watcher Cash is configured for Solana Mainnet.');
+      if (network === 'offline') {
+        setStatus('Reconnecting to Solana Mainnet…');
+        await connection.getLatestBlockhash('confirmed');
+        setNetwork('mainnet');
+      }
       const { sdk, service } = await encryption();
       const lightWasm = await loadHasher();
       const units = toBaseUnits(amount, tokenMeta.decimals);
@@ -365,7 +387,7 @@ export default function Page() {
     }
   };
 
-  const actionReady = connected && signature && sdkReady && network === 'mainnet' && !busy && amount;
+  const actionReady = connected && signature && sdkReady && network !== 'wrong-network' && !busy && normalizeAmount(amount).length > 0;
 
   return (
     <main className="site-shell">
@@ -469,7 +491,7 @@ export default function Page() {
                 </div>
 
                 <label>Amount</label>
-                <div className="amount-field"><input inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="0.00" /><span>{tokenMeta.label}</span></div>
+                <div className="amount-field"><input inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value.replace(',', '.'))} placeholder="0.00" /><span>{tokenMeta.label}</span></div>
 
                 {mode === 'withdraw' && (
                   <>
