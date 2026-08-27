@@ -1,5 +1,6 @@
 node_modules/
 .next/
 out/
+target/
 .watcher-devnet-recovery.json
 *.log
