@@ -1,0 +1,31 @@
+name: Watcher Protocol Circuit CI
+
+on:
+  push:
+    branches: [watcher-protocol]
+    paths:
+      - 'circuits/withdraw/**'
+      - '.github/workflows/watcher-circuit.yml'
+  pull_request:
+    paths:
+      - 'circuits/withdraw/**'
+
+permissions:
+  contents: read
+
+jobs:
+  test-withdraw-circuit:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: circuits/withdraw
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+          cache-dependency-path: circuits/withdraw/go.sum
+      - name: Resolve modules
+        run: go mod tidy
+      - name: Test
+        run: go test -v ./...
