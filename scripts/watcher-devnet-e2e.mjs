@@ -3,6 +3,7 @@
 import { readFile, writeFile, chmod } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
 import {
+  ComputeBudgetProgram,
   Connection,
   Keypair,
   PublicKey,
@@ -25,6 +26,7 @@ import {
 } from '../client/watcher/index.mjs';
 
 const MAINNET_GENESIS = '5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d';
+const GROTH16_COMPUTE_UNITS_V1 = 1_400_000;
 const rpcURL = process.env.WATCHER_DEVNET_RPC || 'https://api.devnet.solana.com';
 const proverEndpoint = process.env.WATCHER_PROVER_URL || 'http://127.0.0.1:8090';
 const recoveryPath = process.env.WATCHER_RECOVERY_FILE || '.watcher-devnet-recovery.json';
@@ -58,6 +60,10 @@ function transactionInstruction(descriptor) {
     keys: descriptor.keys,
     data: Buffer.from(descriptor.data),
   });
+}
+
+function groth16ComputeBudgetInstruction() {
+  return ComputeBudgetProgram.setComputeUnitLimit({ units: GROTH16_COMPUTE_UNITS_V1 });
 }
 
 async function send(connection, payer, instructions, extraSigners = []) {
@@ -159,7 +165,12 @@ async function main() {
     space,
     programId,
   }));
-  const payoutSeedLamports = 1;
+  // A real validator enforces rent at transaction finalization. Seeding these
+  // zero-data payout accounts with one lamport works in some mocks but fails on
+  // RPC, even when the Watcher initialize instruction itself succeeds.
+  const payoutSeedLamports = await connection.getMinimumBalanceForRentExemption(0, 'confirmed');
+  recovery.payoutSeedLamports = payoutSeedLamports;
+  await writeRecovery(recovery);
   for (const destination of [treasury.publicKey, relayer.publicKey, recipient.publicKey]) {
     createInstructions.push(SystemProgram.transfer({
       fromPubkey: payer.publicKey,
@@ -209,7 +220,7 @@ async function main() {
   const firstDepositTx = await send(
     connection,
     payer,
-    [transactionInstruction(firstDeposit.instruction)],
+    [groth16ComputeBudgetInstruction(), transactionInstruction(firstDeposit.instruction)],
   );
   recovery.status = 'deposit-1-confirmed';
   recovery.transactions.deposit0 = firstDepositTx;
@@ -228,7 +239,7 @@ async function main() {
   const secondDepositTx = await send(
     connection,
     payer,
-    [transactionInstruction(secondDeposit.instruction)],
+    [groth16ComputeBudgetInstruction(), transactionInstruction(secondDeposit.instruction)],
   );
   recovery.status = 'deposit-2-confirmed';
   recovery.transactions.deposit1 = secondDepositTx;
@@ -265,7 +276,7 @@ async function main() {
   const withdrawalTx = await send(
     connection,
     payer,
-    [transactionInstruction(withdrawal.instruction)],
+    [groth16ComputeBudgetInstruction(), transactionInstruction(withdrawal.instruction)],
   );
   recovery.status = 'withdraw-confirmed';
   recovery.transactions.withdraw = withdrawalTx;
