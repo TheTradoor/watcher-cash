@@ -38,7 +38,7 @@ jobs:
       - name: Export matched deposit coordinates
         env:
           WATCHER_EXPORT_DEPOSIT_COORDS: '1'
-        run: go test -run TestExportDepositCoordinateFixture -v
+        run: go test -run TestExportDepositCoordinateFixtures -v
       - name: Validate coordinate fixtures
         run: |
           python - <<'PY'
@@ -50,13 +50,18 @@ jobs:
           assert all(len(value) == 64 for value in withdrawal['proof'].values())
           assert all(len(value) == 64 for value in withdrawal['public_inputs'])
 
-          deposit = json.load(open('fixture-out/deposit_coordinates.json'))
-          assert len(deposit['public_inputs']) == 3
-          assert len(deposit['vk']['ic']) == 4
-          assert all(len(value) == 64 for value in deposit['proof'].values())
-          assert all(len(value) == 64 for value in deposit['public_inputs'])
+          deposits = [
+              json.load(open('fixture-out/deposit_coordinates.json')),
+              json.load(open('fixture-out/deposit_coordinates_1.json')),
+          ]
+          for deposit in deposits:
+              assert len(deposit['public_inputs']) == 3
+              assert len(deposit['vk']['ic']) == 4
+              assert all(len(value) == 64 for value in deposit['proof'].values())
+              assert all(len(value) == 64 for value in deposit['public_inputs'])
+          assert deposits[0]['vk'] == deposits[1]['vk']
 
-          print('coordinate fixtures valid: withdrawal=10 inputs, deposit=3 inputs')
+          print('coordinate fixtures valid: withdrawal=10 inputs, deposits=3 inputs each')
           PY
       - name: Build matched xark wire fixtures
         run: |
@@ -73,7 +78,7 @@ jobs:
           def rust_array(value):
               return '[' + ','.join(f'0x{byte:02x}' for byte in value) + ']\n'
 
-          def build_fixture(source, stem, public_input_count, expected_vk_bytes):
+          def encode_fixture(source, public_input_count, expected_vk_bytes):
               coordinates = json.load(open(source))
               proof_coordinates = coordinates['proof']
               verifying_key = coordinates['vk']
@@ -109,14 +114,28 @@ jobs:
               assert len(proof) == 256
               assert len(vk) == expected_vk_bytes
               assert len(public_inputs) == 32 * public_input_count
+              return proof, vk, public_inputs
 
-              (output / f'{stem}_proof_array.in').write_text(rust_array(proof))
-              (output / f'{stem}_vk_array.in').write_text(rust_array(vk))
-              (output / f'{stem}_public_inputs_array.in').write_text(rust_array(public_inputs))
+          withdrawal_proof, withdrawal_vk, withdrawal_inputs = encode_fixture(
+              'fixture-out/coordinates.json', 10, 1152
+          )
+          deposit_proof_0, deposit_vk_0, deposit_inputs_0 = encode_fixture(
+              'fixture-out/deposit_coordinates.json', 3, 704
+          )
+          deposit_proof_1, deposit_vk_1, deposit_inputs_1 = encode_fixture(
+              'fixture-out/deposit_coordinates_1.json', 3, 704
+          )
+          assert deposit_vk_0 == deposit_vk_1
 
-          build_fixture('fixture-out/coordinates.json', 'dev', 10, 1152)
-          build_fixture('fixture-out/deposit_coordinates.json', 'dev_deposit', 3, 704)
-          print('built matched withdrawal and deposit proof/VK/public-input fixtures')
+          (output / 'dev_proof_array.in').write_text(rust_array(withdrawal_proof))
+          (output / 'dev_vk_array.in').write_text(rust_array(withdrawal_vk))
+          (output / 'dev_public_inputs_array.in').write_text(rust_array(withdrawal_inputs))
+          (output / 'dev_deposit_proof_array.in').write_text(rust_array(deposit_proof_0))
+          (output / 'dev_deposit_public_inputs_array.in').write_text(rust_array(deposit_inputs_0))
+          (output / 'dev_deposit_proof_1_array.in').write_text(rust_array(deposit_proof_1))
+          (output / 'dev_deposit_public_inputs_1_array.in').write_text(rust_array(deposit_inputs_1))
+          (output / 'dev_deposit_vk_array.in').write_text(rust_array(deposit_vk_0))
+          print('built matched withdrawal and two deposit proof/VK/public-input fixtures')
           PY
       - name: Publish matched development verifier fixtures
         if: github.event_name == 'push'
@@ -129,8 +148,10 @@ jobs:
             programs/watcher-protocol/src/dev_vk_array.in \
             programs/watcher-protocol/src/dev_public_inputs_array.in \
             programs/watcher-protocol/src/dev_deposit_proof_array.in \
-            programs/watcher-protocol/src/dev_deposit_vk_array.in \
-            programs/watcher-protocol/src/dev_deposit_public_inputs_array.in
+            programs/watcher-protocol/src/dev_deposit_public_inputs_array.in \
+            programs/watcher-protocol/src/dev_deposit_proof_1_array.in \
+            programs/watcher-protocol/src/dev_deposit_public_inputs_1_array.in \
+            programs/watcher-protocol/src/dev_deposit_vk_array.in
           if git diff --cached --quiet; then
             echo 'fixtures unchanged'
           else
@@ -156,5 +177,6 @@ jobs:
             circuits/withdraw/testdata/v1_fixture/
             circuits/withdraw/fixture-out/coordinates.json
             circuits/withdraw/fixture-out/deposit_coordinates.json
+            circuits/withdraw/fixture-out/deposit_coordinates_1.json
           if-no-files-found: error
           retention-days: 7

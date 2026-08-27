@@ -11,18 +11,20 @@ import (
 	"github.com/consensys/gnark-crypto/ecc/bn254/fr"
 	"github.com/consensys/gnark/backend/groth16"
 	bn254groth16 "github.com/consensys/gnark/backend/groth16/bn254"
+	"github.com/consensys/gnark/constraint"
 	"github.com/consensys/gnark/frontend"
 )
 
-// The deposit proof and VK are produced by the same randomized development
-// Setup call. Never mix these coordinates with artifacts from another run.
-func TestExportDepositCoordinateFixture(t *testing.T) {
-	if os.Getenv("WATCHER_EXPORT_DEPOSIT_COORDS") != "1" {
-		t.Skip("set WATCHER_EXPORT_DEPOSIT_COORDS=1")
-	}
+func exportDepositCoordinateFixture(
+	t *testing.T,
+	ccs constraint.ConstraintSystem,
+	provingKey groth16.ProvingKey,
+	verifyingKey groth16.VerifyingKey,
+	assignment DepositCircuitV1,
+	fileName string,
+) {
+	t.Helper()
 
-	ccs, provingKey, verifyingKey := compileDepositV1(t)
-	assignment := validDepositV1()
 	witness, err := frontend.NewWitness(&assignment, ecc.BN254.ScalarField())
 	if err != nil {
 		t.Fatal(err)
@@ -105,8 +107,34 @@ func TestExportDepositCoordinateFixture(t *testing.T) {
 	if err := os.MkdirAll("fixture-out", 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join("fixture-out", "deposit_coordinates.json"), encoded, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join("fixture-out", fileName), encoded, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	t.Logf("exported matched deposit proof/VK coordinates, %d IC points, %d public inputs", len(ic), len(publicInputs))
+}
+
+// Both proofs below share the same DepositCircuitV1 verifying key because they
+// are generated from one Setup call. The program uses them only as development
+// fixtures for custody integration tests.
+func TestExportDepositCoordinateFixtures(t *testing.T) {
+	if os.Getenv("WATCHER_EXPORT_DEPOSIT_COORDS") != "1" {
+		t.Skip("set WATCHER_EXPORT_DEPOSIT_COORDS=1")
+	}
+
+	ccs, provingKey, verifyingKey := compileDepositV1(t)
+	exportDepositCoordinateFixture(
+		t,
+		ccs,
+		provingKey,
+		verifyingKey,
+		validDepositV1(),
+		"deposit_coordinates.json",
+	)
+	exportDepositCoordinateFixture(
+		t,
+		ccs,
+		provingKey,
+		verifyingKey,
+		secondDepositV1(),
+		"deposit_coordinates_1.json",
+	)
 }

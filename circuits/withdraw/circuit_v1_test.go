@@ -171,11 +171,13 @@ func validV1() CircuitV1 {
 	for index := range leaves {
 		leaves[index] = new(big.Int)
 	}
-	leaves[2] = commitment0
-	leaves[7] = commitment1
+	// The on-chain commitment registry is append-only, so fixture deposits occupy
+	// the first two real indices rather than unreachable sparse positions.
+	leaves[0] = commitment0
+	leaves[1] = commitment1
 	tree := makeTreeV1(leaves)
-	path0, bits0 := tree.proof(2)
-	path1, bits1 := tree.proof(7)
+	path0, bits0 := tree.proof(0)
+	path1, bits1 := tree.proof(1)
 	changeAmount, changeOwner, changeNonce := bi(6_000_000), bi(5555), bi(6666)
 	changeCommitment := noteNativeV1(asset, changeAmount, changeOwner, changeNonce)
 	return CircuitV1{

@@ -23,18 +23,26 @@ func compileDepositV1(t *testing.T) (constraint.ConstraintSystem, groth16.Provin
 	return ccs, pk, vk
 }
 
-func validDepositV1() DepositCircuitV1 {
+func depositAssignmentV1(amount, owner, nonce int64) DepositCircuitV1 {
 	asset := bi(1)
-	amount := bi(8_000_000)
-	owner := bi(1111)
-	nonce := bi(2222)
+	amountValue := bi(amount)
+	ownerValue := bi(owner)
+	nonceValue := bi(nonce)
 	return DepositCircuitV1{
-		Owner:      owner,
-		Nonce:      nonce,
-		Commitment: noteNativeV1(asset, amount, owner, nonce),
-		Amount:     amount,
+		Owner:      ownerValue,
+		Nonce:      nonceValue,
+		Commitment: noteNativeV1(asset, amountValue, ownerValue, nonceValue),
+		Amount:     amountValue,
 		AssetID:    asset,
 	}
+}
+
+func validDepositV1() DepositCircuitV1 {
+	return depositAssignmentV1(8_000_000, 1111, 2222)
+}
+
+func secondDepositV1() DepositCircuitV1 {
+	return depositAssignmentV1(3_000_000, 3333, 4444)
 }
 
 func proveDepositV1(t *testing.T, ccs constraint.ConstraintSystem, pk groth16.ProvingKey, assignment DepositCircuitV1) error {
