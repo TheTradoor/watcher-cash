@@ -15,10 +15,14 @@ import {
 } from '@solana/web3.js';
 import { Buffer } from 'buffer';
 
+import { bytesToHex } from '../client/watcher/keccak.mjs';
 import {
   BN254_SCALAR_MODULUS,
   bytesToBigIntLE,
-  bytesToHex,
+  noteCommitmentV1,
+  nullifierV1,
+} from '../client/watcher/field.mjs';
+import {
   CONFIG_ACCOUNT_LEN_V1,
   COMMITMENT_REGISTRY_LEN_V1,
   deriveVaultAddressV1,
@@ -26,9 +30,7 @@ import {
   NULLIFIER_REGISTRY_LEN_V1,
   ROOT_HISTORY_ACCOUNT_LEN_V1,
   VAULT_ACCOUNT_LEN_V1,
-  noteCommitmentV1,
-  nullifierV1,
-} from '../client/watcher/index.mjs';
+} from '../client/watcher/instructions.mjs';
 import { createWatcherBrowserProverV1 } from '../client/watcher/ui-prover.mjs';
 import { prepareUiDepositV1, prepareUiWithdrawV1 } from '../client/watcher/ui-flows.mjs';
 import styles from './page.module.css';
@@ -458,6 +460,7 @@ export default function WatcherProtocolPage() {
       const prover = await ensureProver();
       setMessage('Generating a local Groth16 deposit proof. The private note never leaves this browser.');
       const prepared = await prepareUiDepositV1({
+        connection,
         accounts: {
           programId: publicKey(settings.programId, 'program id'),
           depositor: wallet.publicKey,
