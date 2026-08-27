@@ -1,0 +1,67 @@
+name: Finalize Watcher Local Prover
+
+on:
+  push:
+    branches: [watcher-protocol]
+    paths:
+      - '.github/workflows/watcher-prover-finalize.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  finalize:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: watcher-protocol
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Make bundle installation cross-filesystem safe
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('client/watcher/bundle.node.mjs')
+          text = path.read_text()
+          text = text.replace(
+              "import { access, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';",
+              "import { access, cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';",
+          )
+          text = text.replace(
+              "  const target = path.resolve(cacheDirectory, 'local-prover');\n",
+              "  const target = path.resolve(cacheDirectory, 'local-prover');\n  await mkdir(path.dirname(target), { recursive: true });\n",
+          )
+          text = text.replace(
+              "    await rename(extracted, target);\n",
+              "    await cp(extracted, target, { recursive: true, force: true });\n",
+          )
+          if 'rename(' in text:
+              raise SystemExit('stale rename call remains in bundle installer')
+          path.write_text(text)
+          PY
+
+      - name: Test all Watcher client modules
+        run: |
+          npm install
+          npm run test:watcher-client
+
+      - name: Remove one-time trigger workflows
+        run: |
+          rm -f \
+            .github/workflows/watcher-prover-finalize.yml \
+            .github/workflows/watcher-prover-sync-trigger.yml
+
+      - name: Commit finalized client
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'Finalize local prover bundle installation and cleanup triggers'
+          git push origin HEAD:watcher-protocol
