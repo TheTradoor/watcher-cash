@@ -35,6 +35,49 @@ async function parseResponse(response) {
   return payload;
 }
 
+export function validateProofPayloadV1({
+  payload,
+  expectedPublicInputs,
+  expectedPublicInputBytes,
+  source = 'prover',
+}) {
+  if (!payload || typeof payload !== 'object') {
+    throw new TypeError(`${source} returned an invalid response`);
+  }
+  const expected = asBytes(expectedPublicInputs, 'expectedPublicInputs');
+  if (expected.length !== expectedPublicInputBytes) {
+    throw new RangeError(`expectedPublicInputs must be ${expectedPublicInputBytes} bytes`);
+  }
+
+  const proof = hexToBytes(payload.proofHex || '');
+  const publicInputs = hexToBytes(payload.publicInputsHex || '');
+  if (proof.length !== XARK_PROOF_BYTES_V1 || payload.proofBytes !== XARK_PROOF_BYTES_V1) {
+    throw new Error(
+      `${source} returned a ${proof.length}-byte proof; expected ${XARK_PROOF_BYTES_V1}`,
+    );
+  }
+  if (
+    publicInputs.length !== expectedPublicInputBytes
+    || payload.publicInputBytes !== expectedPublicInputBytes
+  ) {
+    throw new Error(
+      `${source} returned ${publicInputs.length} public-input bytes; expected ${expectedPublicInputBytes}`,
+    );
+  }
+  if (!equalBytes(publicInputs, expected)) {
+    throw new Error(`${source} public inputs do not match the client-built statement`);
+  }
+  if (typeof payload.bundleDigest !== 'string' || !/^[0-9a-f]{64}$/i.test(payload.bundleDigest)) {
+    throw new Error(`${source} did not identify its matched proving bundle`);
+  }
+  return {
+    circuit: payload.circuit,
+    proof,
+    publicInputs,
+    bundleDigest: payload.bundleDigest.toLowerCase(),
+  };
+}
+
 async function requestLocalProofV1({
   endpoint = DEFAULT_LOCAL_PROVER_URL_V1,
   path,
@@ -45,10 +88,6 @@ async function requestLocalProofV1({
 }) {
   if (typeof fetchImpl !== 'function') throw new Error('Fetch API is unavailable');
   if (!witness || typeof witness !== 'object') throw new TypeError('witness is required');
-  const expected = asBytes(expectedPublicInputs, 'expectedPublicInputs');
-  if (expected.length !== expectedPublicInputBytes) {
-    throw new RangeError(`expectedPublicInputs must be ${expectedPublicInputBytes} bytes`);
-  }
 
   const response = await fetchImpl(endpointURL(endpoint, path), {
     method: 'POST',
@@ -56,28 +95,12 @@ async function requestLocalProofV1({
     body: JSON.stringify(witness),
   });
   const payload = await parseResponse(response);
-  const proof = hexToBytes(payload.proofHex || '');
-  const publicInputs = hexToBytes(payload.publicInputsHex || '');
-  if (proof.length !== XARK_PROOF_BYTES_V1 || payload.proofBytes !== XARK_PROOF_BYTES_V1) {
-    throw new Error(`local prover returned a ${proof.length}-byte proof; expected ${XARK_PROOF_BYTES_V1}`);
-  }
-  if (publicInputs.length !== expectedPublicInputBytes || payload.publicInputBytes !== expectedPublicInputBytes) {
-    throw new Error(
-      `local prover returned ${publicInputs.length} public-input bytes; expected ${expectedPublicInputBytes}`,
-    );
-  }
-  if (!equalBytes(publicInputs, expected)) {
-    throw new Error('local prover public inputs do not match the client-built statement');
-  }
-  if (typeof payload.bundleDigest !== 'string' || !/^[0-9a-f]{64}$/i.test(payload.bundleDigest)) {
-    throw new Error('local prover did not identify its matched proving bundle');
-  }
-  return {
-    circuit: payload.circuit,
-    proof,
-    publicInputs,
-    bundleDigest: payload.bundleDigest.toLowerCase(),
-  };
+  return validateProofPayloadV1({
+    payload,
+    expectedPublicInputs,
+    expectedPublicInputBytes,
+    source: 'local prover',
+  });
 }
 
 export async function checkLocalProverV1({
