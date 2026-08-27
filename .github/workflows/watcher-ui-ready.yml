@@ -1,0 +1,60 @@
+name: Record Watcher Browser UI Checkpoint
+
+on:
+  workflow_run:
+    workflows: ['Watcher Protocol Browser UI CI']
+    types: [completed]
+
+permissions:
+  contents: write
+
+jobs:
+  record:
+    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'watcher-protocol'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: watcher-protocol
+          fetch-depth: 0
+
+      - name: Record the exact verified checkpoint
+        env:
+          VERIFIED_SHA: ${{ github.event.workflow_run.head_sha }}
+          VERIFIED_RUN_ID: ${{ github.event.workflow_run.id }}
+          VERIFIED_RUN_NUMBER: ${{ github.event.workflow_run.run_number }}
+        run: |
+          cat > WATCHER_UI_STATUS.md <<EOF
+          # Watcher Browser UI Status
+
+          Status: VERIFIED
+          Branch: watcher-protocol
+          Commit: ${VERIFIED_SHA}
+          Browser UI CI run: ${VERIFIED_RUN_ID}
+          Browser UI CI number: ${VERIFIED_RUN_NUMBER}
+
+          Verified surfaces:
+          - static Next.js production build
+          - Watcher browser client tests
+          - isolated Web Worker syntax
+          - native Go prover tests
+          - Go WebAssembly prover compilation
+
+          Security boundary:
+          - Solana devnet only
+          - development Groth16 setup
+          - no production funds
+          EOF
+
+      - name: Publish status marker
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add WATCHER_UI_STATUS.md
+          if git diff --cached --quiet; then
+            echo 'Verified checkpoint marker is unchanged.'
+            exit 0
+          fi
+          git commit -m 'Record verified Watcher browser UI checkpoint'
+          git pull --rebase origin watcher-protocol
+          git push origin HEAD:watcher-protocol
