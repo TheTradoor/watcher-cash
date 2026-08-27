@@ -163,6 +163,8 @@ export default function Page() {
   const [status, setStatus] = useState('Loading privacy engine…');
   const [error, setError] = useState('');
   const [tx, setTx] = useState('');
+  const [debugStage, setDebugStage] = useState('Idle');
+  const [debugDetail, setDebugDetail] = useState('');
 
   const tokenMeta = TOKEN_META[tokenName];
 
@@ -304,21 +306,28 @@ export default function Page() {
     setBusy(true);
     setError('');
     setTx('');
+    setDebugStage('Checking RPC');
+    setDebugDetail('');
     try {
       if (network === 'wrong-network') throw new Error('Watcher Cash is configured for Solana Mainnet.');
       if (network === 'offline') {
         setStatus('Reconnecting to Solana Mainnet…');
+        setDebugStage('Checking RPC');
         await connection.getLatestBlockhash('confirmed');
         setNetwork('mainnet');
       }
+      setDebugStage('Loading SDK');
       const { sdk, service } = await encryption();
+      setDebugStage('Loading ZK engine');
       const lightWasm = await loadHasher();
+      setDebugStage('Validating amount');
       const units = toBaseUnits(amount, tokenMeta.decimals);
       const token = sdk.tokens.find((t) => t.name.toLowerCase() === tokenName);
       let result;
 
       if (mode === 'deposit') {
         setStatus('Generating zero-knowledge deposit proof…');
+        setDebugStage('Building proof');
         if (tokenName === 'sol') {
           result = await sdk.deposit({
             lightWasm,
@@ -326,7 +335,14 @@ export default function Page() {
             amount_in_lamports: units,
             keyBasePath: CIRCUIT,
             publicKey,
-            transactionSigner: (transaction) => signTransaction(transaction),
+            transactionSigner: async (transaction) => {
+              setDebugStage('Waiting for Phantom');
+              setDebugDetail('Approve the transaction in Phantom.');
+              const signed = await signTransaction(transaction);
+              setDebugStage('Broadcasting');
+              setDebugDetail('Transaction signed. Sending to Solana…');
+              return signed;
+            },
             storage: localStorage,
             encryptionService: service,
           });
@@ -338,7 +354,14 @@ export default function Page() {
             base_units: units,
             keyBasePath: CIRCUIT,
             publicKey,
-            transactionSigner: (transaction) => signTransaction(transaction),
+            transactionSigner: async (transaction) => {
+              setDebugStage('Waiting for Phantom');
+              setDebugDetail('Approve the transaction in Phantom.');
+              const signed = await signTransaction(transaction);
+              setDebugStage('Broadcasting');
+              setDebugDetail('Transaction signed. Sending to Solana…');
+              return signed;
+            },
             storage: localStorage,
             encryptionService: service,
             mintAddress: token.pubkey,
@@ -348,6 +371,7 @@ export default function Page() {
         if (!recipient) throw new Error('Enter a recipient address.');
         const recipientKey = new PublicKey(recipient);
         setStatus('Generating zero-knowledge withdrawal proof…');
+        setDebugStage('Building proof');
         if (tokenName === 'sol') {
           result = await sdk.withdraw({
             lightWasm,
@@ -375,11 +399,16 @@ export default function Page() {
         }
       }
 
+      setDebugStage('Confirmed');
+      setDebugDetail(result?.tx ? `Transaction: ${result.tx}` : 'Transaction completed.');
       setTx(result.tx);
       setAmount('');
       setStatus('Transaction confirmed and indexed.');
       await refreshBalance();
     } catch (e) {
+      const raw = e?.stack || e?.message || String(e);
+      setDebugStage('Failed');
+      setDebugDetail(raw);
       setError(friendlyError(e));
       setStatus('Transaction stopped.');
     } finally {
@@ -499,6 +528,11 @@ export default function Page() {
                     <input className="recipient-field" value={recipient} onChange={(e) => setRecipient(e.target.value)} placeholder="Solana address" />
                   </>
                 )}
+
+                <div style={{margin:'12px 0',padding:'12px 14px',border:'1px solid #ddd',borderRadius:16,background:'#f7f6f2',fontSize:13,lineHeight:1.45,color:'#222'}}>
+                  <strong style={{display:'block',marginBottom:4}}>Stage: {debugStage}</strong>
+                  {debugDetail && <div style={{whiteSpace:'pre-wrap',wordBreak:'break-word',maxHeight:140,overflow:'auto',fontFamily:'ui-monospace, SFMono-Regular, Menlo, monospace',fontSize:11}}>{debugDetail}</div>}
+                </div>
 
                 <button className="primary-action" type="button" disabled={!actionReady} onClick={submit}>
                   {busy ? 'Working…' : mode === 'deposit' ? `Deposit ${tokenMeta.label} Privately` : `Withdraw ${tokenMeta.label}`}
