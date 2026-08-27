@@ -5,6 +5,7 @@ on:
     branches: [watcher-protocol]
     paths:
       - '.github/workflows/patch-proof-root-transition.yml'
+      - 'scripts/apply-proof-carried-root-transitions.py'
   workflow_dispatch:
 
 permissions:
@@ -41,6 +42,19 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('scripts/apply-proof-carried-root-transitions.py')
+          source = path.read_text()
+          old = 'updated, count = re.subn(pattern, replacement, content, count=1, flags=re.S)'
+          new = 'updated, count = re.subn(pattern, lambda _match: replacement, content, count=1, flags=re.S)'
+          if old in source:
+              source = source.replace(old, new, 1)
+              path.write_text(source)
+          elif new not in source:
+              raise SystemExit('replace_regex implementation is not recognized')
+          PY
           python scripts/apply-proof-carried-root-transitions.py 2>&1 | tee /tmp/root-transition-patch.log
 
       - name: Format Go and Rust sources
