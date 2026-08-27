@@ -92,7 +92,7 @@ class BrowserProverV1 {
   async proveDeposit({ witness, expectedPublicInputs, onProgress } = {}) {
     const remove = this.addProgressListener(onProgress);
     try {
-      await this.initialize({ onProgress });
+      await this.initialize();
       const payload = await this.request('prove', { circuit: 'deposit', witness });
       return validateProofPayloadV1({
         payload,
@@ -108,7 +108,7 @@ class BrowserProverV1 {
   async proveWithdraw({ witness, expectedPublicInputs, onProgress } = {}) {
     const remove = this.addProgressListener(onProgress);
     try {
-      await this.initialize({ onProgress });
+      await this.initialize();
       const payload = await this.request('prove', { circuit: 'withdraw', witness });
       return validateProofPayloadV1({
         payload,
