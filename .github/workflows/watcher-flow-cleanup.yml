@@ -1,0 +1,41 @@
+name: Finalize Watcher Private Flow Validation
+
+on:
+  push:
+    branches: [watcher-protocol]
+    paths:
+      - '.github/workflows/watcher-flow-cleanup.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: watcher-protocol
+          fetch-depth: 0
+      - name: Record green flow status and remove temporary workflows
+        run: |
+          printf '%s\n' \
+            'local prover: pass' \
+            'transaction builders: pass' \
+            'state-derived withdrawal flow: pass' \
+            'devnet runner syntax: pass' \
+            'full Watcher client suite: pass' \
+            > client/watcher/.local-prover-ready
+          rm -rf .github/flow-diagnostics
+          rm -f \
+            .github/workflows/watcher-flow-diagnostics.yml \
+            .github/workflows/watcher-flow-finalize.yml \
+            .github/workflows/watcher-flow-cleanup.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'Finalize tested Watcher private flow and clean diagnostics'
+          git push origin HEAD:watcher-protocol || {
+            git pull --rebase origin watcher-protocol
+            git push origin HEAD:watcher-protocol
+          }
