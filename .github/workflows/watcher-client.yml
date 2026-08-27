@@ -5,11 +5,13 @@ on:
     branches: [watcher-protocol]
     paths:
       - 'client/watcher/**'
+      - 'scripts/watcher-devnet-e2e.mjs'
       - 'package.json'
       - '.github/workflows/watcher-client.yml'
   pull_request:
     paths:
       - 'client/watcher/**'
+      - 'scripts/watcher-devnet-e2e.mjs'
       - 'package.json'
       - '.github/workflows/watcher-client.yml'
 
@@ -24,5 +26,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-      - name: Test registry, Merkle paths, and Circuit V1 witness generation
+      - name: Test registry, proof adapters, instructions, and protocol flows
         run: node --test client/watcher/*.test.mjs
+      - name: Parse devnet end-to-end harness
+        run: node --check scripts/watcher-devnet-e2e.mjs

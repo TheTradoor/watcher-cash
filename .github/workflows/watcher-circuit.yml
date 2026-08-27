@@ -9,6 +9,7 @@ on:
   pull_request:
     paths:
       - 'circuits/withdraw/**'
+      - '.github/workflows/watcher-circuit.yml'
 
 permissions:
   contents: write
@@ -27,22 +28,23 @@ jobs:
           cache-dependency-path: circuits/withdraw/go.sum
       - name: Resolve modules
         run: go mod tidy
-      - name: Test withdrawal and deposit circuits
+      - name: Test withdrawal, deposit, and local prover code
         run: go test -v ./...
       - name: Generate development withdrawal fixture
         run: go run ./cmd/genfixture
-      - name: Export matched withdrawal coordinates
+      - name: Export matched withdrawal coordinates and prover bundle
         env:
           WATCHER_EXPORT_COORDS: '1'
         run: go test -run TestExportCoordinateFixture -v
-      - name: Export matched deposit coordinates
+      - name: Export matched deposit coordinates and prover bundle
         env:
           WATCHER_EXPORT_DEPOSIT_COORDS: '1'
         run: go test -run TestExportDepositCoordinateFixtures -v
-      - name: Validate coordinate fixtures
+      - name: Validate coordinate and prover artifacts
         run: |
           python - <<'PY'
           import json
+          import pathlib
 
           withdrawal = json.load(open('fixture-out/coordinates.json'))
           assert len(withdrawal['public_inputs']) == 10
@@ -61,7 +63,14 @@ jobs:
               assert all(len(value) == 64 for value in deposit['public_inputs'])
           assert deposits[0]['vk'] == deposits[1]['vk']
 
-          print('coordinate fixtures valid: withdrawal=10 inputs, deposits=3 inputs each')
+          for prefix, public_bytes in [('deposit', 96), ('withdraw', 320)]:
+              for suffix in ('r1cs', 'pk', 'vk'):
+                  path = pathlib.Path(f'fixture-out/{prefix}.{suffix}')
+                  assert path.is_file() and path.stat().st_size > 0, path
+              assert pathlib.Path(f'fixture-out/{prefix}.proof.xark').stat().st_size == 256
+              assert pathlib.Path(f'fixture-out/{prefix}.public.xark').stat().st_size == public_bytes
+
+          print('coordinate fixtures and matched local-prover artifacts are present')
           PY
       - name: Build matched xark wire fixtures
         run: |
@@ -127,6 +136,13 @@ jobs:
           )
           assert deposit_vk_0 == deposit_vk_1
 
+          # The Go local prover serializer and the independent coordinate pipeline
+          # must agree byte-for-byte before either artifact is published.
+          assert pathlib.Path('fixture-out/withdraw.proof.xark').read_bytes() == withdrawal_proof
+          assert pathlib.Path('fixture-out/withdraw.public.xark').read_bytes() == withdrawal_inputs
+          assert pathlib.Path('fixture-out/deposit.proof.xark').read_bytes() == deposit_proof_0
+          assert pathlib.Path('fixture-out/deposit.public.xark').read_bytes() == deposit_inputs_0
+
           (output / 'dev_proof_array.in').write_text(rust_array(withdrawal_proof))
           (output / 'dev_vk_array.in').write_text(rust_array(withdrawal_vk))
           (output / 'dev_public_inputs_array.in').write_text(rust_array(withdrawal_inputs))
@@ -136,6 +152,43 @@ jobs:
           (output / 'dev_deposit_public_inputs_1_array.in').write_text(rust_array(deposit_inputs_1))
           (output / 'dev_deposit_vk_array.in').write_text(rust_array(deposit_vk_0))
           print('built matched withdrawal and two deposit proof/VK/public-input fixtures')
+          PY
+      - name: Prove and self-verify with reloaded local assets
+        env:
+          WATCHER_PROVER_ASSETS: fixture-out
+        run: go test -run TestExportedProverBundleRoundTrip -v
+      - name: Build local prover binary and manifest
+        run: |
+          go build -trimpath -o fixture-out/watcher-prover-linux-amd64 ./cmd/watcher-prover
+          python - <<'PY'
+          import hashlib
+          import json
+          import os
+          import pathlib
+
+          directory = pathlib.Path('fixture-out')
+          files = [
+              'deposit.r1cs', 'deposit.pk', 'deposit.vk',
+              'withdraw.r1cs', 'withdraw.pk', 'withdraw.vk',
+              'watcher-prover-linux-amd64',
+          ]
+          entries = {}
+          for name in files:
+              data = (directory / name).read_bytes()
+              entries[name] = {
+                  'bytes': len(data),
+                  'sha256': hashlib.sha256(data).hexdigest(),
+              }
+          manifest = {
+              'version': 1,
+              'curve': 'BN254',
+              'scheme': 'Groth16',
+              'warning': 'DEVELOPMENT SETUP ONLY. Do not use with production funds.',
+              'sourceCommit': os.environ.get('GITHUB_SHA', ''),
+              'publicInputs': {'deposit-v1': 3, 'withdraw-v1': 10},
+              'files': entries,
+          }
+          (directory / 'prover-manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
           PY
       - name: Publish matched development verifier fixtures
         if: github.event_name == 'push'
@@ -169,7 +222,7 @@ jobs:
           fi
       - name: Show withdrawal fixture manifest
         run: cat testdata/v1_fixture/manifest.json
-      - name: Upload development fixtures
+      - name: Upload development verifier fixtures
         uses: actions/upload-artifact@v4
         with:
           name: watcher-circuit-v1-dev-fixtures
@@ -178,5 +231,24 @@ jobs:
             circuits/withdraw/fixture-out/coordinates.json
             circuits/withdraw/fixture-out/deposit_coordinates.json
             circuits/withdraw/fixture-out/deposit_coordinates_1.json
+            circuits/withdraw/fixture-out/withdraw.proof.xark
+            circuits/withdraw/fixture-out/withdraw.public.xark
+            circuits/withdraw/fixture-out/deposit.proof.xark
+            circuits/withdraw/fixture-out/deposit.public.xark
+          if-no-files-found: error
+          retention-days: 7
+      - name: Upload matched local prover bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: watcher-local-prover-v1-dev
+          path: |
+            circuits/withdraw/fixture-out/deposit.r1cs
+            circuits/withdraw/fixture-out/deposit.pk
+            circuits/withdraw/fixture-out/deposit.vk
+            circuits/withdraw/fixture-out/withdraw.r1cs
+            circuits/withdraw/fixture-out/withdraw.pk
+            circuits/withdraw/fixture-out/withdraw.vk
+            circuits/withdraw/fixture-out/watcher-prover-linux-amd64
+            circuits/withdraw/fixture-out/prover-manifest.json
           if-no-files-found: error
           retention-days: 7

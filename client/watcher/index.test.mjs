@@ -17,7 +17,7 @@ import {
   verifyMerkleProofV1,
 } from './index.mjs';
 
-const FIXTURE_ROOT_LE_HEX = '79a32c2c5f267067547e9080198d22a81890ee2bd793f7ac65552f3836572903';
+const FIXTURE_ROOT_LE_HEX = 'f2cbdbcda94d3b4a69f8107c6dc1bd798363d40cffbecf1e8487e8b9c39ea128';
 
 test('Keccak-256 implementation matches the standard empty input vector', () => {
   assert.equal(
@@ -26,7 +26,7 @@ test('Keccak-256 implementation matches the standard empty input vector', () => 
   );
 });
 
-test('JS MiMC tree exactly matches the Circuit V1 Go fixture root', () => {
+test('JS MiMC tree exactly matches the current sequential Circuit V1 Go fixture root', () => {
   const assetId = 1n;
   const commitment0 = noteCommitmentV1({
     assetId,
@@ -41,8 +41,8 @@ test('JS MiMC tree exactly matches the Circuit V1 Go fixture root', () => {
     nonce: 4444n,
   });
   const leaves = new Array(MERKLE_LEAVES_V1).fill(0n);
-  leaves[2] = commitment0;
-  leaves[7] = commitment1;
+  leaves[0] = commitment0;
+  leaves[1] = commitment1;
   const tree = buildMerkleTreeFromLeavesV1(leaves);
   assert.equal(bytesToHex(fieldToLe32(tree.root)), FIXTURE_ROOT_LE_HEX);
 });

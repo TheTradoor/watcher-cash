@@ -129,18 +129,53 @@ export function merkleParentV1(left, right) {
   ]);
 }
 
-export async function recipientBindingBytesV1(recipientBytes) {
+function exact32(value, label) {
+  const bytes = asBytes(value, label);
+  if (bytes.length !== 32) throw new RangeError(`${label} must be exactly 32 bytes`);
+  return bytes;
+}
+
+async function sha256FieldBytesV1(domain, parts) {
   if (!globalThis.crypto?.subtle) throw new Error('Web Crypto SHA-256 is unavailable');
-  const recipient = asBytes(recipientBytes, 'recipient');
-  if (recipient.length !== 32) throw new RangeError('recipient must be exactly 32 bytes');
-  const domain = new TextEncoder().encode('watcher-recipient-v1');
+  const domainBytes = new TextEncoder().encode(domain);
   const digest = new Uint8Array(
-    await globalThis.crypto.subtle.digest('SHA-256', concatBytes(domain, recipient)),
+    await globalThis.crypto.subtle.digest('SHA-256', concatBytes(domainBytes, ...parts)),
   );
   digest[31] &= 0x1f;
+  // The 253-bit mask makes the little-endian digest a canonical BN254 scalar.
+  fieldFromLe32(digest, `${domain} binding`);
   return digest;
+}
+
+export async function recipientBindingBytesV1(recipientBytes) {
+  return sha256FieldBytesV1('watcher-recipient-v1', [exact32(recipientBytes, 'recipient')]);
 }
 
 export async function recipientBindingV1(recipientBytes) {
   return fieldFromLe32(await recipientBindingBytesV1(recipientBytes), 'recipient binding');
+}
+
+export async function withdrawContextBindingBytesV1({
+  programId,
+  config,
+  vault,
+  relayer,
+  treasury,
+  assetId = 1n,
+}) {
+  return sha256FieldBytesV1('watcher-withdraw-context-v1', [
+    exact32(programId, 'programId'),
+    exact32(config, 'config'),
+    exact32(vault, 'vault'),
+    exact32(relayer, 'relayer'),
+    exact32(treasury, 'treasury'),
+    fieldToLe32(assertFieldV1(assetId, 'assetId')),
+  ]);
+}
+
+export async function withdrawContextBindingV1(options) {
+  return fieldFromLe32(
+    await withdrawContextBindingBytesV1(options),
+    'withdraw context binding',
+  );
 }

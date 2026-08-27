@@ -14,8 +14,22 @@ import {
   getMerkleProofV1,
 } from './merkle.mjs';
 
+export const DEPOSIT_PUBLIC_INPUT_COUNT_V1 = 3;
+export const DEPOSIT_PUBLIC_INPUT_BYTES_V1 = DEPOSIT_PUBLIC_INPUT_COUNT_V1 * 32;
 export const PUBLIC_INPUT_COUNT_V1 = 10;
 export const PUBLIC_INPUT_BYTES_V1 = PUBLIC_INPUT_COUNT_V1 * 32;
+
+export function encodeDepositPublicInputsV1(fields) {
+  const ordered = Array.isArray(fields)
+    ? fields
+    : [fields.commitment, fields.amount, fields.assetId];
+  if (ordered.length !== DEPOSIT_PUBLIC_INPUT_COUNT_V1) {
+    throw new RangeError(`Deposit V1 requires ${DEPOSIT_PUBLIC_INPUT_COUNT_V1} public inputs`);
+  }
+  const output = new Uint8Array(DEPOSIT_PUBLIC_INPUT_BYTES_V1);
+  ordered.forEach((value, index) => output.set(fieldToLe32(value), index * 32));
+  return output;
+}
 
 export function encodePublicInputsV1(fields) {
   const ordered = Array.isArray(fields)
@@ -63,6 +77,31 @@ function normalizeChangeNote(note, assetId) {
 
 function decimals(values) {
   return values.map((value) => value.toString(10));
+}
+
+export function buildDepositWitnessV1({ owner, nonce, amount, assetId = 1n }) {
+  const asset = assertFieldV1(assetId, 'assetId');
+  if (asset === 0n) throw new RangeError('assetId must be non-zero');
+  const note = normalizeInputNote({ owner, nonce, amount }, 'deposit', asset);
+  const publicFields = {
+    commitment: note.commitment,
+    amount: note.amount,
+    assetId: asset,
+  };
+  return {
+    note,
+    witness: {
+      Owner: note.owner.toString(10),
+      Nonce: note.nonce.toString(10),
+      Commitment: note.commitment.toString(10),
+      Amount: note.amount.toString(10),
+      AssetID: asset.toString(10),
+    },
+    publicFields,
+    publicInputs: encodeDepositPublicInputsV1(publicFields),
+    commitment: fieldToLe32(note.commitment),
+    amount: note.amount,
+  };
 }
 
 export async function buildWithdrawWitnessV1({

@@ -22,6 +22,7 @@ func exportDepositCoordinateFixture(
 	verifyingKey groth16.VerifyingKey,
 	assignment DepositCircuitV1,
 	fileName string,
+	exportBundle bool,
 ) {
 	t.Helper()
 
@@ -51,30 +52,19 @@ func exportDepositCoordinateFixture(
 	}
 
 	proofCoordinates := map[string]string{
-		"a_x":  hx(&bnProof.Ar.X),
-		"a_y":  hx(&bnProof.Ar.Y),
-		"b_x0": hx(&bnProof.Bs.X.A0),
-		"b_x1": hx(&bnProof.Bs.X.A1),
-		"b_y0": hx(&bnProof.Bs.Y.A0),
-		"b_y1": hx(&bnProof.Bs.Y.A1),
-		"c_x":  hx(&bnProof.Krs.X),
-		"c_y":  hx(&bnProof.Krs.Y),
+		"a_x": hx(&bnProof.Ar.X), "a_y": hx(&bnProof.Ar.Y),
+		"b_x0": hx(&bnProof.Bs.X.A0), "b_x1": hx(&bnProof.Bs.X.A1),
+		"b_y0": hx(&bnProof.Bs.Y.A0), "b_y1": hx(&bnProof.Bs.Y.A1),
+		"c_x": hx(&bnProof.Krs.X), "c_y": hx(&bnProof.Krs.Y),
 	}
-	vkCoordinates := map[string]any{
-		"alpha_x": hx(&bnVK.G1.Alpha.X),
-		"alpha_y": hx(&bnVK.G1.Alpha.Y),
-		"beta_x0": hx(&bnVK.G2.Beta.X.A0),
-		"beta_x1": hx(&bnVK.G2.Beta.X.A1),
-		"beta_y0": hx(&bnVK.G2.Beta.Y.A0),
-		"beta_y1": hx(&bnVK.G2.Beta.Y.A1),
-		"gamma_x0": hx(&bnVK.G2.Gamma.X.A0),
-		"gamma_x1": hx(&bnVK.G2.Gamma.X.A1),
-		"gamma_y0": hx(&bnVK.G2.Gamma.Y.A0),
-		"gamma_y1": hx(&bnVK.G2.Gamma.Y.A1),
-		"delta_x0": hx(&bnVK.G2.Delta.X.A0),
-		"delta_x1": hx(&bnVK.G2.Delta.X.A1),
-		"delta_y0": hx(&bnVK.G2.Delta.Y.A0),
-		"delta_y1": hx(&bnVK.G2.Delta.Y.A1),
+	verifyingKeyCoordinates := map[string]any{
+		"alpha_x": hx(&bnVK.G1.Alpha.X), "alpha_y": hx(&bnVK.G1.Alpha.Y),
+		"beta_x0": hx(&bnVK.G2.Beta.X.A0), "beta_x1": hx(&bnVK.G2.Beta.X.A1),
+		"beta_y0": hx(&bnVK.G2.Beta.Y.A0), "beta_y1": hx(&bnVK.G2.Beta.Y.A1),
+		"gamma_x0": hx(&bnVK.G2.Gamma.X.A0), "gamma_x1": hx(&bnVK.G2.Gamma.X.A1),
+		"gamma_y0": hx(&bnVK.G2.Gamma.Y.A0), "gamma_y1": hx(&bnVK.G2.Gamma.Y.A1),
+		"delta_x0": hx(&bnVK.G2.Delta.X.A0), "delta_x1": hx(&bnVK.G2.Delta.X.A1),
+		"delta_y0": hx(&bnVK.G2.Delta.Y.A0), "delta_y1": hx(&bnVK.G2.Delta.Y.A1),
 	}
 	ic := make([]map[string]string, len(bnVK.G1.K))
 	for index := range bnVK.G1.K {
@@ -83,7 +73,7 @@ func exportDepositCoordinateFixture(
 			"y": hx(&bnVK.G1.K[index].Y),
 		}
 	}
-	vkCoordinates["ic"] = ic
+	verifyingKeyCoordinates["ic"] = ic
 
 	vector, ok := publicWitness.Vector().(fr.Vector)
 	if !ok {
@@ -96,8 +86,8 @@ func exportDepositCoordinateFixture(
 	}
 
 	fixture := coordFixture{
-		Proof:        proofCoordinates,
-		VK:           vkCoordinates,
+		Proof: proofCoordinates,
+		VK: verifyingKeyCoordinates,
 		PublicInputs: publicInputs,
 	}
 	encoded, err := json.MarshalIndent(fixture, "", "  ")
@@ -110,10 +100,13 @@ func exportDepositCoordinateFixture(
 	if err := os.WriteFile(filepath.Join("fixture-out", fileName), encoded, 0o644); err != nil {
 		t.Fatal(err)
 	}
+	if exportBundle {
+		exportProverArtifactsV1(t, "deposit", ccs, provingKey, verifyingKey, proof, publicWitness)
+	}
 }
 
-// Both proofs below share the same DepositCircuitV1 verifying key because they
-// are generated from one Setup call. The program uses them only as development
+// Both proofs share the same DepositCircuitV1 key pair because they are
+// generated from one Setup call. The program uses them only as development
 // fixtures for custody integration tests.
 func TestExportDepositCoordinateFixtures(t *testing.T) {
 	if os.Getenv("WATCHER_EXPORT_DEPOSIT_COORDS") != "1" {
@@ -122,19 +115,11 @@ func TestExportDepositCoordinateFixtures(t *testing.T) {
 
 	ccs, provingKey, verifyingKey := compileDepositV1(t)
 	exportDepositCoordinateFixture(
-		t,
-		ccs,
-		provingKey,
-		verifyingKey,
-		validDepositV1(),
-		"deposit_coordinates.json",
+		t, ccs, provingKey, verifyingKey, validDepositV1(),
+		"deposit_coordinates.json", true,
 	)
 	exportDepositCoordinateFixture(
-		t,
-		ccs,
-		provingKey,
-		verifyingKey,
-		secondDepositV1(),
-		"deposit_coordinates_1.json",
+		t, ccs, provingKey, verifyingKey, secondDepositV1(),
+		"deposit_coordinates_1.json", false,
 	)
 }

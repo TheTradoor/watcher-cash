@@ -1,0 +1,131 @@
+import { asBytes } from './keccak.mjs';
+import { withdrawContextBindingV1 } from './field.mjs';
+import {
+  buildDepositInstructionV1,
+  buildWithdrawInstructionV1,
+} from './instructions.mjs';
+import {
+  proveDepositWithLocalProverV1,
+  proveWithdrawWithLocalProverV1,
+} from './prover.mjs';
+import {
+  buildDepositWitnessV1,
+  buildWithdrawWitnessFromChainV1,
+} from './witness.mjs';
+
+function keyBytes(value, label) {
+  let bytes;
+  if (value && typeof value.toBytes === 'function') bytes = value.toBytes();
+  else if (value && typeof value.toBuffer === 'function') bytes = value.toBuffer();
+  else bytes = value;
+  const normalized = asBytes(bytes, label);
+  if (normalized.length !== 32) throw new RangeError(`${label} must be exactly 32 bytes`);
+  return normalized;
+}
+
+function requireAccounts(accounts, names) {
+  if (!accounts || typeof accounts !== 'object') throw new TypeError('accounts are required');
+  for (const name of names) {
+    if (accounts[name] === undefined || accounts[name] === null) {
+      throw new TypeError(`accounts.${name} is required`);
+    }
+  }
+}
+
+export async function prepareDepositV1({
+  accounts,
+  owner,
+  nonce,
+  amount,
+  assetId = 1n,
+  proverEndpoint,
+  fetchImpl,
+}) {
+  requireAccounts(accounts, [
+    'programId', 'depositor', 'config', 'commitments', 'rootHistory', 'vault', 'systemProgram',
+  ]);
+  const witness = buildDepositWitnessV1({ owner, nonce, amount, assetId });
+  const generated = await proveDepositWithLocalProverV1({
+    endpoint: proverEndpoint,
+    fetchImpl,
+    witness: witness.witness,
+    expectedPublicInputs: witness.publicInputs,
+  });
+  const instruction = buildDepositInstructionV1({
+    ...accounts,
+    commitment: witness.commitment,
+    amount: witness.amount,
+    proof: generated.proof,
+    publicInputs: generated.publicInputs,
+  });
+  return {
+    ...witness,
+    proof: generated.proof,
+    bundleDigest: generated.bundleDigest,
+    instruction,
+  };
+}
+
+export async function prepareWithdrawV1({
+  connection,
+  accounts,
+  input0,
+  input1,
+  change,
+  publicAmount,
+  protocolFee = 0n,
+  relayerFee = 0n,
+  assetId = 1n,
+  rpcCommitment = 'confirmed',
+  proverEndpoint,
+  fetchImpl,
+}) {
+  if (!connection || typeof connection.getAccountInfo !== 'function') {
+    throw new TypeError('connection.getAccountInfo is required');
+  }
+  requireAccounts(accounts, [
+    'programId', 'config', 'commitments', 'nullifiers', 'rootHistory',
+    'vault', 'recipient', 'relayer', 'treasury',
+  ]);
+  const contextBinding = await withdrawContextBindingV1({
+    programId: keyBytes(accounts.programId, 'programId'),
+    config: keyBytes(accounts.config, 'config'),
+    vault: keyBytes(accounts.vault, 'vault'),
+    relayer: keyBytes(accounts.relayer, 'relayer'),
+    treasury: keyBytes(accounts.treasury, 'treasury'),
+    assetId,
+  });
+  const witness = await buildWithdrawWitnessFromChainV1({
+    connection,
+    commitmentsAccount: accounts.commitments,
+    commitment: rpcCommitment,
+    input0,
+    input1,
+    change,
+    publicAmount,
+    protocolFee,
+    relayerFee,
+    recipient: keyBytes(accounts.recipient, 'recipient'),
+    assetId,
+    contextBinding,
+  });
+  const generated = await proveWithdrawWithLocalProverV1({
+    endpoint: proverEndpoint,
+    fetchImpl,
+    witness: witness.witness,
+    expectedPublicInputs: witness.publicInputs,
+  });
+  const instruction = buildWithdrawInstructionV1({
+    ...accounts,
+    statement: witness.statement,
+    proof: generated.proof,
+    publicInputs: generated.publicInputs,
+  });
+  return {
+    ...witness,
+    contextBinding,
+    proof: generated.proof,
+    bundleDigest: generated.bundleDigest,
+    instruction,
+  };
+}
