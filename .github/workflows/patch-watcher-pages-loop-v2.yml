@@ -1,0 +1,128 @@
+name: Verify Final Watcher Browser Deployment
+
+on:
+  push:
+    branches: [watcher-protocol]
+    paths:
+      - '.github/workflows/patch-watcher-pages-loop-v2.yml'
+      - 'config/watcher-page-entry-v2.jsx'
+      - 'config/watcher-pages-v3.yml'
+      - 'config/watcher-ui-ci.yml'
+      - 'scripts/harden-watcher-browser-page.mjs'
+      - 'scripts/fix-watcher-page-imports-v2.mjs'
+      - 'scripts/remove-legacy-privacycash-runtime.mjs'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  verify-and-publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: watcher-protocol
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+          cache-dependency-path: circuits/withdraw/go.sum
+
+      - name: Apply final loop-safe Watcher UI state
+        run: |
+          cp config/watcher-page-entry-v2.jsx app/page.jsx
+          cp config/watcher-pages-v3.yml .github/workflows/pages.yml
+          cp config/watcher-ui-ci.yml .github/workflows/watcher-ui.yml
+          node scripts/harden-watcher-browser-page.mjs
+          node scripts/fix-watcher-page-imports-v2.mjs
+          node scripts/remove-legacy-privacycash-runtime.mjs
+
+      - name: Verify import graph and runtime isolation
+        run: |
+          if grep -R -n -E "from ['\"]privacycash|require\(['\"]privacycash|@lightprotocol/hasher.rs" app client src package.json 2>/dev/null; then
+            echo 'legacy Privacy Cash runtime reference remains' >&2
+            exit 1
+          fi
+          ! grep -q "from '../client/watcher/index.mjs'" app/watcher-protocol-page.jsx
+          grep -q "import { bytesToHex } from '../client/watcher/keccak.mjs';" app/watcher-protocol-page.jsx
+          grep -q "from '../client/watcher/field.mjs';" app/watcher-protocol-page.jsx
+          grep -q "from '../client/watcher/instructions.mjs';" app/watcher-protocol-page.jsx
+          grep -q 'paths-ignore:' .github/workflows/pages.yml
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Test Watcher browser modules
+        run: |
+          node --test client/watcher/*.test.mjs
+          node --check public/watcher-prover-worker.js
+
+      - name: Build static production application
+        env:
+          NEXT_PUBLIC_WATCHER_BASE_PATH: /watcher-cash
+          NEXT_PUBLIC_WATCHER_RPC_URL: https://api.devnet.solana.com
+        run: npm run build
+
+      - name: Test native prover and compile browser prover
+        working-directory: circuits/withdraw
+        run: |
+          go test ./...
+          GOOS=js GOARCH=wasm go build -trimpath -o /tmp/watcher-prover.wasm ./cmd/watcher-prover-wasm
+          test -s /tmp/watcher-prover.wasm
+
+      - name: Write verified checkpoint
+        env:
+          VERIFIED_SOURCE_SHA: ${{ github.sha }}
+          VERIFIED_RUN_ID: ${{ github.run_id }}
+        run: |
+          cat > WATCHER_BROWSER_DEPLOYMENT_READY.md <<EOF
+          # Watcher Browser Deployment Checkpoint
+
+          Status: VERIFIED
+          Branch: watcher-protocol
+          Source commit: ${VERIFIED_SOURCE_SHA}
+          Verification workflow run: ${VERIFIED_RUN_ID}
+
+          Passed in one fail-closed workflow:
+          - clean-room runtime isolation check
+          - direct browser module import check
+          - Watcher JavaScript client tests
+          - Web Worker syntax validation
+          - static Next.js production build
+          - native Go prover tests
+          - Go WebAssembly prover compilation
+          - loop-safe GitHub Pages pipeline validation
+
+          Runtime boundary:
+          - Solana devnet only
+          - development Groth16 setup only
+          - no production funds
+          EOF
+
+      - name: Publish verified checkpoint and migration
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A \
+            app/page.jsx \
+            app/watcher-protocol-page.jsx \
+            client \
+            src \
+            package.json \
+            LICENSE_AUDIT.md \
+            .github/workflows/pages.yml \
+            .github/workflows/watcher-ui.yml \
+            WATCHER_BROWSER_DEPLOYMENT_READY.md
+          if git diff --cached --quiet; then
+            echo 'Verified Watcher browser deployment is already recorded.'
+            exit 0
+          fi
+          git commit -m 'Verify final Watcher browser proving deployment'
+          git pull --rebase origin watcher-protocol
+          git push origin HEAD:watcher-protocol
