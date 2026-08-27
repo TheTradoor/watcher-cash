@@ -62,6 +62,7 @@ function toBaseUnits(value, decimals) {
 function friendlyError(error) {
   const text = error?.message || String(error);
   if (/reject|declin/i.test(text)) return 'Request rejected in wallet.';
+  if (/no enough balance|not enough balance/i.test(text)) return 'Private balance is too low after protocol fees.';
   if (/insufficient/i.test(text)) return 'Insufficient wallet or private balance.';
   if (/blockhash|expired/i.test(text)) return 'Transaction expired. Please try again.';
   if (/failed to fetch|network/i.test(text)) return 'Network request failed. Try another RPC or retry.';
@@ -165,6 +166,9 @@ export default function Page() {
   const [tx, setTx] = useState('');
   const [debugStage, setDebugStage] = useState('Idle');
   const [debugDetail, setDebugDetail] = useState('');
+  const [relayerStatus, setRelayerStatus] = useState('checking');
+  const [relayerConfig, setRelayerConfig] = useState(null);
+  const [history, setHistory] = useState([]);
 
   const tokenMeta = TOKEN_META[tokenName];
 
@@ -200,6 +204,26 @@ export default function Page() {
   }, []);
 
   useEffect(() => {
+    let cancelled = false;
+    const checkRelayer = async () => {
+      try {
+        const response = await fetch(`${RELAYER}/config`, { cache: 'no-store' });
+        if (!response.ok) throw new Error(`Relayer HTTP ${response.status}`);
+        const config = await response.json();
+        if (!cancelled) {
+          setRelayerConfig(config);
+          setRelayerStatus('online');
+        }
+      } catch {
+        if (!cancelled) setRelayerStatus('offline');
+      }
+    };
+    checkRelayer();
+    const timer = setInterval(checkRelayer, 30000);
+    return () => { cancelled = true; clearInterval(timer); };
+  }, []);
+
+  useEffect(() => {
     setBalance(null);
     setTx('');
   }, [tokenName]);
@@ -223,6 +247,16 @@ export default function Page() {
     } else {
       setRecipient('');
       setSignature(null);
+    }
+  }, [publicKey]);
+
+  useEffect(() => {
+    if (!publicKey) { setHistory([]); return; }
+    try {
+      const saved = localStorage.getItem(`watcher-cash-history:${publicKey.toBase58()}`);
+      setHistory(saved ? JSON.parse(saved) : []);
+    } catch {
+      setHistory([]);
     }
   }, [publicKey]);
 
@@ -301,6 +335,33 @@ export default function Page() {
     }
   };
 
+  const numericAmount = Number(normalizeAmount(amount)) || 0;
+  const feeRate = Number(relayerConfig?.withdraw_fee_rate || 0);
+  const rentFee = tokenName === 'sol'
+    ? Number(relayerConfig?.withdraw_rent_fee || 0)
+    : Number(relayerConfig?.rent_fees?.[tokenName] || 0);
+  const estimatedFee = mode === 'withdraw' && numericAmount > 0 ? (numericAmount * feeRate) + rentFee : 0;
+  const estimatedReceive = Math.max(0, numericAmount - estimatedFee);
+  const minimumWithdrawal = Number(relayerConfig?.minimum_withdrawal?.[tokenName] || 0);
+  const belowMinimum = mode === 'withdraw' && minimumWithdrawal > 0 && numericAmount > 0 && numericAmount < minimumWithdrawal;
+
+  const setMaxAmount = () => {
+    if (balance !== null && balance > 0) setAmount(String(balance));
+  };
+
+  const stageCopy = {
+    Idle: 'Ready',
+    'Checking RPC': 'Checking network',
+    'Loading SDK': 'Loading privacy engine',
+    'Loading ZK engine': 'Loading ZK engine',
+    'Validating amount': 'Checking amount',
+    'Building proof': 'Generating ZK proof',
+    'Waiting for Phantom': 'Waiting for wallet approval',
+    Broadcasting: 'Submitting transaction',
+    Confirmed: 'Confirmed',
+    Failed: 'Transaction stopped',
+  };
+
   const submit = async () => {
     if (!publicKey || !signature || !signTransaction) return;
     setBusy(true);
@@ -321,7 +382,14 @@ export default function Page() {
       setDebugStage('Loading ZK engine');
       const lightWasm = await loadHasher();
       setDebugStage('Validating amount');
+      const submittedAmount = normalizeAmount(amount);
       const units = toBaseUnits(amount, tokenMeta.decimals);
+      if (mode === 'withdraw') {
+        if (relayerStatus !== 'online') throw new Error('Relayer is currently unavailable. Try again shortly.');
+        if (estimatedReceive <= 0) throw new Error('Amount is too low after protocol fees.');
+        if (belowMinimum) throw new Error(`Minimum ${tokenMeta.label} withdrawal is ${minimumWithdrawal}.`);
+        if (balance !== null && numericAmount > balance) throw new Error('Amount exceeds your private balance.');
+      }
       const token = sdk.tokens.find((t) => t.name.toLowerCase() === tokenName);
       let result;
 
@@ -402,6 +470,21 @@ export default function Page() {
       setDebugStage('Confirmed');
       setDebugDetail(result?.tx ? `Transaction: ${result.tx}` : 'Transaction completed.');
       setTx(result.tx);
+      if (result?.tx && publicKey) {
+        const entry = {
+          tx: result.tx,
+          type: mode,
+          token: tokenMeta.label,
+          amount: submittedAmount,
+          recipient: mode === 'withdraw' ? recipient : null,
+          time: Date.now(),
+        };
+        setHistory((previous) => {
+          const next = [entry, ...previous.filter((item) => item.tx !== entry.tx)].slice(0, 8);
+          localStorage.setItem(`watcher-cash-history:${publicKey.toBase58()}`, JSON.stringify(next));
+          return next;
+        });
+      }
       setAmount('');
       setStatus('Transaction confirmed and indexed.');
       await refreshBalance();
@@ -416,7 +499,8 @@ export default function Page() {
     }
   };
 
-  const actionReady = connected && signature && sdkReady && network !== 'wrong-network' && !busy && normalizeAmount(amount).length > 0;
+  const withdrawReady = mode !== 'withdraw' || (relayerStatus === 'online' && estimatedReceive > 0 && !belowMinimum && (balance === null || numericAmount <= balance));
+  const actionReady = connected && signature && sdkReady && network !== 'wrong-network' && !busy && normalizeAmount(amount).length > 0 && withdrawReady;
 
   return (
     <main className="site-shell">
@@ -488,7 +572,7 @@ export default function Page() {
             <div className="system-strip">
               <span className={network === 'mainnet' ? 'ok' : 'bad'}>● {network === 'mainnet' ? 'MAINNET' : network.toUpperCase()}</span>
               <span className={sdkReady ? 'ok' : ''}>● ZK {sdkReady ? 'READY' : 'LOADING'}</span>
-              <span>● RELAYER</span>
+              <span className={relayerStatus === 'online' ? 'ok' : relayerStatus === 'offline' ? 'bad' : ''}>● RELAYER {relayerStatus === 'online' ? 'LIVE' : relayerStatus === 'offline' ? 'OFFLINE' : 'CHECKING'}</span>
             </div>
 
             <div className="wallet-row">
@@ -520,18 +604,26 @@ export default function Page() {
                 </div>
 
                 <label>Amount</label>
-                <div className="amount-field"><input inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value.replace(',', '.'))} placeholder="0.00" /><span>{tokenMeta.label}</span></div>
+                <div className="amount-field"><input inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value.replace(',', '.'))} placeholder="0.00" />{mode === 'withdraw' && balance !== null && <button type="button" className="max-button" onClick={setMaxAmount}>MAX</button>}<span>{tokenMeta.label}</span></div>
 
                 {mode === 'withdraw' && (
                   <>
                     <label>Recipient</label>
                     <input className="recipient-field" value={recipient} onChange={(e) => setRecipient(e.target.value)} placeholder="Solana address" />
+                    <div className="fee-card">
+                      <div><span>Private balance</span><strong>{balance === null ? '—' : `${balance.toLocaleString(undefined, { maximumFractionDigits: 6 })} ${tokenMeta.label}`}</strong></div>
+                      <div><span>Protocol fee</span><strong>{relayerConfig && numericAmount > 0 ? `~${estimatedFee.toLocaleString(undefined, { maximumFractionDigits: 6 })} ${tokenMeta.label}` : 'Enter amount'}</strong></div>
+                      <div className="receive-row"><span>You receive</span><strong>{relayerConfig && numericAmount > 0 ? `~${estimatedReceive.toLocaleString(undefined, { maximumFractionDigits: 6 })} ${tokenMeta.label}` : '—'}</strong></div>
+                      {minimumWithdrawal > 0 && <small>Protocol minimum: {minimumWithdrawal} {tokenMeta.label}</small>}
+                      {belowMinimum && <small className="fee-warning">Amount is below the current protocol minimum.</small>}
+                    </div>
                   </>
                 )}
 
-                <div style={{margin:'12px 0',padding:'12px 14px',border:'1px solid #ddd',borderRadius:16,background:'#f7f6f2',fontSize:13,lineHeight:1.45,color:'#222'}}>
-                  <strong style={{display:'block',marginBottom:4}}>Stage: {debugStage}</strong>
-                  {debugDetail && <div style={{whiteSpace:'pre-wrap',wordBreak:'break-word',maxHeight:140,overflow:'auto',fontFamily:'ui-monospace, SFMono-Regular, Menlo, monospace',fontSize:11}}>{debugDetail}</div>}
+                <div className={`stage-card ${debugStage === 'Confirmed' ? 'stage-success' : debugStage === 'Failed' ? 'stage-failed' : ''}`}>
+                  <div className="stage-top"><span className="stage-dot" /><strong>{stageCopy[debugStage] || debugStage}</strong></div>
+                  <small>{debugStage === 'Building proof' ? 'Proof generation can take a moment on mobile.' : debugStage === 'Waiting for Phantom' ? 'Approve the request in your wallet.' : debugStage === 'Confirmed' ? 'Your private transaction has been indexed.' : debugStage === 'Failed' ? 'Nothing else was submitted after this error.' : 'Watcher Cash will update this automatically.'}</small>
+                  {debugDetail && <details><summary>Technical details</summary><pre>{debugDetail}</pre></details>}
                 </div>
 
                 <button className="primary-action" type="button" disabled={!actionReady} onClick={submit}>
@@ -542,7 +634,8 @@ export default function Page() {
 
             <div className="status-box"><span>&gt;</span><p>{status}</p></div>
             {error && <div className="error-box">{error}</div>}
-            {tx && <a className="tx-link" href={`https://solscan.io/tx/${tx}`} target="_blank" rel="noreferrer">Transaction confirmed · View on Solscan ↗</a>}
+            {tx && <a className="tx-link receipt-link" href={`https://solscan.io/tx/${tx}`} target="_blank" rel="noreferrer"><strong>✓ Transaction confirmed</strong><span>View receipt on Solscan ↗</span></a>}
+            {history.length > 0 && <div className="history-card"><div className="history-head"><strong>Recent activity</strong><small>Stored on this device</small></div>{history.slice(0, 5).map((item) => <a key={item.tx} href={`https://solscan.io/tx/${item.tx}`} target="_blank" rel="noreferrer"><div><b>{item.type === 'deposit' ? 'Deposit' : 'Withdraw'} {item.token}</b><span>{item.amount} {item.token}</span></div><small>{new Date(item.time).toLocaleString()} ↗</small></a>)}</div>}
             <p className="mainnet-warning">Mainnet uses real funds. Test with a separate wallet and a small amount first.</p>
           </section>
         </div>
