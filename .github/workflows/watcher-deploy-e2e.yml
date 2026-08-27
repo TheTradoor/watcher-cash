@@ -44,6 +44,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          cargo generate-lockfile --manifest-path programs/watcher-protocol/Cargo.toml
+          cargo update \
+            --manifest-path programs/watcher-protocol/Cargo.toml \
+            -p zeroize_derive \
+            --precise 1.4.2
+          test -s programs/watcher-protocol/Cargo.lock
           mkdir -p target/deploy
           cargo build-sbf \
             --manifest-path programs/watcher-protocol/Cargo.toml \
