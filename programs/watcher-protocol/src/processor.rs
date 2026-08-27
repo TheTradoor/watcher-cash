@@ -1,5 +1,5 @@
 use ark_bn254::Fr;
-use ark_ff::{BigInteger, Field, PrimeField};
+use ark_ff::{AdditiveGroup, BigInteger, Field, PrimeField};
 use sha3::{Digest, Keccak256};
 use solana_program::{account_info::{next_account_info,AccountInfo},entrypoint::ProgramResult,program_error::ProgramError,pubkey::Pubkey};
 use crate::{codec::{append_unique_32,contains_32,ConfigAccount,WatcherInstruction,REGISTRY_HEADER_LEN},verifier::verify_circuit_v1,DepositRecord,WatcherError,WithdrawalStatement,STATE_VERSION};
