@@ -1,0 +1,5 @@
+local prover: pass
+transaction builders: pass
+state-derived withdrawal flow: pass
+devnet runner syntax: pass
+full Watcher client suite: pass
