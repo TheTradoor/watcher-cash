@@ -38,45 +38,46 @@ jobs:
           path = Path('app/watcher-protocol-page.jsx')
           source = path.read_text()
 
-          old_import = '''import {
-  BN254_SCALAR_MODULUS,
-  bytesToBigIntLE,
-  bytesToHex,
-  CONFIG_ACCOUNT_LEN_V1,
-  COMMITMENT_REGISTRY_LEN_V1,
-  deriveVaultAddressV1,
-  buildInitializeInstructionV1,
-  NULLIFIER_REGISTRY_LEN_V1,
-  ROOT_HISTORY_ACCOUNT_LEN_V1,
-  VAULT_ACCOUNT_LEN_V1,
-  noteCommitmentV1,
-  nullifierV1,
-} from '../client/watcher/index.mjs';'''
-          new_import = '''import { bytesToHex } from '../client/watcher/keccak.mjs';
-import {
-  BN254_SCALAR_MODULUS,
-  bytesToBigIntLE,
-  noteCommitmentV1,
-  nullifierV1,
-} from '../client/watcher/field.mjs';
-import {
-  CONFIG_ACCOUNT_LEN_V1,
-  COMMITMENT_REGISTRY_LEN_V1,
-  deriveVaultAddressV1,
-  buildInitializeInstructionV1,
-  NULLIFIER_REGISTRY_LEN_V1,
-  ROOT_HISTORY_ACCOUNT_LEN_V1,
-  VAULT_ACCOUNT_LEN_V1,
-} from '../client/watcher/instructions.mjs';'''
+          old_import = "\n".join([
+              "import {",
+              "  BN254_SCALAR_MODULUS,",
+              "  bytesToBigIntLE,",
+              "  bytesToHex,",
+              "  CONFIG_ACCOUNT_LEN_V1,",
+              "  COMMITMENT_REGISTRY_LEN_V1,",
+              "  deriveVaultAddressV1,",
+              "  buildInitializeInstructionV1,",
+              "  NULLIFIER_REGISTRY_LEN_V1,",
+              "  ROOT_HISTORY_ACCOUNT_LEN_V1,",
+              "  VAULT_ACCOUNT_LEN_V1,",
+              "  noteCommitmentV1,",
+              "  nullifierV1,",
+              "} from '../client/watcher/index.mjs';",
+          ])
+          new_import = "\n".join([
+              "import { bytesToHex } from '../client/watcher/keccak.mjs';",
+              "import {",
+              "  BN254_SCALAR_MODULUS,",
+              "  bytesToBigIntLE,",
+              "  noteCommitmentV1,",
+              "  nullifierV1,",
+              "} from '../client/watcher/field.mjs';",
+              "import {",
+              "  CONFIG_ACCOUNT_LEN_V1,",
+              "  COMMITMENT_REGISTRY_LEN_V1,",
+              "  deriveVaultAddressV1,",
+              "  buildInitializeInstructionV1,",
+              "  NULLIFIER_REGISTRY_LEN_V1,",
+              "  ROOT_HISTORY_ACCOUNT_LEN_V1,",
+              "  VAULT_ACCOUNT_LEN_V1,",
+              "} from '../client/watcher/instructions.mjs';",
+          ])
           if source.count(old_import) != 1:
               raise SystemExit('Watcher page import block is not in the expected state')
           source = source.replace(old_import, new_import, 1)
 
-          old_call = '''      const prepared = await prepareUiDepositV1({
-        accounts: {'''
-          new_call = '''      const prepared = await prepareUiDepositV1({
-        connection,
-        accounts: {'''
+          old_call = "      const prepared = await prepareUiDepositV1({\n        accounts: {"
+          new_call = "      const prepared = await prepareUiDepositV1({\n        connection,\n        accounts: {"
           if source.count(old_call) != 1:
               raise SystemExit('Watcher deposit call is not in the expected state')
           source = source.replace(old_call, new_call, 1)
