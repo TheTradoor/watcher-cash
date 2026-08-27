@@ -341,11 +341,14 @@ async fn funded_deposits_and_verified_withdrawal_move_real_lamports() {
         account_lamports(&mut context, relayer).await,
     );
     let replay_error = send_failing(&mut context, withdrawal).await;
+    let replay_message = replay_error.to_string();
+    let expected_error = format!(
+        "custom program error: 0x{:x}",
+        WatcherError::NullifierAlreadySpent as u32 + 1
+    );
     assert!(
-        replay_error
-            .to_string()
-            .contains(&format!("Custom({})", WatcherError::NullifierAlreadySpent as u32 + 1)),
-        "unexpected replay error: {replay_error}"
+        replay_message.contains(&expected_error),
+        "unexpected replay error: {replay_message}"
     );
     assert_eq!(
         (
