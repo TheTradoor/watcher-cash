@@ -1,0 +1,9 @@
+{
+  "npm": "skipped",
+  "agave": "skipped",
+  "build_sbf": "skipped",
+  "fund_ephemeral_deployer": "skipped",
+  "deploy_devnet": "skipped",
+  "proof_bound_devnet_e2e": "skipped",
+  "ephemeral_program_id": ""
+}
