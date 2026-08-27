@@ -27,6 +27,18 @@ async function waitFor(predicate, label, timeout = 30_000) {
   }
 }
 
+function normalizeIndexBits(witness, label) {
+  const value = witness[label];
+  if (!Array.isArray(value)) throw new Error(`${label} must be an array`);
+  return value.map((bit, index) => {
+    const normalized = Number(bit);
+    if (!Number.isInteger(normalized) || (normalized !== 0 && normalized !== 1)) {
+      throw new Error(`${label}[${index}] must be 0 or 1`);
+    }
+    return normalized;
+  });
+}
+
 async function main() {
   const wasmExec = await readFile(wasmExecPath, 'utf8');
   vm.runInThisContext(wasmExec, { filename: wasmExecPath });
@@ -64,11 +76,19 @@ async function main() {
     await readFile(resolve(bundleDirectory, 'sample-deposit-0-public-inputs.bin')),
   );
 
-  const withdrawWitness = await readFile(
+  const withdrawWitness = JSON.parse(await readFile(
     resolve(bundleDirectory, 'sample-withdraw-witness.json'),
     'utf8',
+  ));
+  // The setup fixture stores every witness value as a decimal string for
+  // deterministic JSON. The public browser client already emits numeric index
+  // bits, so normalize only these uint8 arrays before exercising the same Go
+  // decoder used by the WebAssembly bridge.
+  withdrawWitness.Input0Index = normalizeIndexBits(withdrawWitness, 'Input0Index');
+  withdrawWitness.Input1Index = normalizeIndexBits(withdrawWitness, 'Input1Index');
+  const withdrawal = JSON.parse(
+    globalThis.watcherProverProveWithdraw(JSON.stringify(withdrawWitness)),
   );
-  const withdrawal = JSON.parse(globalThis.watcherProverProveWithdraw(withdrawWitness));
   assert.equal(withdrawal.error, undefined);
   assert.equal(withdrawal.proofBytes, 256);
   assert.equal(withdrawal.publicInputBytes, 320);
