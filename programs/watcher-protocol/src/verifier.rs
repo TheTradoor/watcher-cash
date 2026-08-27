@@ -12,8 +12,10 @@ pub const GROTH16_BN254_PROOF_BYTES: usize = 256;
 const CIRCUIT_V1_DEV_VERIFIER: Verifier<CIRCUIT_V1_PUBLIC_INPUTS> =
     Verifier::from_le_bytes(&DEV_VK_BYTES);
 
+/// Circuit V1's program-side wire representation is already canonical little-endian
+/// BN254 Fr. Do not reverse these fields again before handing them to xark-verifier.
 fn to_le_public_inputs(inputs: &CircuitV1PublicInputs) -> [[u8; 32]; CIRCUIT_V1_PUBLIC_INPUTS] {
-    let mut fields = [
+    [
         inputs.merkle_root,
         inputs.nullifier_0,
         inputs.nullifier_1,
@@ -24,9 +26,7 @@ fn to_le_public_inputs(inputs: &CircuitV1PublicInputs) -> [[u8; 32]; CIRCUIT_V1_
         inputs.recipient_binding,
         inputs.asset_id,
         inputs.context_binding,
-    ];
-    for field in &mut fields { field.reverse(); }
-    fields
+    ]
 }
 
 pub fn verify_circuit_v1(
