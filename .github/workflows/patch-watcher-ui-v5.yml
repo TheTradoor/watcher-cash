@@ -1,0 +1,75 @@
+name: Finalize Stable Watcher Browser UI
+
+on:
+  push:
+    branches: [watcher-protocol]
+    paths:
+      - '.github/workflows/patch-watcher-ui-v5.yml'
+      - 'config/watcher-page-entry-v2.jsx'
+      - 'config/watcher-pages-v2.yml'
+      - 'config/watcher-ui-ci.yml'
+      - 'config/watcher-patch-workflow.yml'
+      - 'scripts/harden-watcher-browser-page.mjs'
+      - 'scripts/patch-watcher-direct-imports.mjs'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  finalize:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: watcher-protocol
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+          cache-dependency-path: circuits/withdraw/go.sum
+
+      - name: Apply stable live route and browser pipelines
+        run: |
+          cp config/watcher-page-entry-v2.jsx app/page.jsx
+          cp config/watcher-pages-v2.yml .github/workflows/pages.yml
+          cp config/watcher-ui-ci.yml .github/workflows/watcher-ui.yml
+          cp config/watcher-patch-workflow.yml .github/workflows/patch-watcher-ui.yml
+          node scripts/harden-watcher-browser-page.mjs
+          node scripts/patch-watcher-direct-imports.mjs
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Validate browser code and production export
+        env:
+          NEXT_PUBLIC_WATCHER_BASE_PATH: /watcher-cash
+          NEXT_PUBLIC_WATCHER_RPC_URL: https://api.devnet.solana.com
+        run: |
+          node --test client/watcher/*.test.mjs
+          node --check public/watcher-prover-worker.js
+          npm run build
+
+      - name: Validate native and browser prover builds
+        working-directory: circuits/withdraw
+        run: |
+          go test ./...
+          GOOS=js GOARCH=wasm go build -trimpath -o /tmp/watcher-prover.wasm ./cmd/watcher-prover-wasm
+
+      - name: Commit stable live UI
+        run: |
+          if git diff --quiet; then
+            echo 'Stable Watcher browser UI is already applied.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add app/page.jsx app/watcher-protocol-page.jsx .github/workflows/pages.yml .github/workflows/watcher-ui.yml .github/workflows/patch-watcher-ui.yml
+          git commit -m 'Finalize stable Watcher browser proving UI'
+          git pull --rebase origin watcher-protocol
+          git push origin HEAD:watcher-protocol
