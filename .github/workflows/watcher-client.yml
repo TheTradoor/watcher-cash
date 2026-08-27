@@ -6,12 +6,14 @@ on:
     paths:
       - 'client/watcher/**'
       - 'scripts/watcher-devnet-e2e.mjs'
+      - 'scripts/watcher-devnet-bootstrap.mjs'
       - 'package.json'
       - '.github/workflows/watcher-client.yml'
   pull_request:
     paths:
       - 'client/watcher/**'
       - 'scripts/watcher-devnet-e2e.mjs'
+      - 'scripts/watcher-devnet-bootstrap.mjs'
       - 'package.json'
       - '.github/workflows/watcher-client.yml'
 
@@ -26,7 +28,12 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
+      - name: Install Solana client dependencies
+        run: npm install --ignore-scripts --no-audit --no-fund
       - name: Test registry, proof adapters, instructions, and protocol flows
         run: node --test client/watcher/*.test.mjs
-      - name: Parse devnet end-to-end harness
-        run: node --check scripts/watcher-devnet-e2e.mjs
+      - name: Parse devnet scripts
+        run: |
+          node --check scripts/watcher-devnet-e2e.mjs
+          node --check scripts/watcher-devnet-bootstrap.mjs
+          node --check client/watcher/browser-prover.worker.js
