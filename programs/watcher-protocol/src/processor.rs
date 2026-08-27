@@ -1,16 +1,32 @@
-use solana_program::{account_info::{next_account_info,AccountInfo},entrypoint::ProgramResult,program_error::ProgramError,pubkey::Pubkey};
-use crate::{codec::{append_unique_32,contains_32,ConfigAccount,WatcherInstruction},verifier::verify_circuit_v1,DepositRecord,WatcherError,WithdrawalStatement,STATE_VERSION};
+use solana_program::{account_info::{next_account_info,AccountInfo},entrypoint::ProgramResult,hash::hashv,program_error::ProgramError,pubkey::Pubkey};
+use crate::{codec::{append_unique_32,contains_32,ConfigAccount,WatcherInstruction,REGISTRY_HEADER_LEN},verifier::verify_circuit_v1,DepositRecord,WatcherError,WithdrawalStatement,STATE_VERSION};
 
 pub fn process_instruction(program_id:&Pubkey,accounts:&[AccountInfo],data:&[u8])->ProgramResult{match WatcherInstruction::unpack(data)?{
  WatcherInstruction::Initialize{treasury}=>initialize(program_id,accounts,treasury),
  WatcherInstruction::Deposit{commitment,amount}=>deposit(program_id,accounts,commitment,amount),
  WatcherInstruction::Withdraw{nullifier_0,nullifier_1,change_commitment,recipient,public_amount,protocol_fee,relayer_fee,proof,public_inputs}=>withdraw(program_id,accounts,WithdrawalStatement{nullifier_0,nullifier_1,change_commitment,recipient,public_amount,protocol_fee,relayer_fee},&proof,&public_inputs),
- WatcherInstruction::SetMerkleRoot{root}=>set_merkle_root(program_id,accounts,root),
+ WatcherInstruction::SetMerkleRoot{root:_}=>Err(WatcherError::ManualMerkleRootDisabled.into()),
 }}
 fn owned_by(account:&AccountInfo,program_id:&Pubkey)->Result<(),ProgramError>{if account.owner!=program_id{return Err(ProgramError::IncorrectProgramId)}Ok(())}
 fn initialize(program_id:&Pubkey,accounts:&[AccountInfo],treasury:Pubkey)->ProgramResult{let mut it=accounts.iter();let authority=next_account_info(&mut it)?;let config=next_account_info(&mut it)?;let commitments=next_account_info(&mut it)?;let nullifiers=next_account_info(&mut it)?;if !authority.is_signer{return Err(ProgramError::MissingRequiredSignature)}owned_by(config,program_id)?;owned_by(commitments,program_id)?;owned_by(nullifiers,program_id)?;let mut cfg_data=config.try_borrow_mut_data()?;if cfg_data.first().copied().unwrap_or(0)!=0{return Err(WatcherError::AlreadyInitialized.into())}ConfigAccount{authority:*authority.key,treasury,fees_enabled:false,protocol_fee_bps:0,merkle_root:[0u8;32]}.pack(&mut cfg_data)?;for registry in[commitments,nullifiers]{let mut d=registry.try_borrow_mut_data()?;if d.len()<5{return Err(WatcherError::InvalidAccountData.into())}d.fill(0);d[0]=STATE_VERSION;}Ok(())}
-fn deposit(program_id:&Pubkey,accounts:&[AccountInfo],commitment:[u8;32],amount:u64)->ProgramResult{DepositRecord{commitment,amount}.validate()?;let mut it=accounts.iter();let config=next_account_info(&mut it)?;let commitments=next_account_info(&mut it)?;owned_by(config,program_id)?;owned_by(commitments,program_id)?;ConfigAccount::unpack(&config.try_borrow_data()?)?;append_unique_32(&mut commitments.try_borrow_mut_data()?,commitment)?;Ok(())}
-fn set_merkle_root(program_id:&Pubkey,accounts:&[AccountInfo],root:[u8;32])->ProgramResult{if root==[0u8;32]{return Err(WatcherError::InvalidPublicInputs.into())}let mut it=accounts.iter();let authority=next_account_info(&mut it)?;let config=next_account_info(&mut it)?;if !authority.is_signer{return Err(ProgramError::MissingRequiredSignature)}owned_by(config,program_id)?;let mut data=config.try_borrow_mut_data()?;let mut cfg=ConfigAccount::unpack(&data)?;if cfg.authority!=*authority.key{return Err(ProgramError::MissingRequiredSignature)}cfg.merkle_root=root;cfg.pack(&mut data)?;Ok(())}
+
+/// Deterministic append-only commitment root. This is deliberately simple for the
+/// current prototype: every leaf is domain-separated and the tree is padded to
+/// the next power of two with a fixed empty leaf. No authority can choose a root.
+pub fn commitment_root(registry:&[u8])->Result<[u8;32],WatcherError>{
+ if registry.len()<REGISTRY_HEADER_LEN||registry[0]!=STATE_VERSION{return Err(WatcherError::InvalidAccountData)}
+ let count=u32::from_le_bytes(registry[1..5].try_into().unwrap())as usize;
+ let end=REGISTRY_HEADER_LEN.checked_add(count.checked_mul(32).ok_or(WatcherError::InvalidAccountData)?).ok_or(WatcherError::InvalidAccountData)?;
+ if end>registry.len(){return Err(WatcherError::InvalidAccountData)}
+ if count==0{return Ok([0u8;32])}
+ let empty=hashv(&[b"watcher:empty:v1"]).to_bytes();
+ let mut level:Vec<[u8;32]>=registry[REGISTRY_HEADER_LEN..end].chunks_exact(32).map(|leaf|hashv(&[b"watcher:leaf:v1",leaf]).to_bytes()).collect();
+ let target=level.len().next_power_of_two();level.resize(target,empty);
+ while level.len()>1{level=level.chunks_exact(2).map(|p|hashv(&[b"watcher:node:v1",&p[0],&p[1]]).to_bytes()).collect();}
+ Ok(level[0])
+}
+fn sync_root(config:&AccountInfo,commitments:&AccountInfo)->ProgramResult{let root=commitment_root(&commitments.try_borrow_data()?)?;let mut data=config.try_borrow_mut_data()?;let mut cfg=ConfigAccount::unpack(&data)?;cfg.merkle_root=root;cfg.pack(&mut data)?;Ok(())}
+fn deposit(program_id:&Pubkey,accounts:&[AccountInfo],commitment:[u8;32],amount:u64)->ProgramResult{DepositRecord{commitment,amount}.validate()?;let mut it=accounts.iter();let config=next_account_info(&mut it)?;let commitments=next_account_info(&mut it)?;owned_by(config,program_id)?;owned_by(commitments,program_id)?;ConfigAccount::unpack(&config.try_borrow_data()?)?;append_unique_32(&mut commitments.try_borrow_mut_data()?,commitment)?;sync_root(config,commitments)}
 fn withdraw(program_id:&Pubkey,accounts:&[AccountInfo],statement:WithdrawalStatement,proof:&[u8],public_inputs:&[u8])->ProgramResult{statement.validate_development()?;let mut it=accounts.iter();let config=next_account_info(&mut it)?;let commitments=next_account_info(&mut it)?;let nullifiers=next_account_info(&mut it)?;owned_by(config,program_id)?;owned_by(commitments,program_id)?;owned_by(nullifiers,program_id)?;let cfg=ConfigAccount::unpack(&config.try_borrow_data()?)?;if cfg.fees_enabled||cfg.protocol_fee_bps!=0{return Err(WatcherError::FeesDisabledDuringDevelopment.into())}{let d=nullifiers.try_borrow_data()?;if contains_32(&d,&statement.nullifier_0)?||contains_32(&d,&statement.nullifier_1)?{return Err(WatcherError::NullifierAlreadySpent.into())}}
  verify_circuit_v1(&statement,&cfg.merkle_root,proof,public_inputs)?;
- let mut n=nullifiers.try_borrow_mut_data()?;append_unique_32(&mut n,statement.nullifier_0).map_err(|e|match e{WatcherError::DuplicateCommitment=>WatcherError::NullifierAlreadySpent,other=>other})?;append_unique_32(&mut n,statement.nullifier_1).map_err(|e|match e{WatcherError::DuplicateCommitment=>WatcherError::NullifierAlreadySpent,other=>other})?;drop(n);if statement.change_commitment!=[0u8;32]{append_unique_32(&mut commitments.try_borrow_mut_data()?,statement.change_commitment)?;}Ok(())}
+ let mut n=nullifiers.try_borrow_mut_data()?;append_unique_32(&mut n,statement.nullifier_0).map_err(|e|match e{WatcherError::DuplicateCommitment=>WatcherError::NullifierAlreadySpent,other=>other})?;append_unique_32(&mut n,statement.nullifier_1).map_err(|e|match e{WatcherError::DuplicateCommitment=>WatcherError::NullifierAlreadySpent,other=>other})?;drop(n);if statement.change_commitment!=[0u8;32]{append_unique_32(&mut commitments.try_borrow_mut_data()?,statement.change_commitment)?;sync_root(config,commitments)?;}Ok(())}
