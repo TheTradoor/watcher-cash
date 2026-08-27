@@ -143,6 +143,19 @@ jobs:
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
+          # The job token can publish source files, but GitHub blocks it from
+          # updating workflow definitions without the separate workflows scope.
+          # Keep the generated workflow change out of this source commit; it is
+          # applied separately through the repository connection after the
+          # tested refactor lands.
+          git restore .github/workflows/watcher-circuit.yml
+          rm -rf \
+            circuits/withdraw/fixture-out \
+            package-lock.json \
+            programs/watcher-protocol/Cargo.lock \
+            programs/watcher-protocol/src/development_prover_manifest.json
+
           git add -u
           if git diff --cached --quiet; then
             echo 'No source changes to publish.'
