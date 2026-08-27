@@ -1,5 +1,6 @@
 name: Fix Watcher Browser Deposit Transition
 
+# Retry after removing the obsolete duplicate Go bundle loader.
 on:
   push:
     branches: [watcher-protocol]
