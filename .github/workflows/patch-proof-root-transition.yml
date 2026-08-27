@@ -9,6 +9,7 @@ on:
       - 'scripts/fix-proof-root-patcher.py'
       - 'scripts/fix-generated-setup-vault.py'
       - 'scripts/fix-proof-transition-client-tests.py'
+      - 'programs/watcher-protocol/tests/verifier_fixture.rs'
   workflow_dispatch:
 
 permissions:
