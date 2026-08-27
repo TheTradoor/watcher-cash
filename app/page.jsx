@@ -1,653 +1,991 @@
 'use client';
 
-import dynamic from 'next/dynamic';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Buffer } from 'buffer';
 import { useConnection, useWallet } from '@solana/wallet-adapter-react';
-import { LAMPORTS_PER_SOL, PublicKey } from '@solana/web3.js';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useWalletModal, WalletMultiButton } from '@solana/wallet-adapter-react-ui';
+import {
+  ComputeBudgetProgram,
+  LAMPORTS_PER_SOL,
+  PublicKey,
+  SystemProgram,
+  Transaction,
+  TransactionInstruction,
+} from '@solana/web3.js';
+import {
+  checkBrowserProverV1,
+  confirmedNoteRecordsV1,
+  createNoteRecordV1,
+  decodeCommitmentRegistryV1,
+  deriveNoteVaultKeyV1,
+  loadNoteVaultV1,
+  noteRecordToInputV1,
+  prepareDepositV1,
+  prepareWithdrawV1,
+  privateBalanceLamportsV1,
+  proveDepositWithBrowserProverV1,
+  proveWithdrawWithBrowserProverV1,
+  removeNoteRecordV1,
+  saveNoteVaultV1,
+  selectInputPairV1,
+  syncNoteRecordsV1,
+  upsertNoteRecordV1,
+} from '../client/watcher/index.mjs';
 
-const WalletButton = dynamic(
-  () => import('@solana/wallet-adapter-react-ui').then((m) => m.WalletMultiButton),
-  { ssr: false },
-);
+const RUNTIME_URL = process.env.NEXT_PUBLIC_WATCHER_RUNTIME_URL || '/watcher-protocol/devnet.json';
+const DEFAULT_PROVER_BASE = process.env.NEXT_PUBLIC_WATCHER_PROVER_BASE || '/watcher-prover';
+const GROTH16_COMPUTE_UNITS = 1_400_000;
+const COMPUTE_UNIT_PRICE = 1_000;
 
-const GENESIS = '5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d';
-const RELAYER = process.env.NEXT_PUBLIC_RELAYER_API_URL || 'https://api3.privacycash.org';
-const CIRCUIT = process.env.NEXT_PUBLIC_CIRCUIT_BASE_PATH || 'https://cdn.jsdelivr.net/gh/Privacy-Cash/solana-sdk-demo-interface@df7df0198dc202ba8d13292fd07a05b55f5d7cd3/public/circuit2';
-const SIGN_MESSAGE = 'Privacy Money account sign in';
-
-const TOKEN_META = {
-  sol: { label: 'SOL', decimals: 9 },
-  usdc: { label: 'USDC', decimals: 6 },
-  usdt: { label: 'USDT', decimals: 6 },
-};
-
-let sdkPromise;
-let hasherPromise;
-
-function setupBuffer() {
-  if (!globalThis.Buffer) globalThis.Buffer = Buffer;
-}
-
-function loadSdk() {
-  setupBuffer();
-  if (!sdkPromise) sdkPromise = import('privacycash/utils');
-  return sdkPromise;
-}
-
-function loadHasher() {
-  setupBuffer();
-  if (!hasherPromise) {
-    hasherPromise = import('@lightprotocol/hasher.rs').then((m) => m.WasmFactory.getInstance());
+function parseSol(value) {
+  const normalized = String(value || '').trim();
+  if (!/^\d+(?:\.\d{0,9})?$/.test(normalized)) {
+    throw new Error('Enter a valid SOL amount with up to 9 decimals');
   }
-  return hasherPromise;
-}
-
-function normalizeAmount(value) {
-  return String(value ?? '').trim().replace(',', '.');
-}
-
-function toBaseUnits(value, decimals) {
-  const normalized = normalizeAmount(value);
-  const rx = new RegExp(`^\\d+(\\.\\d{1,${decimals}})?$`);
-  if (!rx.test(normalized)) throw new Error('Enter a valid amount');
   const [whole, fraction = ''] = normalized.split('.');
-  const scale = 10n ** BigInt(decimals);
-  const result = BigInt(whole) * scale + BigInt((fraction + '0'.repeat(decimals)).slice(0, decimals));
-  const n = Number(result);
-  if (!Number.isSafeInteger(n) || n <= 0) throw new Error('Amount is outside the supported range');
-  return n;
+  const lamports = BigInt(whole) * BigInt(LAMPORTS_PER_SOL)
+    + BigInt(fraction.padEnd(9, '0') || '0');
+  if (lamports <= 0n) throw new Error('Amount must be greater than zero');
+  if (lamports > 0xffff_ffff_ffff_ffffn) throw new Error('Amount is too large');
+  return lamports;
+}
+
+function formatSol(value, maximumFractionDigits = 9) {
+  const lamports = typeof value === 'bigint' ? value : BigInt(value || 0);
+  const whole = lamports / BigInt(LAMPORTS_PER_SOL);
+  const remainder = lamports % BigInt(LAMPORTS_PER_SOL);
+  let fraction = remainder.toString().padStart(9, '0').slice(0, maximumFractionDigits);
+  fraction = fraction.replace(/0+$/, '');
+  return fraction ? `${whole}.${fraction}` : whole.toString();
+}
+
+function shortAddress(value, left = 5, right = 5) {
+  const text = String(value || '');
+  if (text.length <= left + right + 3) return text;
+  return `${text.slice(0, left)}…${text.slice(-right)}`;
 }
 
 function friendlyError(error) {
-  const text = error?.message || String(error);
-  if (/reject|declin/i.test(text)) return 'Request rejected in wallet.';
-  if (/no enough balance|not enough balance/i.test(text)) return 'Private balance is too low after protocol fees.';
-  if (/insufficient/i.test(text)) return 'Insufficient wallet or private balance.';
-  if (/blockhash|expired/i.test(text)) return 'Transaction expired. Please try again.';
-  if (/failed to fetch|network/i.test(text)) return 'Network request failed. Try another RPC or retry.';
-  return text;
+  const message = error?.message || String(error || 'Unknown error');
+  return message
+    .replace(/^WalletSendTransactionError:\s*/i, '')
+    .replace(/^Error:\s*/i, '')
+    .replace('Transaction simulation failed: ', 'Simulation failed: ');
 }
 
-function shortAddress(value) {
-  if (!value) return 'Not connected';
-  return `${value.slice(0, 4)}…${value.slice(-4)}`;
+function descriptorInstruction(descriptor) {
+  return new TransactionInstruction({
+    programId: descriptor.programId,
+    keys: descriptor.keys,
+    data: Buffer.from(descriptor.data),
+  });
 }
 
-function AsciiRain() {
-  const canvasRef = useRef(null);
-
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext('2d');
-    let raf;
-    let width = 0;
-    let height = 0;
-    let cols = [];
-    const chars = '0 8 $ # S X 6'.split(' ');
-
-    const resize = () => {
-      const dpr = Math.min(window.devicePixelRatio || 1, 2);
-      width = window.innerWidth;
-      height = window.innerHeight;
-      canvas.width = width * dpr;
-      canvas.height = height * dpr;
-      canvas.style.width = `${width}px`;
-      canvas.style.height = `${height}px`;
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      const count = Math.ceil(width / 18);
-      cols = Array.from({ length: count }, (_, i) => ({
-        x: i * 18 + Math.random() * 7,
-        y: Math.random() * height,
-        speed: 0.15 + Math.random() * 0.35,
-        alpha: 0.17 + Math.random() * 0.25,
-        gap: 16 + Math.random() * 20,
-      }));
-    };
-
-    const frame = () => {
-      ctx.clearRect(0, 0, width, height);
-      ctx.font = '13px ui-monospace, SFMono-Regular, Menlo, monospace';
-      ctx.textAlign = 'center';
-      cols.forEach((col, index) => {
-        col.y += col.speed;
-        if (col.y > height + 80) col.y = -Math.random() * 200;
-        for (let j = 0; j < 9; j += 1) {
-          const y = col.y - j * col.gap;
-          if (y < -20 || y > height + 20) continue;
-          const fade = Math.max(0, 1 - j / 10);
-          ctx.fillStyle = `rgba(255,255,255,${col.alpha * fade})`;
-          ctx.fillText(chars[(index + j + Math.floor(col.y / 90)) % chars.length], col.x, y);
-        }
-      });
-      raf = requestAnimationFrame(frame);
-    };
-
-    resize();
-    window.addEventListener('resize', resize);
-    raf = requestAnimationFrame(frame);
-    return () => {
-      cancelAnimationFrame(raf);
-      window.removeEventListener('resize', resize);
-    };
-  }, []);
-
-  return <canvas ref={canvasRef} className="ascii-rain" aria-hidden="true" />;
+function explorerTransaction(signature) {
+  return `https://explorer.solana.com/tx/${signature}?cluster=devnet`;
 }
 
-function BrandMark() {
+function explorerAddress(address) {
+  return `https://explorer.solana.com/address/${address}?cluster=devnet`;
+}
+
+function validateRuntime(value) {
+  const required = [
+    'programId', 'config', 'commitments', 'nullifiers', 'rootHistory',
+    'vault', 'treasury', 'relayer', 'genesisHash',
+  ];
+  if (!value || typeof value !== 'object') throw new Error('Runtime configuration is missing');
+  for (const name of required) {
+    if (typeof value[name] !== 'string' || !value[name]) {
+      throw new Error(`Runtime configuration is missing ${name}`);
+    }
+  }
+  if (value.cluster !== 'devnet') throw new Error('This interface only accepts a devnet runtime');
+  return {
+    ...value,
+    commitmentCapacity: Number(value.commitmentCapacity || 16),
+    protocolFeeLamports: String(value.protocolFeeLamports || '0'),
+    relayerFeeLamports: String(value.relayerFeeLamports || '0'),
+    proverBasePath: value.proverBasePath || DEFAULT_PROVER_BASE,
+  };
+}
+
+function Logo() {
   return (
-    <span className="brand-mark" aria-hidden="true">
-      <span />
-      <span />
-      <span />
-      <span />
-    </span>
+    <div className="brand-lockup" aria-label="Watcher Cash">
+      <div className="brand-mark" aria-hidden="true">
+        <span />
+        <span />
+      </div>
+      <div>
+        <strong>WATCHER</strong>
+        <small>CASH</small>
+      </div>
+    </div>
   );
 }
 
-export default function Page() {
+function StatusPill({ tone = 'neutral', children }) {
+  return <span className={`status-pill status-${tone}`}><i />{children}</span>;
+}
+
+function NoteRow({ record, onDiscard }) {
+  return (
+    <div className="note-row">
+      <div className="note-main">
+        <span className={`note-status note-${record.status}`}>{record.status}</span>
+        <strong>{formatSol(record.amount, 6)} SOL</strong>
+        <small>{record.kind === 'change' ? 'PRIVATE CHANGE' : 'PRIVATE DEPOSIT'}</small>
+      </div>
+      <div className="note-meta">
+        <span>{shortAddress(BigInt(record.commitment).toString(16), 8, 8)}</span>
+        {record.transaction ? (
+          <a href={explorerTransaction(record.transaction)} target="_blank" rel="noreferrer">View tx ↗</a>
+        ) : null}
+        {record.status === 'pending' ? (
+          <button type="button" className="link-button danger-link" onClick={() => onDiscard(record)}>
+            Discard local draft
+          </button>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+export default function Home() {
   const { connection } = useConnection();
-  const { publicKey, connected, signMessage, signTransaction } = useWallet();
+  const {
+    connected,
+    publicKey,
+    sendTransaction,
+    signMessage,
+  } = useWallet();
+  const { setVisible } = useWalletModal();
 
-  const [vaultOpen, setVaultOpen] = useState(false);
-  const [signature, setSignature] = useState(null);
-  const [sdkReady, setSdkReady] = useState(false);
-  const [network, setNetwork] = useState('checking');
-  const [tokenName, setTokenName] = useState('sol');
-  const [balance, setBalance] = useState(null);
+  const [runtime, setRuntime] = useState(null);
+  const [runtimeStatus, setRuntimeStatus] = useState('loading');
+  const [runtimeMessage, setRuntimeMessage] = useState('Reading the current devnet deployment…');
+  const [treeCount, setTreeCount] = useState(0);
+  const [nullifierCount, setNullifierCount] = useState(0);
+  const [publicBalance, setPublicBalance] = useState(0);
+
+  const [vaultKey, setVaultKey] = useState(null);
+  const [unlocked, setUnlocked] = useState(false);
+  const [records, setRecords] = useState([]);
+  const [syncing, setSyncing] = useState(false);
+
   const [mode, setMode] = useState('deposit');
-  const [amount, setAmount] = useState('');
+  const [amount, setAmount] = useState('0.01');
   const [recipient, setRecipient] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [status, setStatus] = useState('Loading privacy engine…');
-  const [error, setError] = useState('');
-  const [tx, setTx] = useState('');
-  const [debugStage, setDebugStage] = useState('Idle');
-  const [debugDetail, setDebugDetail] = useState('');
-  const [relayerStatus, setRelayerStatus] = useState('checking');
-  const [relayerConfig, setRelayerConfig] = useState(null);
+  const [busy, setBusy] = useState('');
+  const [actionStage, setActionStage] = useState('');
+  const [feedback, setFeedback] = useState(null);
   const [history, setHistory] = useState([]);
+  const [prover, setProver] = useState({
+    status: 'idle',
+    progress: 0,
+    message: 'Local prover has not been loaded yet.',
+    bundleDigest: '',
+  });
 
-  const tokenMeta = TOKEN_META[tokenName];
+  const walletAddress = publicKey?.toBase58() || '';
+  const runtimeScope = runtime ? `${runtime.programId}:${runtime.config}` : '';
+  const runtimeKeys = useMemo(() => {
+    if (!runtime) return null;
+    try {
+      return {
+        programId: new PublicKey(runtime.programId),
+        config: new PublicKey(runtime.config),
+        commitments: new PublicKey(runtime.commitments),
+        nullifiers: new PublicKey(runtime.nullifiers),
+        rootHistory: new PublicKey(runtime.rootHistory),
+        vault: new PublicKey(runtime.vault),
+        treasury: new PublicKey(runtime.treasury),
+        relayer: new PublicKey(runtime.relayer),
+      };
+    } catch {
+      return null;
+    }
+  }, [runtime]);
+
+  const privateBalance = useMemo(() => privateBalanceLamportsV1(records), [records]);
+  const confirmedNotes = useMemo(() => confirmedNoteRecordsV1(records), [records]);
+  const pendingNotes = useMemo(() => records.filter((record) => record.status === 'pending'), [records]);
+  const amountLamports = useMemo(() => {
+    try {
+      return parseSol(amount);
+    } catch {
+      return null;
+    }
+  }, [amount]);
+  const protocolFee = BigInt(runtime?.protocolFeeLamports || '0');
+  const relayerFee = BigInt(runtime?.relayerFeeLamports || '0');
+  const withdrawPreview = useMemo(() => {
+    if (mode !== 'withdraw' || amountLamports === null) return null;
+    try {
+      const selection = selectInputPairV1(
+        records,
+        amountLamports + protocolFee + relayerFee,
+      );
+      return { selection, error: '' };
+    } catch (error) {
+      return { selection: null, error: friendlyError(error) };
+    }
+  }, [mode, amountLamports, records, protocolFee, relayerFee]);
+
+  const handleProverProgress = useCallback((progress) => {
+    const value = Number(progress?.progress);
+    const stage = progress?.stage || 'loading';
+    setProver((current) => ({
+      ...current,
+      status: stage === 'ready' || stage === 'proved' ? 'ready' : stage === 'proving' ? 'proving' : 'loading',
+      progress: Number.isFinite(value) ? Math.max(0, Math.min(1, value)) : current.progress,
+      message: progress?.message || current.message,
+    }));
+  }, []);
 
   useEffect(() => {
-    let cancelled = false;
-    const checkNetwork = async () => {
+    let active = true;
+    (async () => {
+      setRuntimeStatus('loading');
+      setRuntimeMessage('Reading the current devnet deployment…');
       try {
-        const hash = await connection.getGenesisHash();
-        if (!cancelled) setNetwork(hash === GENESIS ? 'mainnet' : 'wrong-network');
-      } catch {
-        try {
-          await connection.getLatestBlockhash('confirmed');
-          if (!cancelled) setNetwork('mainnet');
-        } catch {
-          if (!cancelled) setNetwork('offline');
+        const response = await fetch(RUNTIME_URL, { cache: 'no-store' });
+        if (!response.ok) throw new Error(`Runtime file returned HTTP ${response.status}`);
+        const parsed = validateRuntime(await response.json());
+        const keys = {
+          programId: new PublicKey(parsed.programId),
+          config: new PublicKey(parsed.config),
+          commitments: new PublicKey(parsed.commitments),
+          nullifiers: new PublicKey(parsed.nullifiers),
+          rootHistory: new PublicKey(parsed.rootHistory),
+          vault: new PublicKey(parsed.vault),
+        };
+        const [genesis, accounts] = await Promise.all([
+          connection.getGenesisHash(),
+          connection.getMultipleAccountsInfo([
+            keys.programId,
+            keys.config,
+            keys.commitments,
+            keys.nullifiers,
+            keys.rootHistory,
+            keys.vault,
+          ], 'confirmed'),
+        ]);
+        if (genesis !== parsed.genesisHash) {
+          throw new Error('RPC genesis does not match the published Watcher devnet runtime');
         }
+        if (!accounts[0]?.executable) throw new Error('Published Watcher program is not executable');
+        for (let index = 1; index < accounts.length; index += 1) {
+          const account = accounts[index];
+          if (!account) throw new Error(`Published protocol account ${index} is missing`);
+          if (!account.owner.equals(keys.programId)) {
+            throw new Error(`Published protocol account ${index} has the wrong owner`);
+          }
+        }
+        const registry = decodeCommitmentRegistryV1(accounts[2].data);
+        if (!active) return;
+        setRuntime(parsed);
+        setTreeCount(registry.count);
+        setRuntimeStatus('ready');
+        setRuntimeMessage('Program, state accounts, and RPC genesis verified.');
+      } catch (error) {
+        if (!active) return;
+        setRuntime(null);
+        setRuntimeStatus('error');
+        setRuntimeMessage(friendlyError(error));
       }
-    };
-    checkNetwork();
-    return () => { cancelled = true; };
+    })();
+    return () => { active = false; };
   }, [connection]);
 
   useEffect(() => {
-    Promise.all([loadSdk(), loadHasher()])
-      .then(() => {
-        setSdkReady(true);
-        setStatus('Privacy engine ready.');
-      })
-      .catch((e) => {
-        setError(friendlyError(e));
-        setStatus('Privacy engine failed to load.');
-      });
-  }, []);
+    setVaultKey(null);
+    setUnlocked(false);
+    setRecords([]);
+    setFeedback(null);
+    if (walletAddress) setRecipient(walletAddress);
+  }, [walletAddress]);
 
   useEffect(() => {
-    let cancelled = false;
-    const checkRelayer = async () => {
-      try {
-        const response = await fetch(`${RELAYER}/config`, { cache: 'no-store' });
-        if (!response.ok) throw new Error(`Relayer HTTP ${response.status}`);
-        const config = await response.json();
-        if (!cancelled) {
-          setRelayerConfig(config);
-          setRelayerStatus('online');
-        }
-      } catch {
-        if (!cancelled) setRelayerStatus('offline');
-      }
-    };
-    checkRelayer();
-    const timer = setInterval(checkRelayer, 30000);
-    return () => { cancelled = true; clearInterval(timer); };
-  }, []);
-
-  useEffect(() => {
-    setBalance(null);
-    setTx('');
-  }, [tokenName]);
-
-  useEffect(() => {
-    setTx('');
-    setBalance(null);
-    if (publicKey) {
-      setRecipient(publicKey.toBase58());
-      const cached = sessionStorage.getItem(`watcher-cash-signature:${publicKey.toBase58()}`);
-      if (cached) {
-        try {
-          setSignature(Uint8Array.from(Buffer.from(cached, 'hex')));
-        } catch {
-          sessionStorage.removeItem(`watcher-cash-signature:${publicKey.toBase58()}`);
-          setSignature(null);
-        }
-      } else {
-        setSignature(null);
-      }
-    } else {
-      setRecipient('');
-      setSignature(null);
+    if (!walletAddress || !runtimeScope || typeof window === 'undefined') {
+      setHistory([]);
+      return;
     }
-  }, [publicKey]);
-
-  useEffect(() => {
-    if (!publicKey) { setHistory([]); return; }
     try {
-      const saved = localStorage.getItem(`watcher-cash-history:${publicKey.toBase58()}`);
-      setHistory(saved ? JSON.parse(saved) : []);
+      const raw = window.localStorage.getItem(`watcher-history:${runtimeScope}:${walletAddress}`);
+      setHistory(raw ? JSON.parse(raw) : []);
     } catch {
       setHistory([]);
     }
-  }, [publicKey]);
+  }, [walletAddress, runtimeScope]);
 
-  const encryption = useCallback(async () => {
-    if (!signature) throw new Error('Unlock private account first.');
-    const sdk = await loadSdk();
-    const service = new sdk.EncryptionService();
-    service.deriveEncryptionKeyFromSignature(signature);
-    return { sdk, service };
-  }, [signature]);
+  useEffect(() => {
+    if (!publicKey) {
+      setPublicBalance(0);
+      return undefined;
+    }
+    let active = true;
+    connection.getBalance(publicKey, 'confirmed')
+      .then((balance) => { if (active) setPublicBalance(balance); })
+      .catch(() => {});
+    return () => { active = false; };
+  }, [connection, publicKey]);
 
-  const unlock = async () => {
-    if (!publicKey || !signMessage) return;
-    setBusy(true);
-    setError('');
+  const recordHistory = useCallback((entry) => {
+    if (!walletAddress || !runtimeScope || typeof window === 'undefined') return;
+    setHistory((current) => {
+      const next = [{ ...entry, createdAt: Date.now() }, ...current].slice(0, 20);
+      window.localStorage.setItem(
+        `watcher-history:${runtimeScope}:${walletAddress}`,
+        JSON.stringify(next),
+      );
+      return next;
+    });
+  }, [walletAddress, runtimeScope]);
+
+  const ensureProver = useCallback(async () => {
+    if (!runtime) throw new Error('Watcher runtime is not ready');
+    setProver((current) => ({
+      ...current,
+      status: current.status === 'ready' ? 'ready' : 'loading',
+      message: current.status === 'ready' ? current.message : 'Starting local browser prover…',
+    }));
     try {
-      const sig = await signMessage(new TextEncoder().encode(SIGN_MESSAGE));
-      const sdk = await loadSdk();
-      const service = new sdk.EncryptionService();
-      service.deriveEncryptionKeyFromSignature(sig);
-      setSignature(sig);
-      sessionStorage.setItem(`watcher-cash-signature:${publicKey.toBase58()}`, Buffer.from(sig).toString('hex'));
-      setStatus('Private account unlocked.');
-    } catch (e) {
-      setError(friendlyError(e));
+      const ready = await checkBrowserProverV1({
+        basePath: runtime.proverBasePath || DEFAULT_PROVER_BASE,
+        onProgress: handleProverProgress,
+      });
+      setProver({
+        status: 'ready',
+        progress: 1,
+        message: 'Matched proving bundle is loaded in this browser.',
+        bundleDigest: ready.bundleDigest,
+      });
+      return ready;
+    } catch (error) {
+      setProver({
+        status: 'error',
+        progress: 0,
+        message: friendlyError(error),
+        bundleDigest: '',
+      });
+      throw error;
+    }
+  }, [runtime, handleProverProgress]);
+
+  const persistRecords = useCallback(async (nextRecords, keyOverride = vaultKey) => {
+    if (!runtime || !publicKey || !keyOverride) throw new Error('Private note vault is locked');
+    const saved = await saveNoteVaultV1({
+      key: keyOverride,
+      publicKey,
+      scope: runtimeScope,
+      records: nextRecords,
+    });
+    setRecords(saved);
+    return saved;
+  }, [runtime, publicKey, runtimeScope, vaultKey]);
+
+  const syncPrivateState = useCallback(async ({
+    recordsOverride = records,
+    keyOverride = vaultKey,
+    silent = false,
+  } = {}) => {
+    if (!runtimeKeys || !publicKey || !keyOverride) throw new Error('Private note vault is locked');
+    setSyncing(true);
+    if (!silent) setFeedback({ tone: 'info', text: 'Checking commitments and nullifiers on devnet…' });
+    try {
+      const synced = await syncNoteRecordsV1({
+        connection,
+        commitmentsAccount: runtimeKeys.commitments,
+        nullifiersAccount: runtimeKeys.nullifiers,
+        records: recordsOverride,
+      });
+      await persistRecords(synced.records, keyOverride);
+      setTreeCount(synced.registry.count);
+      setNullifierCount(synced.nullifierCount);
+      const walletLamports = await connection.getBalance(publicKey, 'confirmed');
+      setPublicBalance(walletLamports);
+      if (!silent) setFeedback({ tone: 'success', text: 'Private balance synced from devnet state.' });
+      return synced.records;
     } finally {
-      setBusy(false);
+      setSyncing(false);
     }
-  };
+  }, [connection, persistRecords, publicKey, records, runtimeKeys, vaultKey]);
 
-  const getOffset = async () => {
-    try {
-      const response = await fetch(`${RELAYER}/merkle/root?token=${tokenName}`);
-      const json = await response.json();
-      return typeof json.nextIndex === 'number' && json.nextIndex > 60000 ? json.nextIndex - 60000 : 0;
-    } catch {
-      return 0;
-    }
-  };
-
-  const refreshBalance = async () => {
-    if (!publicKey || !signature) return;
-    setBusy(true);
-    setError('');
-    setStatus(`Scanning private ${tokenMeta.label} commitments…`);
-    try {
-      const { sdk, service } = await encryption();
-      const offset = await getOffset();
-      if (tokenName === 'sol') {
-        const utxos = await sdk.getUtxos({
-          connection,
-          publicKey,
-          storage: localStorage,
-          encryptionService: service,
-          offset,
-        });
-        setBalance(sdk.getBalanceFromUtxos(utxos).lamports / LAMPORTS_PER_SOL);
-      } else {
-        const token = sdk.tokens.find((t) => t.name.toLowerCase() === tokenName);
-        if (!token) throw new Error(`${tokenMeta.label} is not available in this SDK build.`);
-        const utxos = await sdk.getUtxosSPL({
-          connection,
-          publicKey,
-          storage: localStorage,
-          encryptionService: service,
-          mintAddress: token.pubkey,
-          offset,
-        });
-        setBalance(sdk.getBalanceFromUtxosSPL(utxos).base_units / token.units_per_token);
-      }
-      setStatus('Private balance synced.');
-    } catch (e) {
-      setError(friendlyError(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const numericAmount = Number(normalizeAmount(amount)) || 0;
-  const feeRate = Number(relayerConfig?.withdraw_fee_rate || 0);
-  const rentFee = tokenName === 'sol'
-    ? Number(relayerConfig?.withdraw_rent_fee || 0)
-    : Number(relayerConfig?.rent_fees?.[tokenName] || 0);
-  const estimatedFee = mode === 'withdraw' && numericAmount > 0 ? (numericAmount * feeRate) + rentFee : 0;
-  const estimatedReceive = Math.max(0, numericAmount - estimatedFee);
-  const minimumWithdrawal = Number(relayerConfig?.minimum_withdrawal?.[tokenName] || 0);
-  const belowMinimum = mode === 'withdraw' && minimumWithdrawal > 0 && numericAmount > 0 && numericAmount < minimumWithdrawal;
-
-  const balanceBelowMinimum = mode === 'withdraw' && balance !== null && minimumWithdrawal > 0 && balance < minimumWithdrawal;
-
-  const setMaxAmount = () => {
-    if (balance === null || balance <= 0) return;
-    if (minimumWithdrawal > 0 && balance < minimumWithdrawal) {
-      setStatus(`Private balance is below the ${minimumWithdrawal} ${tokenMeta.label} protocol minimum.`);
+  const unlockVault = useCallback(async () => {
+    if (!connected || !publicKey) {
+      setVisible(true);
       return;
     }
-    setAmount(String(balance));
-  };
-
-  const stageCopy = {
-    Idle: 'Ready',
-    'Checking RPC': 'Checking network',
-    'Loading SDK': 'Loading privacy engine',
-    'Loading ZK engine': 'Loading ZK engine',
-    'Validating amount': 'Checking amount',
-    'Building proof': 'Generating ZK proof',
-    'Waiting for Phantom': 'Waiting for wallet approval',
-    Broadcasting: 'Submitting transaction',
-    Confirmed: 'Confirmed',
-    Failed: 'Transaction stopped',
-  };
-
-  const submit = async () => {
-    if (!publicKey || !signature || !signTransaction) return;
-    setBusy(true);
-    setError('');
-    setTx('');
-    setDebugStage('Checking RPC');
-    setDebugDetail('');
-    try {
-      if (network === 'wrong-network') throw new Error('Watcher Cash is configured for Solana Mainnet.');
-      if (network === 'offline') {
-        setStatus('Reconnecting to Solana Mainnet…');
-        setDebugStage('Checking RPC');
-        await connection.getLatestBlockhash('confirmed');
-        setNetwork('mainnet');
-      }
-      setDebugStage('Loading SDK');
-      const { sdk, service } = await encryption();
-      setDebugStage('Loading ZK engine');
-      const lightWasm = await loadHasher();
-      setDebugStage('Validating amount');
-      const submittedAmount = normalizeAmount(amount);
-      const units = toBaseUnits(amount, tokenMeta.decimals);
-      if (mode === 'withdraw') {
-        if (relayerStatus !== 'online') throw new Error('Relayer is currently unavailable. Try again shortly.');
-        if (estimatedReceive <= 0) throw new Error('Amount is too low after protocol fees.');
-        if (belowMinimum) throw new Error(`Minimum ${tokenMeta.label} withdrawal is ${minimumWithdrawal}.`);
-        if (balance !== null && numericAmount > balance) throw new Error('Amount exceeds your private balance.');
-      }
-      const token = sdk.tokens.find((t) => t.name.toLowerCase() === tokenName);
-      let result;
-
-      if (mode === 'deposit') {
-        setStatus('Generating zero-knowledge deposit proof…');
-        setDebugStage('Building proof');
-        if (tokenName === 'sol') {
-          result = await sdk.deposit({
-            lightWasm,
-            connection,
-            amount_in_lamports: units,
-            keyBasePath: CIRCUIT,
-            publicKey,
-            transactionSigner: async (transaction) => {
-              setDebugStage('Waiting for Phantom');
-              setDebugDetail('Approve the transaction in Phantom.');
-              const signed = await signTransaction(transaction);
-              setDebugStage('Broadcasting');
-              setDebugDetail('Transaction signed. Sending to Solana…');
-              return signed;
-            },
-            storage: localStorage,
-            encryptionService: service,
-          });
-        } else {
-          if (!token) throw new Error(`${tokenMeta.label} is unavailable.`);
-          result = await sdk.depositSPL({
-            lightWasm,
-            connection,
-            base_units: units,
-            keyBasePath: CIRCUIT,
-            publicKey,
-            transactionSigner: async (transaction) => {
-              setDebugStage('Waiting for Phantom');
-              setDebugDetail('Approve the transaction in Phantom.');
-              const signed = await signTransaction(transaction);
-              setDebugStage('Broadcasting');
-              setDebugDetail('Transaction signed. Sending to Solana…');
-              return signed;
-            },
-            storage: localStorage,
-            encryptionService: service,
-            mintAddress: token.pubkey,
-          });
-        }
-      } else {
-        if (!recipient) throw new Error('Enter a recipient address.');
-        const recipientKey = new PublicKey(recipient);
-        setStatus('Generating zero-knowledge withdrawal proof…');
-        setDebugStage('Building proof');
-        if (tokenName === 'sol') {
-          result = await sdk.withdraw({
-            lightWasm,
-            connection,
-            amount_in_lamports: units,
-            keyBasePath: CIRCUIT,
-            publicKey,
-            storage: localStorage,
-            encryptionService: service,
-            recipient: recipientKey,
-          });
-        } else {
-          if (!token) throw new Error(`${tokenMeta.label} is unavailable.`);
-          result = await sdk.withdrawSPL({
-            lightWasm,
-            connection,
-            base_units: units,
-            keyBasePath: CIRCUIT,
-            publicKey,
-            storage: localStorage,
-            encryptionService: service,
-            recipient: recipientKey,
-            mintAddress: token.pubkey,
-          });
-        }
-      }
-
-      setDebugStage('Confirmed');
-      setDebugDetail(result?.tx ? `Transaction: ${result.tx}` : 'Transaction completed.');
-      setTx(result.tx);
-      if (result?.tx && publicKey) {
-        const entry = {
-          tx: result.tx,
-          type: mode,
-          token: tokenMeta.label,
-          amount: submittedAmount,
-          recipient: mode === 'withdraw' ? recipient : null,
-          time: Date.now(),
-        };
-        setHistory((previous) => {
-          const next = [entry, ...previous.filter((item) => item.tx !== entry.tx)].slice(0, 8);
-          localStorage.setItem(`watcher-cash-history:${publicKey.toBase58()}`, JSON.stringify(next));
-          return next;
-        });
-      }
-      setAmount('');
-      setStatus('Transaction confirmed and indexed.');
-      await refreshBalance();
-    } catch (e) {
-      const raw = e?.stack || e?.message || String(e);
-      setDebugStage('Failed');
-      setDebugDetail(raw);
-      setError(friendlyError(e));
-      setStatus('Transaction stopped.');
-    } finally {
-      setBusy(false);
+    if (runtimeStatus !== 'ready' || !runtime) {
+      throw new Error(runtimeMessage || 'Watcher runtime is not ready');
     }
-  };
+    if (typeof signMessage !== 'function') {
+      throw new Error('This wallet does not support message signing');
+    }
+    setBusy('unlock');
+    setActionStage('Waiting for a wallet signature…');
+    setFeedback({
+      tone: 'info',
+      text: 'This signature only unlocks encrypted notes on this device. It is not a transaction.',
+    });
+    try {
+      const message = new TextEncoder().encode([
+        'Watcher Cash private note vault',
+        'Network: Solana devnet',
+        `Program: ${runtime.programId}`,
+        `Config: ${runtime.config}`,
+        'Signing does not authorize a transaction or move funds.',
+      ].join('\n'));
+      const signature = await signMessage(message);
+      const key = await deriveNoteVaultKeyV1({
+        signature,
+        publicKey,
+        scope: runtimeScope,
+      });
+      const stored = await loadNoteVaultV1({ key, publicKey, scope: runtimeScope });
+      setVaultKey(key);
+      setUnlocked(true);
+      await syncPrivateState({ recordsOverride: stored, keyOverride: key, silent: true });
+      setFeedback({ tone: 'success', text: 'Private note vault unlocked and synced.' });
+      ensureProver().catch(() => {});
+    } finally {
+      setBusy('');
+      setActionStage('');
+    }
+  }, [
+    connected,
+    ensureProver,
+    publicKey,
+    runtime,
+    runtimeMessage,
+    runtimeScope,
+    runtimeStatus,
+    setVisible,
+    signMessage,
+    syncPrivateState,
+  ]);
 
-  const withdrawReady = mode !== 'withdraw' || (relayerStatus === 'online' && !balanceBelowMinimum && estimatedReceive > 0 && !belowMinimum && (balance === null || numericAmount <= balance));
-  const actionReady = connected && signature && sdkReady && network !== 'wrong-network' && !busy && normalizeAmount(amount).length > 0 && withdrawReady;
+  const sendWatcherInstruction = useCallback(async (descriptor) => {
+    if (!publicKey || typeof sendTransaction !== 'function') throw new Error('Wallet is not connected');
+    const latest = await connection.getLatestBlockhash('confirmed');
+    const transaction = new Transaction({
+      feePayer: publicKey,
+      recentBlockhash: latest.blockhash,
+    }).add(
+      ComputeBudgetProgram.setComputeUnitLimit({ units: GROTH16_COMPUTE_UNITS }),
+      ComputeBudgetProgram.setComputeUnitPrice({ microLamports: COMPUTE_UNIT_PRICE }),
+      descriptorInstruction(descriptor),
+    );
+    const signature = await sendTransaction(transaction, connection, {
+      skipPreflight: false,
+      preflightCommitment: 'confirmed',
+      maxRetries: 8,
+    });
+    await connection.confirmTransaction({
+      signature,
+      blockhash: latest.blockhash,
+      lastValidBlockHeight: latest.lastValidBlockHeight,
+    }, 'confirmed');
+    return signature;
+  }, [connection, publicKey, sendTransaction]);
+
+  const browserDepositProof = useCallback((options) => (
+    proveDepositWithBrowserProverV1({
+      ...options,
+      basePath: runtime?.proverBasePath || DEFAULT_PROVER_BASE,
+      onProgress: options.onProgress || handleProverProgress,
+    })
+  ), [runtime, handleProverProgress]);
+
+  const browserWithdrawProof = useCallback((options) => (
+    proveWithdrawWithBrowserProverV1({
+      ...options,
+      basePath: runtime?.proverBasePath || DEFAULT_PROVER_BASE,
+      onProgress: options.onProgress || handleProverProgress,
+    })
+  ), [runtime, handleProverProgress]);
+
+  const executeDeposit = useCallback(async () => {
+    if (!runtimeKeys || !runtime || !publicKey) throw new Error('Watcher runtime is not ready');
+    const lamports = parseSol(amount);
+    if (treeCount >= runtime.commitmentCapacity) throw new Error('The development commitment tree is full');
+    setBusy('deposit');
+    setFeedback(null);
+    let pendingRecord;
+    try {
+      setActionStage('Loading the local prover…');
+      await ensureProver();
+      pendingRecord = createNoteRecordV1({ amount: lamports, kind: 'deposit' });
+      const opening = noteRecordToInputV1(pendingRecord);
+      setActionStage('Generating a private deposit proof in this browser…');
+      const prepared = await prepareDepositV1({
+        accounts: {
+          programId: runtimeKeys.programId,
+          depositor: publicKey,
+          config: runtimeKeys.config,
+          commitments: runtimeKeys.commitments,
+          rootHistory: runtimeKeys.rootHistory,
+          vault: runtimeKeys.vault,
+          systemProgram: SystemProgram.programId,
+        },
+        owner: opening.owner,
+        nonce: opening.nonce,
+        amount: opening.amount,
+        proveDeposit: browserDepositProof,
+        proverOptions: { onProgress: handleProverProgress },
+      });
+      let nextRecords = upsertNoteRecordV1(records, pendingRecord);
+      await persistRecords(nextRecords);
+      setActionStage('Approve the proof-bound deposit in your wallet…');
+      const signature = await sendWatcherInstruction(prepared.instruction);
+      nextRecords = upsertNoteRecordV1(nextRecords, { ...pendingRecord, transaction: signature });
+      await persistRecords(nextRecords);
+      setActionStage('Confirming the commitment on devnet…');
+      await syncPrivateState({ recordsOverride: nextRecords, silent: true });
+      recordHistory({ type: 'deposit', amount: lamports.toString(), signature });
+      setFeedback({
+        tone: 'success',
+        text: `Deposited ${formatSol(lamports)} SOL into a proof-bound private note.`,
+        signature,
+      });
+    } catch (error) {
+      setFeedback({ tone: 'error', text: friendlyError(error) });
+      throw error;
+    } finally {
+      setBusy('');
+      setActionStage('');
+      setProver((current) => current.status === 'error' ? current : {
+        ...current,
+        status: current.bundleDigest ? 'ready' : current.status,
+        progress: current.bundleDigest ? 1 : current.progress,
+      });
+    }
+  }, [
+    amount,
+    browserDepositProof,
+    ensureProver,
+    handleProverProgress,
+    persistRecords,
+    publicKey,
+    recordHistory,
+    records,
+    runtime,
+    runtimeKeys,
+    sendWatcherInstruction,
+    syncPrivateState,
+    treeCount,
+  ]);
+
+  const executeWithdraw = useCallback(async () => {
+    if (!runtimeKeys || !runtime || !publicKey) throw new Error('Watcher runtime is not ready');
+    const publicAmount = parseSol(amount);
+    let recipientKey;
+    try {
+      recipientKey = new PublicKey(recipient.trim());
+    } catch {
+      throw new Error('Recipient is not a valid Solana address');
+    }
+    const required = publicAmount + protocolFee + relayerFee;
+    const selection = selectInputPairV1(records, required);
+    if (treeCount >= runtime.commitmentCapacity) {
+      throw new Error('The development tree is full and cannot append the required change note');
+    }
+
+    setBusy('withdraw');
+    setFeedback(null);
+    let changeRecord;
+    try {
+      setActionStage('Loading the local prover…');
+      await ensureProver();
+      changeRecord = createNoteRecordV1({
+        amount: selection.changeAmount,
+        kind: 'change',
+      });
+      const changeOpening = noteRecordToInputV1(changeRecord);
+      setActionStage('Generating a private withdrawal proof in this browser…');
+      const prepared = await prepareWithdrawV1({
+        connection,
+        accounts: {
+          programId: runtimeKeys.programId,
+          config: runtimeKeys.config,
+          commitments: runtimeKeys.commitments,
+          nullifiers: runtimeKeys.nullifiers,
+          rootHistory: runtimeKeys.rootHistory,
+          vault: runtimeKeys.vault,
+          recipient: recipientKey,
+          relayer: runtimeKeys.relayer,
+          treasury: runtimeKeys.treasury,
+        },
+        input0: selection.inputs[0],
+        input1: selection.inputs[1],
+        change: changeOpening,
+        publicAmount,
+        protocolFee,
+        relayerFee,
+        proveWithdraw: browserWithdrawProof,
+        proverOptions: { onProgress: handleProverProgress },
+      });
+      let nextRecords = upsertNoteRecordV1(records, changeRecord);
+      await persistRecords(nextRecords);
+      setActionStage('Approve the proof-bound withdrawal in your wallet…');
+      const signature = await sendWatcherInstruction(prepared.instruction);
+      nextRecords = upsertNoteRecordV1(nextRecords, { ...changeRecord, transaction: signature });
+      await persistRecords(nextRecords);
+      setActionStage('Confirming nullifiers and private change on devnet…');
+      await syncPrivateState({ recordsOverride: nextRecords, silent: true });
+      recordHistory({
+        type: 'withdraw',
+        amount: publicAmount.toString(),
+        recipient: recipientKey.toBase58(),
+        signature,
+      });
+      setFeedback({
+        tone: 'success',
+        text: `Withdrew ${formatSol(publicAmount)} SOL. ${formatSol(selection.changeAmount)} SOL returned as private change.`,
+        signature,
+      });
+    } catch (error) {
+      setFeedback({ tone: 'error', text: friendlyError(error) });
+      throw error;
+    } finally {
+      setBusy('');
+      setActionStage('');
+      setProver((current) => current.status === 'error' ? current : {
+        ...current,
+        status: current.bundleDigest ? 'ready' : current.status,
+        progress: current.bundleDigest ? 1 : current.progress,
+      });
+    }
+  }, [
+    amount,
+    browserWithdrawProof,
+    connection,
+    ensureProver,
+    handleProverProgress,
+    persistRecords,
+    protocolFee,
+    publicKey,
+    recipient,
+    recordHistory,
+    records,
+    relayerFee,
+    runtime,
+    runtimeKeys,
+    sendWatcherInstruction,
+    syncPrivateState,
+    treeCount,
+  ]);
+
+  const handlePrimaryAction = useCallback(async () => {
+    setFeedback(null);
+    try {
+      if (!connected || !publicKey) {
+        setVisible(true);
+        return;
+      }
+      if (runtimeStatus !== 'ready') throw new Error(runtimeMessage || 'Watcher runtime is not ready');
+      if (!unlocked) {
+        await unlockVault();
+        return;
+      }
+      if (mode === 'deposit') await executeDeposit();
+      else await executeWithdraw();
+    } catch (error) {
+      if (!feedback || feedback.tone !== 'error') {
+        setFeedback({ tone: 'error', text: friendlyError(error) });
+      }
+    }
+  }, [
+    connected,
+    executeDeposit,
+    executeWithdraw,
+    feedback,
+    mode,
+    publicKey,
+    runtimeMessage,
+    runtimeStatus,
+    setVisible,
+    unlockVault,
+    unlocked,
+  ]);
+
+  const discardPending = useCallback(async (record) => {
+    if (record.status !== 'pending' || busy) return;
+    try {
+      const next = removeNoteRecordV1(records, record.id);
+      await persistRecords(next);
+      setFeedback({ tone: 'success', text: 'Local pending note draft removed.' });
+    } catch (error) {
+      setFeedback({ tone: 'error', text: friendlyError(error) });
+    }
+  }, [busy, persistRecords, records]);
+
+  const primaryLabel = busy
+    ? actionStage || 'Working…'
+    : !connected
+      ? 'Connect wallet'
+      : !unlocked
+        ? 'Unlock private notes'
+        : mode === 'deposit'
+          ? 'Generate proof & deposit'
+          : 'Generate proof & withdraw';
+
+  const capacity = runtime?.commitmentCapacity || 16;
+  const capacityRemaining = Math.max(0, capacity - treeCount);
+  const runtimeTone = runtimeStatus === 'ready' ? 'success' : runtimeStatus === 'error' ? 'error' : 'neutral';
+  const proverTone = prover.status === 'ready' ? 'success' : prover.status === 'error' ? 'error' : 'neutral';
 
   return (
     <main className="site-shell">
-      <section className="hero-runtime" id="home">
-        <div className="runtime-backdrop" aria-hidden="true">
-          <div className="aurora aurora-one" />
-          <div className="aurora aurora-two" />
-          <div className="void-ring" />
-          <div className="grain" />
-          <AsciiRain />
+      <div className="ambient ambient-one" />
+      <div className="ambient ambient-two" />
+
+      <nav className="topbar">
+        <Logo />
+        <div className="nav-statuses">
+          <StatusPill tone={runtimeTone}>{runtimeStatus === 'ready' ? 'DEVNET VERIFIED' : 'DEVNET CHECK'}</StatusPill>
+          <StatusPill tone={proverTone}>{prover.status === 'ready' ? 'LOCAL PROVER READY' : 'LOCAL PROVER'}</StatusPill>
         </div>
+        <WalletMultiButton className="wallet-button" />
+      </nav>
 
-        <header className="floating-nav">
-          <a className="mini-logo" href="#home" aria-label="Watcher Cash home"><BrandMark /></a>
-          <nav className="nav-pill" aria-label="Primary navigation">
-            <a className="active" href="#home">Home</a>
-            <button type="button" onClick={() => setVaultOpen(true)}>Watcher Cash</button>
-            <a href="#how">How It Works</a>
-            <a href="https://github.com/Privacy-Cash" target="_blank" rel="noreferrer">Protocol</a>
-          </nav>
-          <button className="sign-pill" type="button" onClick={() => setVaultOpen(true)}>
-            {connected ? shortAddress(publicKey?.toBase58()) : 'Connect'}
-          </button>
-        </header>
+      <section className="hero">
+        <div className="eyebrow"><span>ZERO-KNOWLEDGE CUSTODY</span><b>SOLANA DEVNET</b></div>
+        <h1>Privacy that happens<br /><em>inside your browser.</em></h1>
+        <p>
+          Deposit SOL into a proof-bound private note. Withdraw it later without exposing
+          the note opening, owner secret, nonce, or Merkle path to a hosted prover.
+        </p>
+        <div className="hero-proofline">
+          <div><strong>LOCAL</strong><span>Witness generation</span></div>
+          <div><strong>GROTH16</strong><span>BN254 proofs</span></div>
+          <div><strong>ONCHAIN</strong><span>Solana verification</span></div>
+        </div>
+      </section>
 
-        <div className="hero-center">
-          <div className="trusted-pill">
-            <span className="trust-logos"><b>W</b><b>◎</b><b>◐</b></span>
-            <span>Private transactions on Solana</span>
+      <section className="runtime-banner">
+        <div className={`runtime-icon runtime-${runtimeTone}`}><span /></div>
+        <div>
+          <strong>{runtimeMessage}</strong>
+          <small>
+            {runtime ? `Program ${shortAddress(runtime.programId)} · ${capacityRemaining}/${capacity} commitment slots remain` : 'Transactions stay disabled until deployment verification completes.'}
+          </small>
+        </div>
+        {runtime ? (
+          <a href={explorerAddress(runtime.programId)} target="_blank" rel="noreferrer">Inspect program ↗</a>
+        ) : null}
+      </section>
+
+      <section className="vault-grid">
+        <div className="vault-panel">
+          <header className="panel-header">
+            <div>
+              <span className="panel-kicker">PRIVATE VAULT</span>
+              <h2>{unlocked ? `${formatSol(privateBalance, 6)} SOL` : 'Locked'}</h2>
+              <p>{unlocked ? `${confirmedNotes.length} confirmed notes · ${pendingNotes.length} pending` : 'Sign a message to decrypt notes stored on this device.'}</p>
+            </div>
+            <button
+              type="button"
+              className="refresh-button"
+              disabled={!unlocked || syncing || Boolean(busy)}
+              onClick={() => syncPrivateState().catch((error) => setFeedback({ tone: 'error', text: friendlyError(error) }))}
+            >
+              {syncing ? 'Syncing…' : 'Refresh balance'}
+            </button>
+          </header>
+
+          <div className="mode-tabs" role="tablist">
+            <button type="button" className={mode === 'deposit' ? 'active' : ''} onClick={() => { setMode('deposit'); setFeedback(null); }}>
+              Deposit privately
+            </button>
+            <button type="button" className={mode === 'withdraw' ? 'active' : ''} onClick={() => { setMode('withdraw'); setFeedback(null); }}>
+              Withdraw
+            </button>
           </div>
-          <h1 className="dot-title">Privacy<br />Designed To Disappear</h1>
-          <p className="hero-subtitle">
-            Shield balances and move assets through client-side zero-knowledge proofs,
-            powered by existing Privacy Cash infrastructure.
-          </p>
-          <button className="get-started" type="button" onClick={() => setVaultOpen(true)}>Get Started</button>
+
+          <div className="amount-card">
+            <label htmlFor="amount">{mode === 'deposit' ? 'Amount to privatize' : 'Amount recipient receives'}</label>
+            <div className="amount-input-row">
+              <input
+                id="amount"
+                inputMode="decimal"
+                autoComplete="off"
+                value={amount}
+                onChange={(event) => setAmount(event.target.value)}
+                placeholder="0.00"
+              />
+              <span>SOL</span>
+            </div>
+            <div className="quick-values">
+              {['0.001', '0.01', '0.05', '0.1'].map((value) => (
+                <button type="button" key={value} onClick={() => setAmount(value)}>{value}</button>
+              ))}
+            </div>
+          </div>
+
+          {mode === 'withdraw' ? (
+            <div className="recipient-card">
+              <label htmlFor="recipient">Recipient</label>
+              <input
+                id="recipient"
+                value={recipient}
+                onChange={(event) => setRecipient(event.target.value)}
+                placeholder="Solana address"
+                autoComplete="off"
+              />
+              <button type="button" onClick={() => walletAddress && setRecipient(walletAddress)}>Use connected wallet</button>
+            </div>
+          ) : null}
+
+          {mode === 'withdraw' && withdrawPreview ? (
+            <div className={`preview-card ${withdrawPreview.error ? 'preview-warning' : ''}`}>
+              {withdrawPreview.error ? (
+                <p>{withdrawPreview.error}</p>
+              ) : (
+                <>
+                  <div><span>Notes consumed</span><strong>2</strong></div>
+                  <div><span>Private change</span><strong>{formatSol(withdrawPreview.selection.changeAmount, 6)} SOL</strong></div>
+                  <div><span>Protocol fee</span><strong>{formatSol(protocolFee)} SOL</strong></div>
+                </>
+              )}
+            </div>
+          ) : null}
+
+          <button
+            type="button"
+            className="primary-action"
+            disabled={Boolean(busy)}
+            onClick={handlePrimaryAction}
+          >
+            <span>{primaryLabel}</span>
+            <b>→</b>
+          </button>
+
+          {actionStage ? <div className="action-stage"><span className="spinner" />{actionStage}</div> : null}
+          {feedback ? (
+            <div className={`feedback feedback-${feedback.tone}`}>
+              <p>{feedback.text}</p>
+              {feedback.signature ? (
+                <a href={explorerTransaction(feedback.signature)} target="_blank" rel="noreferrer">Open transaction ↗</a>
+              ) : null}
+            </div>
+          ) : null}
+
+          <div className="wallet-balance-line">
+            <span>Connected wallet</span>
+            <strong>{connected ? `${(publicBalance / LAMPORTS_PER_SOL).toFixed(4)} SOL` : 'Not connected'}</strong>
+          </div>
         </div>
 
-        <div className="metric-row" aria-label="Watcher Cash protocol metrics">
-          <div><span className="metric-icon">‹</span><strong>0</strong><small>Keys Surrendered</small></div>
-          <div><span className="metric-icon">%</span><strong>100%</strong><small>Client-side Proofs</small></div>
-          <div><span className="metric-icon">✣</span><strong>24/7</strong><small>Solana Mainnet</small></div>
-          <div><span className="metric-icon">⌗</span><strong>3</strong><small>Supported Assets</small></div>
+        <aside className="side-stack">
+          <div className="side-card prover-card">
+            <div className="side-card-title">
+              <span className="panel-kicker">BROWSER PROVER</span>
+              <StatusPill tone={proverTone}>{prover.status.toUpperCase()}</StatusPill>
+            </div>
+            <h3>{prover.message}</h3>
+            <div className="progress-track"><span style={{ width: `${Math.round(prover.progress * 100)}%` }} /></div>
+            <div className="side-data-row"><span>Private witness upload</span><strong>NONE</strong></div>
+            <div className="side-data-row"><span>Bundle fingerprint</span><strong>{prover.bundleDigest ? shortAddress(prover.bundleDigest, 8, 8) : '—'}</strong></div>
+            <button type="button" className="secondary-action" disabled={Boolean(busy)} onClick={() => ensureProver().catch(() => {})}>
+              {prover.status === 'ready' ? 'Verify prover again' : 'Load local prover'}
+            </button>
+          </div>
+
+          <div className="side-card capacity-card">
+            <span className="panel-kicker">DEVELOPMENT TREE</span>
+            <div className="capacity-number"><strong>{treeCount}</strong><span>/ {capacity}</span></div>
+            <div className="capacity-track"><span style={{ width: `${Math.min(100, (treeCount / capacity) * 100)}%` }} /></div>
+            <p>Every deposit and withdrawal change appends one commitment. This V1 tree is intentionally small.</p>
+            <div className="side-data-row"><span>Spent nullifiers</span><strong>{nullifierCount}</strong></div>
+          </div>
+
+          <div className="side-card security-card">
+            <span className="panel-kicker">SECURITY BOUNDARY</span>
+            <ul>
+              <li>Owner, nonce, and Merkle paths stay in this browser.</li>
+              <li>Notes are encrypted with a wallet-derived AES-GCM key.</li>
+              <li>The program verifies proof-bound deposits and withdrawals.</li>
+              <li>Development setup, devnet only, not independently audited.</li>
+            </ul>
+          </div>
+        </aside>
+      </section>
+
+      <section className="records-section">
+        <div className="section-heading">
+          <div>
+            <span className="panel-kicker">LOCAL NOTE INVENTORY</span>
+            <h2>Encrypted records</h2>
+          </div>
+          <p>Clearing browser storage without a backup can make private notes unrecoverable.</p>
+        </div>
+        {!unlocked ? (
+          <button type="button" className="empty-state" onClick={handlePrimaryAction}>
+            <strong>Unlock private notes</strong>
+            <span>Your wallet signs a deterministic message. No transaction is created.</span>
+          </button>
+        ) : records.length === 0 ? (
+          <div className="empty-state static-empty">
+            <strong>No private notes yet</strong>
+            <span>Make two deposits before using the current two-input withdrawal circuit.</span>
+          </div>
+        ) : (
+          <div className="notes-list">
+            {records.slice().reverse().map((record) => (
+              <NoteRow key={record.id} record={record} onDiscard={discardPending} />
+            ))}
+          </div>
+        )}
+      </section>
+
+      <section className="history-section">
+        <div className="section-heading">
+          <div>
+            <span className="panel-kicker">PUBLIC TRANSACTION LOG</span>
+            <h2>Recent activity</h2>
+          </div>
+        </div>
+        {history.length === 0 ? (
+          <div className="history-empty">Confirmed transactions from this wallet and deployment will appear here.</div>
+        ) : (
+          <div className="history-list">
+            {history.map((entry) => (
+              <a key={`${entry.signature}:${entry.createdAt}`} href={explorerTransaction(entry.signature)} target="_blank" rel="noreferrer">
+                <span className={`history-type history-${entry.type}`}>{entry.type}</span>
+                <strong>{formatSol(entry.amount, 6)} SOL</strong>
+                <small>{new Date(entry.createdAt).toLocaleString()}</small>
+                <b>{shortAddress(entry.signature, 8, 8)} ↗</b>
+              </a>
+            ))}
+          </div>
+        )}
+      </section>
+
+      <section className="how-section">
+        <div className="section-heading">
+          <div>
+            <span className="panel-kicker">HOW IT MOVES</span>
+            <h2>Proof first. Funds second.</h2>
+          </div>
+        </div>
+        <div className="steps-grid">
+          <article><span>01</span><h3>Create a private note</h3><p>Your device generates fresh owner and nonce secrets, then derives the public commitment.</p></article>
+          <article><span>02</span><h3>Prove locally</h3><p>WebAssembly builds and self-verifies a Groth16 proof without a witness API.</p></article>
+          <article><span>03</span><h3>Verify on Solana</h3><p>The Watcher program checks proof, statement, root history, nullifiers, and custody invariants.</p></article>
         </div>
       </section>
 
-      <section className="how-section" id="how">
-        <p className="eyebrow">WATCHER CASH</p>
-        <h2>Public chain.<br />Private intent.</h2>
-        <div className="how-grid">
-          <article><span>01</span><h3>Connect</h3><p>Your wallet stays in your control. Watcher Cash never asks for a seed phrase or private key.</p></article>
-          <article><span>02</span><h3>Unlock</h3><p>Sign a fixed message. That signature deterministically unlocks your private account locally.</p></article>
-          <article><span>03</span><h3>Prove</h3><p>Zero-knowledge proofs are generated client-side before deposits or withdrawals are submitted.</p></article>
+      <footer>
+        <Logo />
+        <p>Development software on Solana devnet. Do not send mainnet SOL.</p>
+        <div>
+          {runtime ? <a href={explorerAddress(runtime.vault)} target="_blank" rel="noreferrer">Vault ↗</a> : null}
+          <a href="https://github.com/TheTradoor/watcher-cash/tree/watcher-protocol" target="_blank" rel="noreferrer">Source ↗</a>
         </div>
-      </section>
-
-      {vaultOpen && (
-        <div className="vault-layer" role="dialog" aria-modal="true" aria-label="Watcher Cash private vault">
-          <button className="vault-scrim" aria-label="Close vault" onClick={() => setVaultOpen(false)} />
-          <section className="vault-panel">
-            <div className="vault-head">
-              <div>
-                <p className="eyebrow">PRIVATE VAULT</p>
-                <h2>Watcher Cash</h2>
-              </div>
-              <button className="close-vault" type="button" onClick={() => setVaultOpen(false)}>×</button>
-            </div>
-
-            <div className="system-strip">
-              <span className={network === 'mainnet' ? 'ok' : 'bad'}>● {network === 'mainnet' ? 'MAINNET' : network.toUpperCase()}</span>
-              <span className={sdkReady ? 'ok' : ''}>● ZK {sdkReady ? 'READY' : 'LOADING'}</span>
-              <span className={relayerStatus === 'online' ? 'ok' : relayerStatus === 'offline' ? 'bad' : ''}>● RELAYER {relayerStatus === 'online' ? 'LIVE' : relayerStatus === 'offline' ? 'OFFLINE' : 'CHECKING'}</span>
-            </div>
-
-            <div className="wallet-row">
-              <div><small>PUBLIC WALLET</small><strong>{shortAddress(publicKey?.toBase58())}</strong></div>
-              <div><small>PRIVATE ACCESS</small><strong className={signature ? 'ok-text' : ''}>{signature ? 'UNLOCKED' : 'LOCKED'}</strong></div>
-              <div className="wallet-action"><WalletButton /></div>
-            </div>
-
-            {connected && !signature && (
-              <button className="unlock-button" type="button" onClick={unlock} disabled={busy}>Unlock Private Account</button>
-            )}
-
-            <div className="vault-main">
-              <div className="balance-card">
-                <div className="token-tabs">
-                  {Object.keys(TOKEN_META).map((name) => (
-                    <button key={name} className={tokenName === name ? 'active' : ''} onClick={() => setTokenName(name)}>{TOKEN_META[name].label}</button>
-                  ))}
-                </div>
-                <small>PRIVATE BALANCE</small>
-                <strong>{balance === null ? '—' : balance.toLocaleString(undefined, { maximumFractionDigits: 6 })}<em>{tokenMeta.label}</em></strong>
-                <button type="button" className="refresh-button" disabled={!signature || busy} onClick={refreshBalance}>Refresh Balance</button>
-              </div>
-
-              <div className="trade-card">
-                <div className="mode-tabs">
-                  <button className={mode === 'deposit' ? 'active' : ''} onClick={() => setMode('deposit')}>Deposit</button>
-                  <button className={mode === 'withdraw' ? 'active' : ''} onClick={() => setMode('withdraw')}>Withdraw</button>
-                </div>
-
-                <label>Amount</label>
-                <div className="amount-field"><input inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value.replace(',', '.'))} placeholder="0.00" />{mode === 'withdraw' && balance !== null && <button type="button" className="max-button" onClick={setMaxAmount}>MAX</button>}<span>{tokenMeta.label}</span></div>
-
-                {mode === 'withdraw' && (
-                  <>
-                    <label>Recipient</label>
-                    <input className="recipient-field" value={recipient} onChange={(e) => setRecipient(e.target.value)} placeholder="Solana address" />
-                    <div className="fee-card">
-                      <div><span>Private balance</span><strong>{balance === null ? '—' : `${balance.toLocaleString(undefined, { maximumFractionDigits: 6 })} ${tokenMeta.label}`}</strong></div>
-                      <div><span>Protocol fee</span><strong>{relayerConfig && numericAmount > 0 ? `~${estimatedFee.toLocaleString(undefined, { maximumFractionDigits: 6 })} ${tokenMeta.label}` : 'Enter amount'}</strong></div>
-                      <div className="receive-row"><span>You receive</span><strong>{relayerConfig && numericAmount > 0 ? `~${estimatedReceive.toLocaleString(undefined, { maximumFractionDigits: 6 })} ${tokenMeta.label}` : '—'}</strong></div>
-                      {minimumWithdrawal > 0 && <small>Protocol minimum: {minimumWithdrawal} {tokenMeta.label}</small>}
-                      {balanceBelowMinimum && <small className="fee-warning balance-warning">Your private balance is below the minimum withdrawal. Deposit at least {(minimumWithdrawal - balance).toLocaleString(undefined, { maximumFractionDigits: 6 })} {tokenMeta.label} more before withdrawing.</small>}
-                      {!balanceBelowMinimum && belowMinimum && <small className="fee-warning">Amount is below the current protocol minimum.</small>}
-                    </div>
-                  </>
-                )}
-
-                <div className={`stage-card ${debugStage === 'Confirmed' ? 'stage-success' : debugStage === 'Failed' ? 'stage-failed' : ''}`}>
-                  <div className="stage-top"><span className="stage-dot" /><strong>{stageCopy[debugStage] || debugStage}</strong></div>
-                  <small>{debugStage === 'Building proof' ? 'Proof generation can take a moment on mobile.' : debugStage === 'Waiting for Phantom' ? 'Approve the request in your wallet.' : debugStage === 'Confirmed' ? 'Your private transaction has been indexed.' : debugStage === 'Failed' ? 'Nothing else was submitted after this error.' : 'Watcher Cash will update this automatically.'}</small>
-                  {debugDetail && <details><summary>Technical details</summary><pre>{debugDetail}</pre></details>}
-                </div>
-
-                <button className="primary-action" type="button" disabled={!actionReady} onClick={submit}>
-                  {busy ? 'Working…' : mode === 'deposit' ? `Deposit ${tokenMeta.label} Privately` : `Withdraw ${tokenMeta.label}`}
-                </button>
-              </div>
-            </div>
-
-            <div className="status-box"><span>&gt;</span><p>{status}</p></div>
-            {error && <div className="error-box">{error}</div>}
-            {tx && <a className="tx-link receipt-link" href={`https://solscan.io/tx/${tx}`} target="_blank" rel="noreferrer"><strong>✓ Transaction confirmed</strong><span>View receipt on Solscan ↗</span></a>}
-            {history.length > 0 && <div className="history-card"><div className="history-head"><strong>Recent activity</strong><small>Stored on this device</small></div>{history.slice(0, 5).map((item) => <a key={item.tx} href={`https://solscan.io/tx/${item.tx}`} target="_blank" rel="noreferrer"><div><b>{item.type === 'deposit' ? 'Deposit' : 'Withdraw'} {item.token}</b><span>{item.amount} {item.token}</span></div><small>{new Date(item.time).toLocaleString()} ↗</small></a>)}</div>}
-            <p className="mainnet-warning">Mainnet uses real funds. Test with a separate wallet and a small amount first.</p>
-          </section>
-        </div>
-      )}
+      </footer>
     </main>
   );
 }
