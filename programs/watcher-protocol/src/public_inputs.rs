@@ -102,8 +102,7 @@ pub fn validate_statement_binding(
     if inputs.recipient_binding != recipient_binding_v1(&statement.recipient) {
         return Err(WatcherError::PublicInputMismatch);
     }
-    if inputs.asset_id != *expected_asset_id
-        || inputs.context_binding != *expected_context_binding
+    if inputs.asset_id != *expected_asset_id || inputs.context_binding != *expected_context_binding
     {
         return Err(WatcherError::PublicInputMismatch);
     }
@@ -127,11 +126,8 @@ impl DepositV1PublicInputs {
         if bytes.len() != DEPOSIT_V1_PUBLIC_INPUT_BYTES {
             return Err(WatcherError::InvalidPublicInputs);
         }
-        let field = |index: usize| -> [u8; 32] {
-            bytes[index * 32..(index + 1) * 32]
-                .try_into()
-                .unwrap()
-        };
+        let field =
+            |index: usize| -> [u8; 32] { bytes[index * 32..(index + 1) * 32].try_into().unwrap() };
         Ok(Self {
             commitment: field(0),
             amount: field(1),
@@ -154,11 +150,8 @@ impl CircuitV1PublicInputs {
         if bytes.len() != CIRCUIT_V1_PUBLIC_INPUT_BYTES {
             return Err(WatcherError::InvalidPublicInputs);
         }
-        let field = |index: usize| -> [u8; 32] {
-            bytes[index * 32..(index + 1) * 32]
-                .try_into()
-                .unwrap()
-        };
+        let field =
+            |index: usize| -> [u8; 32] { bytes[index * 32..(index + 1) * 32].try_into().unwrap() };
         Ok(Self {
             merkle_root: field(0),
             nullifier_0: field(1),

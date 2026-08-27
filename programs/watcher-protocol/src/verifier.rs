@@ -14,10 +14,7 @@ pub const GROTH16_BN254_PROOF_BYTES: usize = 256;
 // Their G2 component order is A0, A1 for each Fp2 coordinate, while gnark's
 // WriteRawTo / groth16-solana wire format is A1, A0. Both endian conversion
 // and the Fp2 component swap therefore have to happen at the boundary.
-const fn reverse_field_from<const SOURCE: usize>(
-    source: &[u8; SOURCE],
-    start: usize,
-) -> [u8; 32] {
+const fn reverse_field_from<const SOURCE: usize>(source: &[u8; SOURCE], start: usize) -> [u8; 32] {
     let mut output = [0u8; 32];
     let mut index = 0usize;
     while index < 32 {
@@ -187,14 +184,9 @@ fn verify_native<const INPUTS: usize>(
         .try_into()
         .map_err(|_| WatcherError::InvalidProofEncoding)?;
 
-    let mut verifier = Groth16Verifier::<INPUTS>::new(
-        proof_a,
-        proof_b,
-        proof_c,
-        public_inputs_be,
-        verifying_key,
-    )
-    .map_err(|_| WatcherError::InvalidGroth16Proof)?;
+    let mut verifier =
+        Groth16Verifier::<INPUTS>::new(proof_a, proof_b, proof_c, public_inputs_be, verifying_key)
+            .map_err(|_| WatcherError::InvalidGroth16Proof)?;
     verifier
         .verify()
         .map_err(|_| WatcherError::InvalidGroth16Proof)

@@ -223,11 +223,7 @@ pub fn append_unique_32(registry: &mut [u8], value: [u8; 32]) -> Result<(), Watc
     }
     let count = u32::from_le_bytes(registry[1..5].try_into().unwrap()) as usize;
     let end = REGISTRY_HEADER_LEN
-        .checked_add(
-            count
-                .checked_mul(32)
-                .ok_or(WatcherError::RegistryFull)?,
-        )
+        .checked_add(count.checked_mul(32).ok_or(WatcherError::RegistryFull)?)
         .ok_or(WatcherError::RegistryFull)?;
     if end > registry.len() {
         return Err(WatcherError::InvalidAccountData);

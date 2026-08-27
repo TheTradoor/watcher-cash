@@ -1,9 +1,8 @@
 use solana_program::pubkey::Pubkey;
 use watcher_protocol_program::{
     dev_fixture::{
-        DEV_DEPOSIT_PROOF_1_BYTES, DEV_DEPOSIT_PROOF_BYTES,
-        DEV_DEPOSIT_PUBLIC_INPUT_1_BYTES, DEV_DEPOSIT_PUBLIC_INPUT_BYTES, DEV_PROOF_BYTES,
-        DEV_PUBLIC_INPUT_BYTES,
+        DEV_DEPOSIT_PROOF_1_BYTES, DEV_DEPOSIT_PROOF_BYTES, DEV_DEPOSIT_PUBLIC_INPUT_1_BYTES,
+        DEV_DEPOSIT_PUBLIC_INPUT_BYTES, DEV_PROOF_BYTES, DEV_PUBLIC_INPUT_BYTES,
     },
     processor::vault_address_v1,
     public_inputs::{
@@ -31,14 +30,8 @@ fn withdrawal_fixture() -> (WithdrawalStatement, [u8; 32], [u8; 32], [u8; 32]) {
     let inputs = CircuitV1PublicInputs::decode(&DEV_PUBLIC_INPUT_BYTES).unwrap();
     let (program_id, config, vault, relayer, treasury) = custody_context();
     let asset_id = sol_asset_id_field_v1();
-    let context_binding = withdraw_context_binding_v1(
-        &program_id,
-        &config,
-        &vault,
-        &relayer,
-        &treasury,
-        &asset_id,
-    );
+    let context_binding =
+        withdraw_context_binding_v1(&program_id, &config, &vault, &relayer, &treasury, &asset_id);
     (
         WithdrawalStatement {
             nullifier_0: inputs.nullifier_0,
@@ -74,7 +67,10 @@ fn watcher_groth16_fixture_verifies() {
 #[test]
 fn both_deposit_fixtures_verify_against_one_key() {
     for (proof, public_inputs) in [
-        (&DEV_DEPOSIT_PROOF_BYTES[..], &DEV_DEPOSIT_PUBLIC_INPUT_BYTES[..]),
+        (
+            &DEV_DEPOSIT_PROOF_BYTES[..],
+            &DEV_DEPOSIT_PUBLIC_INPUT_BYTES[..],
+        ),
         (
             &DEV_DEPOSIT_PROOF_1_BYTES[..],
             &DEV_DEPOSIT_PUBLIC_INPUT_1_BYTES[..],

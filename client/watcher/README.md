@@ -112,7 +112,7 @@ The client derives both Merkle paths from actual append indices and derives the 
 
 ```text
 config registry:      100 bytes
-commitment registry:  517 bytes
+commitment registry:  645 bytes
 nullifier registry:   2,053 bytes
 root history:         1,033 bytes
 vault:                 50 bytes

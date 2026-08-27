@@ -2,8 +2,7 @@ use crate::{WatcherError, STATE_VERSION};
 
 pub const ROOT_HISTORY_CAPACITY: usize = 32;
 pub const ROOT_HISTORY_HEADER_LEN: usize = 1 + 4 + 4;
-pub const ROOT_HISTORY_ACCOUNT_LEN: usize =
-    ROOT_HISTORY_HEADER_LEN + ROOT_HISTORY_CAPACITY * 32;
+pub const ROOT_HISTORY_ACCOUNT_LEN: usize = ROOT_HISTORY_HEADER_LEN + ROOT_HISTORY_CAPACITY * 32;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct RootHistoryHeader {
@@ -81,7 +80,9 @@ pub fn root_history_contains(data: &[u8], root: &[u8; 32]) -> Result<bool, Watch
     } else {
         0..ROOT_HISTORY_CAPACITY
     };
-    Ok(slots.into_iter().any(|index| read_root(data, index) == *root))
+    Ok(slots
+        .into_iter()
+        .any(|index| read_root(data, index) == *root))
 }
 
 pub fn latest_root(data: &[u8]) -> Result<Option<[u8; 32]>, WatcherError> {
@@ -89,8 +90,7 @@ pub fn latest_root(data: &[u8]) -> Result<Option<[u8; 32]>, WatcherError> {
     if header.count == 0 {
         return Ok(None);
     }
-    let latest_index =
-        (header.next_index + ROOT_HISTORY_CAPACITY - 1) % ROOT_HISTORY_CAPACITY;
+    let latest_index = (header.next_index + ROOT_HISTORY_CAPACITY - 1) % ROOT_HISTORY_CAPACITY;
     Ok(Some(read_root(data, latest_index)))
 }
 

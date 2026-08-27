@@ -7,7 +7,7 @@ export const WATCHER_INSTRUCTION_WITHDRAW_V1 = 2;
 export const VAULT_SEED_V1 = new TextEncoder().encode('watcher-vault-v1');
 
 export const CONFIG_ACCOUNT_LEN_V1 = 100;
-export const COMMITMENT_REGISTRY_LEN_V1 = 5 + (32 * 16);
+export const COMMITMENT_REGISTRY_LEN_V1 = 5 + (32 * 16) + (32 * 4);
 export const NULLIFIER_REGISTRY_LEN_V1 = 5 + (32 * 64);
 export const ROOT_HISTORY_ACCOUNT_LEN_V1 = 1 + 4 + 4 + (32 * 32);
 export const VAULT_ACCOUNT_LEN_V1 = 50;

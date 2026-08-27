@@ -93,5 +93,8 @@ fn malformed_history_is_rejected() {
     malformed[1..5].copy_from_slice(&1u32.to_le_bytes());
     malformed[5..9].copy_from_slice(&0u32.to_le_bytes());
     assert_eq!(malformed[0], STATE_VERSION);
-    assert_eq!(latest_root(&malformed), Err(WatcherError::InvalidAccountData));
+    assert_eq!(
+        latest_root(&malformed),
+        Err(WatcherError::InvalidAccountData)
+    );
 }

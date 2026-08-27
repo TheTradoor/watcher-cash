@@ -206,9 +206,6 @@ impl From<WatcherError> for ProgramError {
 
 /// Legacy helper retained only for old tests. New processor code uses the
 /// circuit-specific verifier functions.
-pub fn verify_withdrawal_proof(
-    _proof: &[u8],
-    _inputs: &[u8],
-) -> Result<(), WatcherError> {
+pub fn verify_withdrawal_proof(_proof: &[u8], _inputs: &[u8]) -> Result<(), WatcherError> {
     Err(WatcherError::ProofVerificationUnavailable)
 }

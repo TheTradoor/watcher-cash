@@ -7,13 +7,10 @@ use solana_sdk::{
     transaction::Transaction,
 };
 use watcher_protocol_program::{
-    codec::{
-        contains_32, ConfigAccount, VaultAccount, CONFIG_ACCOUNT_LEN, VAULT_ACCOUNT_LEN,
-    },
+    codec::{contains_32, ConfigAccount, VaultAccount, CONFIG_ACCOUNT_LEN, VAULT_ACCOUNT_LEN},
     dev_fixture::{
-        DEV_DEPOSIT_PROOF_1_BYTES, DEV_DEPOSIT_PROOF_BYTES,
-        DEV_DEPOSIT_PUBLIC_INPUT_1_BYTES, DEV_DEPOSIT_PUBLIC_INPUT_BYTES, DEV_PROOF_BYTES,
-        DEV_PUBLIC_INPUT_BYTES,
+        DEV_DEPOSIT_PROOF_1_BYTES, DEV_DEPOSIT_PROOF_BYTES, DEV_DEPOSIT_PUBLIC_INPUT_1_BYTES,
+        DEV_DEPOSIT_PUBLIC_INPUT_BYTES, DEV_PROOF_BYTES, DEV_PUBLIC_INPUT_BYTES,
     },
     process_instruction,
     processor::vault_address_v1,
@@ -52,12 +49,7 @@ fn initialize_data(treasury: &Pubkey) -> Vec<u8> {
     data
 }
 
-fn deposit_data(
-    commitment: [u8; 32],
-    amount: u64,
-    proof: &[u8],
-    public_inputs: &[u8],
-) -> Vec<u8> {
+fn deposit_data(commitment: [u8; 32], amount: u64, proof: &[u8], public_inputs: &[u8]) -> Vec<u8> {
     let mut data = vec![1u8];
     data.extend_from_slice(&commitment);
     data.extend_from_slice(&amount.to_le_bytes());
@@ -68,11 +60,7 @@ fn deposit_data(
     data
 }
 
-fn withdraw_data(
-    statement: &WithdrawalStatement,
-    proof: &[u8],
-    public_inputs: &[u8],
-) -> Vec<u8> {
+fn withdraw_data(statement: &WithdrawalStatement, proof: &[u8], public_inputs: &[u8]) -> Vec<u8> {
     let mut data = vec![2u8];
     data.extend_from_slice(&statement.nullifier_0);
     data.extend_from_slice(&statement.nullifier_1);
@@ -160,7 +148,7 @@ async fn funded_deposits_and_verified_withdrawal_move_real_lamports() {
     );
     test.add_account(
         commitments,
-        program_owned_account(program_id, 5 + 32 * 16, &rent),
+        program_owned_account(program_id, 5 + 32 * 16 + 32 * 4, &rent),
     );
     test.add_account(
         nullifiers,
