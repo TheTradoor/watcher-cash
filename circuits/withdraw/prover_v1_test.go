@@ -19,17 +19,18 @@ func TestDepositWitnessJSONRejectsUnknownFields(t *testing.T) {
 }
 
 func TestWithdrawWitnessJSONRejectsInvalidIndexBit(t *testing.T) {
-	assignment := validV1()
-	encoded, err := json.Marshal(assignment)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var payload map[string]any
-	if err := json.Unmarshal(encoded, &payload); err != nil {
-		t.Fatal(err)
-	}
-	payload["Input0Index"] = []int{0, 2, 0, 0}
-	encoded, err = json.Marshal(payload)
+	encoded, err := json.Marshal(withdrawWitnessJSONV1{
+		Input0Amount: "8", Input0Owner: "11", Input0Nonce: "12",
+		Input0Path: []decimalV1{"0", "0", "0", "0"},
+		Input0Index: []uint8{0, 2, 0, 0},
+		Input1Amount: "3", Input1Owner: "13", Input1Nonce: "14",
+		Input1Path: []decimalV1{"0", "0", "0", "0"},
+		Input1Index: []uint8{1, 0, 0, 0},
+		ChangeAmount: "6", ChangeOwner: "15", ChangeNonce: "16",
+		MerkleRoot: "17", Nullifier0: "18", Nullifier1: "19",
+		ChangeCommitment: "20", PublicAmount: "4", ProtocolFee: "0",
+		RelayerFee: "1", RecipientBinding: "21", AssetID: "1", ContextBinding: "22",
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
