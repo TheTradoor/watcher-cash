@@ -2,15 +2,15 @@
 
 Status: FAILED
 Branch: watcher-protocol
-Source commit: 314bc400a8d203b51e4084ce218d3874fc2046cf
-Workflow run: 33125061496
+Source commit: 8ca31c1d1d093ec037935569f404c2a4cdb8539b
+Workflow run: 33125204349
 Failed step: remove legacy runtime
 
 Last validation output:
 
 ```text
 ===== harden devnet route =====
-===== fix direct imports =====
+===== repair direct imports =====
 ===== remove legacy runtime =====
 file:///home/runner/work/watcher-cash/watcher-cash/scripts/remove-legacy-privacycash-runtime.mjs:23
     audit += `\n\n${marker}\n\nThe live Watcher Protocol browser application no longer imports or ships the \\`privacycash\\` package or the legacy Light Protocol browser hasher runtime. The active UI uses Watcher-owned client codecs, circuits, proof adapters, and Solana instructions. Historical migration notes remain documentation only.\n`;
