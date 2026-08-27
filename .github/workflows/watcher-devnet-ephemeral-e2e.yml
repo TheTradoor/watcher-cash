@@ -1,0 +1,231 @@
+name: Watcher Ephemeral Devnet End-to-End
+
+on:
+  push:
+    branches: [watcher-protocol]
+    paths:
+      - '.github/workflows/watcher-devnet-ephemeral-e2e.yml'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: watcher-devnet-ephemeral-e2e
+  cancel-in-progress: false
+
+jobs:
+  devnet:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: watcher-protocol
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Install Node dependencies
+        id: npm
+        continue-on-error: true
+        run: |
+          mkdir -p .github/devnet-e2e-diagnostics
+          npm install > .github/devnet-e2e-diagnostics/npm.log 2>&1
+
+      - name: Install Agave CLI
+        id: agave
+        continue-on-error: true
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSfL https://release.anza.xyz/v2.3.13/install | sh > .github/devnet-e2e-diagnostics/agave-install.log 2>&1
+          echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/share/solana/install/active_release/bin/solana" --version >> .github/devnet-e2e-diagnostics/agave-install.log
+
+      - name: Build Watcher SBF program
+        id: build
+        if: steps.npm.outcome == 'success' && steps.agave.outcome == 'success'
+        continue-on-error: true
+        env:
+          PATH: ${{ env.HOME }}/.local/share/solana/install/active_release/bin:${{ env.PATH }}
+        run: |
+          cargo build-sbf \
+            --manifest-path programs/watcher-protocol/Cargo.toml \
+            --sbf-out-dir target/deploy \
+            > .github/devnet-e2e-diagnostics/build-sbf.log 2>&1
+          test -s target/deploy/watcher_protocol_program.so
+          stat -c 'program_bytes=%s' target/deploy/watcher_protocol_program.so \
+            >> .github/devnet-e2e-diagnostics/build-sbf.log
+
+      - name: Fund ephemeral devnet deployer
+        id: fund
+        if: steps.build.outcome == 'success'
+        continue-on-error: true
+        env:
+          PATH: ${{ env.HOME }}/.local/share/solana/install/active_release/bin:${{ env.PATH }}
+        run: |
+          set -u
+          solana-keygen new --no-bip39-passphrase --force --silent -o /tmp/watcher-devnet-payer.json
+          solana-keygen new --no-bip39-passphrase --force --silent -o /tmp/watcher-devnet-program.json
+          PAYER=$(solana address -k /tmp/watcher-devnet-payer.json)
+          PROGRAM=$(solana address -k /tmp/watcher-devnet-program.json)
+          printf 'payer=%s\nprogram_id=%s\n' "$PAYER" "$PROGRAM" \
+            > .github/devnet-e2e-diagnostics/ephemeral-accounts.txt
+          echo "program_id=$PROGRAM" >> "$GITHUB_OUTPUT"
+
+          for amount in 5 5 2 2 2 1 1 1; do
+            for attempt in 1 2 3; do
+              if solana airdrop "$amount" "$PAYER" \
+                --url https://api.devnet.solana.com \
+                >> .github/devnet-e2e-diagnostics/airdrop.log 2>&1; then
+                break
+              fi
+              sleep $((attempt * 15))
+            done
+            BALANCE=$(solana balance "$PAYER" --url https://api.devnet.solana.com --lamports 2>/dev/null || echo 0)
+            echo "balance_lamports=$BALANCE" >> .github/devnet-e2e-diagnostics/airdrop.log
+            if test "$BALANCE" -ge 8000000000 2>/dev/null; then
+              break
+            fi
+            sleep 15
+          done
+
+          BALANCE=$(solana balance "$PAYER" --url https://api.devnet.solana.com --lamports 2>/dev/null || echo 0)
+          echo "final_balance_lamports=$BALANCE" >> .github/devnet-e2e-diagnostics/airdrop.log
+          test "$BALANCE" -ge 1000000000
+
+      - name: Deploy ephemeral Watcher program to devnet
+        id: deploy
+        if: steps.fund.outcome == 'success'
+        continue-on-error: true
+        env:
+          PATH: ${{ env.HOME }}/.local/share/solana/install/active_release/bin:${{ env.PATH }}
+        run: |
+          set -euo pipefail
+          solana program deploy target/deploy/watcher_protocol_program.so \
+            --url https://api.devnet.solana.com \
+            --keypair /tmp/watcher-devnet-payer.json \
+            --program-id /tmp/watcher-devnet-program.json \
+            --with-compute-unit-price 1000 \
+            > .github/devnet-e2e-diagnostics/deploy.log 2>&1
+          solana program show "${{ steps.fund.outputs.program_id }}" \
+            --url https://api.devnet.solana.com \
+            >> .github/devnet-e2e-diagnostics/deploy.log
+
+      - name: Execute proof-bound devnet deposits and withdrawal
+        id: e2e
+        if: steps.deploy.outcome == 'success'
+        continue-on-error: true
+        env:
+          WATCHER_RPC_URL: https://api.devnet.solana.com
+          WATCHER_PAYER_KEYPAIR: /tmp/watcher-devnet-payer.json
+          WATCHER_PROGRAM_ID: ${{ steps.fund.outputs.program_id }}
+          WATCHER_BUNDLE_CACHE: /tmp/watcher-devnet-prover-cache
+          WATCHER_RECOVERY_FILE: /tmp/watcher-devnet-recovery.json
+          WATCHER_COMPUTE_UNIT_PRICE_MICROLAMPORTS: '1000'
+        run: |
+          node scripts/watcher-devnet-e2e.mjs \
+            > .github/devnet-e2e-diagnostics/e2e-output.json \
+            2> .github/devnet-e2e-diagnostics/e2e-error.log
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          root = Path('.github/devnet-e2e-diagnostics')
+          result = json.loads((root / 'e2e-output.json').read_text())
+          assert result['deltas']['recipient'] == result['expected']['recipient']
+          assert result['deltas']['relayer'] == result['expected']['relayer']
+          assert result['deltas']['vault'] == result['expected']['vault']
+          sanitized = {
+              'cluster': result['cluster'],
+              'signatures': result['signatures'],
+              'accounts': result['accounts'],
+              'deltas': result['deltas'],
+              'expected': result['expected'],
+          }
+          (root / 'e2e-result.json').write_text(json.dumps(sanitized, indent=2) + '\n')
+          (root / 'e2e-output.json').unlink()
+          PY
+
+      - name: Remove all ephemeral secret material
+        if: always()
+        run: |
+          rm -rf \
+            /tmp/watcher-devnet-payer.json \
+            /tmp/watcher-devnet-program.json \
+            /tmp/watcher-devnet-recovery.json \
+            /tmp/watcher-devnet-prover-cache
+
+      - name: Record devnet result
+        if: always()
+        env:
+          NPM: ${{ steps.npm.outcome }}
+          AGAVE: ${{ steps.agave.outcome }}
+          BUILD: ${{ steps.build.outcome }}
+          FUND: ${{ steps.fund.outcome }}
+          DEPLOY: ${{ steps.deploy.outcome }}
+          E2E: ${{ steps.e2e.outcome }}
+          PROGRAM_ID: ${{ steps.fund.outputs.program_id }}
+        run: |
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          root = Path('.github/devnet-e2e-diagnostics')
+          root.mkdir(parents=True, exist_ok=True)
+          outcomes = {
+              'npm': os.environ.get('NPM', 'skipped'),
+              'agave': os.environ.get('AGAVE', 'skipped'),
+              'build_sbf': os.environ.get('BUILD', 'skipped'),
+              'fund_ephemeral_deployer': os.environ.get('FUND', 'skipped'),
+              'deploy_devnet': os.environ.get('DEPLOY', 'skipped'),
+              'proof_bound_devnet_e2e': os.environ.get('E2E', 'skipped'),
+              'ephemeral_program_id': os.environ.get('PROGRAM_ID', ''),
+          }
+          (root / 'status.json').write_text(json.dumps(outcomes, indent=2) + '\n')
+          green = all(
+              outcomes[key] == 'success'
+              for key in [
+                  'npm', 'agave', 'build_sbf', 'fund_ephemeral_deployer',
+                  'deploy_devnet', 'proof_bound_devnet_e2e',
+              ]
+          )
+          if green:
+              Path('client/watcher/.devnet-e2e-ready').write_text(
+                  f"ephemeral program: {outcomes['ephemeral_program_id']}\n"
+                  'SBF deploy on devnet: pass\n'
+                  'proof-bound deposits on devnet: pass\n'
+                  'proof-bound withdrawal and payouts on devnet: pass\n'
+              )
+              for path in root.glob('*.log'):
+                  path.unlink()
+              Path('.github/workflows/watcher-devnet-ephemeral-e2e.yml').unlink(missing_ok=True)
+          else:
+              for path in root.glob('*.log'):
+                  lines = path.read_text(errors='replace').splitlines()
+                  path.write_text('\n'.join(lines[-180:]) + '\n')
+          PY
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'Record Watcher ephemeral devnet validation'
+          git push origin HEAD:watcher-protocol || {
+            git pull --rebase origin watcher-protocol
+            git push origin HEAD:watcher-protocol
+          }
+
+      - name: Fail when devnet validation did not complete
+        if: always()
+        env:
+          NPM: ${{ steps.npm.outcome }}
+          AGAVE: ${{ steps.agave.outcome }}
+          BUILD: ${{ steps.build.outcome }}
+          FUND: ${{ steps.fund.outcome }}
+          DEPLOY: ${{ steps.deploy.outcome }}
+          E2E: ${{ steps.e2e.outcome }}
+        run: |
+          test "$NPM" = success
+          test "$AGAVE" = success
+          test "$BUILD" = success
+          test "$FUND" = success
+          test "$DEPLOY" = success
+          test "$E2E" = success
