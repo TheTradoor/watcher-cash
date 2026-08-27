@@ -8,6 +8,9 @@ pub const CIRCUIT_V1_PUBLIC_INPUT_BYTES: usize = FIELD_BYTES * CIRCUIT_V1_PUBLIC
 /// Canonical CircuitV1 public-input order. This MUST match gnark's public field order:
 /// MerkleRoot, Nullifier0, Nullifier1, ChangeCommitment, PublicAmount, ProtocolFee,
 /// RelayerFee, RecipientBinding, AssetID, ContextBinding.
+///
+/// Wire encoding is little-endian 32-byte BN254 scalar limbs, matching the
+/// coordinate/public-witness fixture exported for the Solana verifier.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CircuitV1PublicInputs {
     pub merkle_root: [u8; 32],
@@ -24,14 +27,12 @@ pub struct CircuitV1PublicInputs {
 
 fn field_from_u64(value: u64) -> [u8; 32] {
     let mut out = [0u8; 32];
-    out[24..].copy_from_slice(&value.to_be_bytes());
+    out[..8].copy_from_slice(&value.to_le_bytes());
     out
 }
 
-/// Prototype recipient binding: raw Solana pubkey interpreted as a 256-bit value is
-/// NOT automatically a valid BN254 scalar. Until the circuit-side hash-to-field
-/// construction is frozen, callers must supply the exact 32-byte field binding and
-/// this function only checks statement fields that have an unambiguous encoding.
+/// RecipientBinding is intentionally not checked yet. It must be derived with the
+/// exact circuit-side hash-to-field construction before custody is enabled.
 pub fn validate_statement_binding(statement: &WithdrawalStatement, inputs: &CircuitV1PublicInputs) -> Result<(), WatcherError> {
     if inputs.nullifier_0 != statement.nullifier_0 || inputs.nullifier_1 != statement.nullifier_1 {
         return Err(WatcherError::PublicInputMismatch);
