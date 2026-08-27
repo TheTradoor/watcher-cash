@@ -1,0 +1,57 @@
+name: Deploy Watcher Cash to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Build static site
+        env:
+          NEXT_PUBLIC_RPC_URL: https://api.mainnet-beta.solana.com
+          NEXT_PUBLIC_RELAYER_API_URL: https://api3.privacycash.org
+          NEXT_PUBLIC_CIRCUIT_BASE_PATH: https://cdn.jsdelivr.net/gh/Privacy-Cash/solana-sdk-demo-interface@df7df0198dc202ba8d13292fd07a05b55f5d7cd3/public/circuit2
+        run: npm run build
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ./out
+
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
