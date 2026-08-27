@@ -1,0 +1,114 @@
+name: Clean Temporary Watcher UI Migration Machinery
+
+on:
+  push:
+    branches: [watcher-protocol]
+    paths:
+      - '.github/workflows/cleanup-watcher-ui-migration.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: watcher-protocol
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+          cache-dependency-path: circuits/withdraw/go.sum
+
+      - name: Validate the permanent application before cleanup
+        env:
+          NEXT_PUBLIC_WATCHER_BASE_PATH: /watcher-cash
+          NEXT_PUBLIC_WATCHER_RPC_URL: https://api.devnet.solana.com
+        run: |
+          npm install --no-audit --no-fund
+          node --test client/watcher/*.test.mjs
+          node --check public/watcher-prover-worker.js
+          npm run build
+          cd circuits/withdraw
+          go test ./...
+          GOOS=js GOARCH=wasm go build -trimpath -o /tmp/watcher-prover-cleanup.wasm ./cmd/watcher-prover-wasm
+          test -s /tmp/watcher-prover-cleanup.wasm
+
+      - name: Write permanent browser architecture notes
+        run: |
+          cat > WATCHER_BROWSER_ARCHITECTURE.md <<'EOF'
+          # Watcher Browser Architecture
+
+          The live Watcher Cash interface is a clean-room Watcher Protocol client.
+
+          ## Private proving boundary
+
+          Deposit and withdrawal witnesses are generated in the browser. Groth16 proving runs inside an isolated Web Worker backed by a Go WebAssembly prover. The worker loads a matched development bundle containing the deposit and withdrawal R1CS, proving keys, and verifying keys. Returned public inputs must match the statement built by the browser byte-for-byte before an instruction can be constructed.
+
+          ## Solana boundary
+
+          The interface is hard-locked to the Solana devnet genesis hash. It can create fresh program-owned config, commitment, nullifier, and root-history accounts, derive the vault PDA, submit proof-bound deposits, rebuild Merkle paths from live state, and submit recipient-bound withdrawals.
+
+          ## Recovery boundary
+
+          Private note owner and nonce values are never placed in persistent application storage. The interface downloads a recovery JSON before broadcasting a deposit or change-producing withdrawal. Session notes are kept only in `sessionStorage` and can be imported or exported explicitly by the user.
+
+          ## Deployment boundary
+
+          GitHub Pages obtains the latest live matched development proving bundle from a successful Circuit CI run, compiles the browser prover to WebAssembly, runs client tests, and performs a static Next.js production build before deployment.
+
+          ## Security status
+
+          This remains development infrastructure. The current setup is not a production ceremony, the tree is intentionally small, and the system has not received an independent production security audit. Do not use production funds.
+          EOF
+
+      - name: Remove migration-only files and stale failure reports
+        run: |
+          rm -f \
+            config/watcher-index.mjs \
+            config/watcher-page-entry.jsx \
+            config/watcher-page-entry-v2.jsx \
+            config/watcher-pages.yml \
+            config/watcher-pages-v2.yml \
+            config/watcher-pages-v3.yml \
+            config/watcher-ui-ci.yml \
+            config/watcher-patch-workflow.yml \
+            scripts/harden-watcher-browser-page.mjs \
+            scripts/patch-watcher-direct-imports.mjs \
+            scripts/fix-watcher-page-imports-v2.mjs \
+            scripts/fix-watcher-page-imports-v3.mjs \
+            scripts/remove-legacy-privacycash-runtime.mjs \
+            .github/workflows/patch-watcher-ui.yml \
+            .github/workflows/patch-watcher-ui-v2.yml \
+            .github/workflows/patch-watcher-ui-v3.yml \
+            .github/workflows/patch-watcher-ui-v4.yml \
+            .github/workflows/patch-watcher-ui-v5.yml \
+            .github/workflows/patch-watcher-ui-v6.yml \
+            .github/workflows/patch-watcher-pages-loop.yml \
+            .github/workflows/patch-watcher-pages-loop-v2.yml \
+            .github/workflows/patch-watcher-pages-loop-v3.yml \
+            .github/workflows/watcher-final-validation.yml \
+            .github/workflows/watcher-final-validation-v2.yml \
+            .github/workflows/watcher-final-validation-v3.yml \
+            .github/workflows/patch-watcher-ui-v2.yml \
+            WATCHER_UI_FAILURE.md \
+            WATCHER_PAGES_FAILURE.md \
+            .github/workflows/cleanup-watcher-ui-migration.yml
+          rmdir config 2>/dev/null || true
+
+      - name: Commit the permanent clean state
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'Clean temporary Watcher browser migration machinery'
+          git pull --rebase origin watcher-protocol
+          git push origin HEAD:watcher-protocol
