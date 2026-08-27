@@ -17,6 +17,8 @@ import (
 type coordFixture struct { Proof map[string]string `json:"proof"`; VK map[string]any `json:"vk"`; PublicInputs []string `json:"public_inputs"` }
 func hx(v interface{ Bytes() [32]byte }) string { b:=v.Bytes(); return hex.EncodeToString(b[:]) }
 
+// The proof and VK exported here are intentionally produced by the SAME Setup call.
+// Never mix proof/VK artifacts from separate CI runs: development Setup is randomized.
 func TestExportCoordinateFixture(t *testing.T){
  if os.Getenv("WATCHER_EXPORT_COORDS")!="1" { t.Skip("set WATCHER_EXPORT_COORDS=1") }
  ccs,pk,vk:=compileV1(t); a:=validV1(); w,err:=frontend.NewWitness(&a,ecc.BN254.ScalarField());if err!=nil{t.Fatal(err)};pub,err:=w.Public();if err!=nil{t.Fatal(err)}
@@ -28,5 +30,5 @@ func TestExportCoordinateFixture(t *testing.T){
  vec,ok:=pub.Vector().(fr.Vector);if !ok{t.Fatalf("unexpected public vector type %T",pub.Vector())};inputs:=make([]string,len(vec));for i:=range vec{b:=vec[i].Bytes();inputs[i]=hex.EncodeToString(b[:])}
  out:=coordFixture{Proof:proof,VK:vkmap,PublicInputs:inputs};data,err:=json.MarshalIndent(out,"","  ");if err!=nil{t.Fatal(err)}
  dir:="fixture-out";if err:=os.MkdirAll(dir,0755);err!=nil{t.Fatal(err)};if err:=os.WriteFile(filepath.Join(dir,"coordinates.json"),data,0644);err!=nil{t.Fatal(err)}
- t.Logf("exported proof coordinates, %d IC points, %d public inputs",len(ic),len(inputs))
+ t.Logf("exported matched proof/VK coordinates, %d IC points, %d public inputs",len(ic),len(inputs))
 }
