@@ -8,6 +8,7 @@ on:
       - 'scripts/apply-proof-carried-root-transitions.py'
       - 'scripts/fix-proof-root-patcher.py'
       - 'scripts/fix-generated-setup-vault.py'
+      - 'scripts/fix-proof-transition-client-tests.py'
   workflow_dispatch:
 
 permissions:
@@ -47,6 +48,7 @@ jobs:
           python scripts/fix-proof-root-patcher.py
           python scripts/apply-proof-carried-root-transitions.py 2>&1 | tee /tmp/root-transition-patch.log
           python scripts/fix-generated-setup-vault.py
+          python scripts/fix-proof-transition-client-tests.py
           sed -i 's/deposit\.public\.xark/sample-deposit-0-public-inputs.bin/g' circuits/withdraw/prover_v1_test.go
           sed -i 's/withdraw\.public\.xark/sample-withdraw-public-inputs.bin/g' circuits/withdraw/prover_v1_test.go
 
