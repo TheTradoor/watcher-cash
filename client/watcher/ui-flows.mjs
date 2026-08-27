@@ -1,12 +1,14 @@
 import { concatBytes } from './keccak.mjs';
 import {
   assertFieldV1,
-  assertU64,
   fieldFromLe32,
   fieldToLe32,
-  noteCommitmentV1,
 } from './field.mjs';
-import { buildWithdrawWitnessFromChainV1 } from './witness.mjs';
+import {
+  buildDepositWitnessFromChainV1,
+  buildDepositWitnessV1,
+  buildWithdrawWitnessFromChainV1,
+} from './witness.mjs';
 import {
   buildDepositInstructionV1,
   buildWithdrawInstructionV1,
@@ -44,70 +46,73 @@ export async function withdrawContextBindingUiV1({
   ]);
 }
 
-export function buildDepositWitnessUiV1({ owner, nonce, amount, assetId = 1n }) {
-  const ownerField = assertFieldV1(owner, 'owner');
-  const nonceField = assertFieldV1(nonce, 'nonce');
-  const amountValue = assertU64(amount, 'amount');
-  const asset = assertFieldV1(assetId, 'assetId');
-  if (ownerField === 0n || nonceField === 0n) {
-    throw new RangeError('owner and nonce must be non-zero');
-  }
-  if (amountValue === 0n || asset === 0n) {
-    throw new RangeError('amount and assetId must be non-zero');
-  }
-  const commitment = noteCommitmentV1({
-    assetId: asset,
-    amount: amountValue,
-    owner: ownerField,
-    nonce: nonceField,
+// Synchronous helper used by unit tests and offline callers. For an actual
+// deposit, prepareUiDepositV1 always reads the current append state from chain.
+export function buildDepositWitnessUiV1({
+  registryAccountData,
+  owner,
+  nonce,
+  amount,
+  assetId = 1n,
+}) {
+  const built = buildDepositWitnessV1({
+    ...(registryAccountData === undefined ? {} : { registryAccountData }),
+    owner,
+    nonce,
+    amount,
+    assetId,
   });
-  const publicInputs = concatBytes(
-    fieldToLe32(commitment),
-    fieldToLe32(amountValue),
-    fieldToLe32(asset),
-  );
   return Object.freeze({
-    note: Object.freeze({
-      amount: amountValue,
-      owner: ownerField,
-      nonce: nonceField,
-      assetId: asset,
-      commitment,
-    }),
-    witness: Object.freeze({
-      Owner: ownerField.toString(10),
-      Nonce: nonceField.toString(10),
-      Commitment: commitment.toString(10),
-      Amount: amountValue.toString(10),
-      AssetID: asset.toString(10),
-    }),
-    publicInputs,
-    commitmentBytes: fieldToLe32(commitment),
+    ...built,
+    note: Object.freeze({ ...built.note }),
+    witness: Object.freeze({ ...built.witness }),
+    commitmentBytes: built.commitment,
   });
 }
 
 export async function prepareUiDepositV1({
+  connection,
   accounts,
   owner,
   nonce,
   amount,
   assetId = 1n,
   prover,
+  commitment = 'confirmed',
 }) {
+  if (!connection || typeof connection.getAccountInfo !== 'function') {
+    throw new TypeError('connection.getAccountInfo is required');
+  }
   if (!accounts || typeof accounts !== 'object') throw new TypeError('accounts are required');
   if (!prover || typeof prover.proveDeposit !== 'function') {
     throw new TypeError('a Watcher browser prover is required');
   }
-  const built = buildDepositWitnessUiV1({ owner, nonce, amount, assetId });
+
+  // The proof carries OldRoot, NewRoot and LeafIndex. They must be derived from
+  // the live registry immediately before proving, not from an assumed empty tree.
+  const built = await buildDepositWitnessFromChainV1({
+    connection,
+    commitmentsAccount: accounts.commitments,
+    commitment,
+    owner,
+    nonce,
+    amount,
+    assetId,
+  });
   const proof = await prover.proveDeposit(built.witness, built.publicInputs);
   const instruction = buildDepositInstructionV1({
     ...accounts,
-    commitment: built.commitmentBytes,
+    commitment: built.commitment,
     amount: built.note.amount,
     proof: proof.proof,
     publicInputs: proof.publicInputs,
   });
-  return Object.freeze({ ...built, proof, instruction });
+  return Object.freeze({
+    ...built,
+    commitmentBytes: built.commitment,
+    proof,
+    instruction,
+  });
 }
 
 export async function prepareUiWithdrawV1({
