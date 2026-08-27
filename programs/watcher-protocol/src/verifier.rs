@@ -1,18 +1,52 @@
-use crate::{public_inputs::{validate_statement_binding, CircuitV1PublicInputs}, WatcherError, WithdrawalStatement};
+use crate::{
+    dev_fixture::DEV_VK_BYTES,
+    public_inputs::{validate_statement_binding, CircuitV1PublicInputs, CIRCUIT_V1_PUBLIC_INPUTS},
+    WatcherError, WithdrawalStatement,
+};
+use xark_verifier::{Proof, Verifier};
 
-/// gnark BN254 Groth16 proof serialization is frozen only after a Watcher-generated
-/// proof fixture is exported and round-tripped. We intentionally reject every proof
-/// until alpha/beta/gamma/delta/IC verifying-key coordinates and proof byte order are
-/// committed as Watcher-owned artifacts.
-pub const GROTH16_BN254_PROOF_BYTES: usize = 256; // envelope limit; final serialization may be narrower
+pub const GROTH16_BN254_PROOF_BYTES: usize = 256;
 
-pub fn verify_circuit_v1(statement: &WithdrawalStatement, proof: &[u8], public_input_bytes: &[u8]) -> Result<(), WatcherError> {
+// DEVELOPMENT VERIFYING KEY ONLY. This key came from the Watcher Circuit V1
+// development fixture. It MUST be replaced after the production trusted setup.
+const CIRCUIT_V1_DEV_VERIFIER: Verifier<CIRCUIT_V1_PUBLIC_INPUTS> =
+    Verifier::from_le_bytes(&DEV_VK_BYTES);
+
+fn to_le_public_inputs(inputs: &CircuitV1PublicInputs) -> [[u8; 32]; CIRCUIT_V1_PUBLIC_INPUTS] {
+    let mut fields = [
+        inputs.merkle_root,
+        inputs.nullifier_0,
+        inputs.nullifier_1,
+        inputs.change_commitment,
+        inputs.public_amount,
+        inputs.protocol_fee,
+        inputs.relayer_fee,
+        inputs.recipient_binding,
+        inputs.asset_id,
+        inputs.context_binding,
+    ];
+    for field in &mut fields { field.reverse(); }
+    fields
+}
+
+pub fn verify_circuit_v1(
+    statement: &WithdrawalStatement,
+    proof: &[u8],
+    public_input_bytes: &[u8],
+) -> Result<(), WatcherError> {
     let inputs = CircuitV1PublicInputs::decode(public_input_bytes)?;
     validate_statement_binding(statement, &inputs)?;
-    if proof.is_empty() || proof.len() > GROTH16_BN254_PROOF_BYTES { return Err(WatcherError::InvalidProofEncoding); }
-
-    // IMPORTANT: no success path yet. The next checkpoint wires Solana's alt_bn128
-    // operations only after a real gnark-generated Watcher fixture + verifying key
-    // are available. Returning Ok here before that would be a critical bypass.
-    Err(WatcherError::ProofVerificationUnavailable)
+    if proof.len() != GROTH16_BN254_PROOF_BYTES {
+        return Err(WatcherError::InvalidProofEncoding);
+    }
+    let proof_array: &[u8; GROTH16_BN254_PROOF_BYTES] = proof
+        .try_into()
+        .map_err(|_| WatcherError::InvalidProofEncoding)?;
+    let parsed = Proof::from_le_bytes(proof_array);
+    let public_inputs = to_le_public_inputs(&inputs);
+    if CIRCUIT_V1_DEV_VERIFIER.verify(&parsed, &public_inputs) {
+        Ok(())
+    } else {
+        Err(WatcherError::InvalidGroth16Proof)
+    }
 }
