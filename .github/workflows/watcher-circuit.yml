@@ -27,59 +27,114 @@ jobs:
           cache-dependency-path: circuits/withdraw/go.sum
       - name: Resolve modules
         run: go mod tidy
-      - name: Test
+      - name: Test withdrawal and deposit circuits
         run: go test -v ./...
-      - name: Generate development Groth16 fixture
+      - name: Generate development withdrawal fixture
         run: go run ./cmd/genfixture
-      - name: Export coordinate fixture
+      - name: Export matched withdrawal coordinates
         env:
           WATCHER_EXPORT_COORDS: '1'
         run: go test -run TestExportCoordinateFixture -v
-      - name: Validate coordinate fixture
+      - name: Export matched deposit coordinates
+        env:
+          WATCHER_EXPORT_DEPOSIT_COORDS: '1'
+        run: go test -run TestExportDepositCoordinateFixture -v
+      - name: Validate coordinate fixtures
         run: |
           python - <<'PY'
           import json
-          d=json.load(open('fixture-out/coordinates.json'))
-          assert len(d['public_inputs']) == 10
-          assert len(d['vk']['ic']) == 11
-          assert all(len(v)==64 for v in d['proof'].values())
-          assert all(len(v)==64 for v in d['public_inputs'])
-          print('coordinate fixture valid: 10 inputs, 11 IC points')
+
+          withdrawal = json.load(open('fixture-out/coordinates.json'))
+          assert len(withdrawal['public_inputs']) == 10
+          assert len(withdrawal['vk']['ic']) == 11
+          assert all(len(value) == 64 for value in withdrawal['proof'].values())
+          assert all(len(value) == 64 for value in withdrawal['public_inputs'])
+
+          deposit = json.load(open('fixture-out/deposit_coordinates.json'))
+          assert len(deposit['public_inputs']) == 3
+          assert len(deposit['vk']['ic']) == 4
+          assert all(len(value) == 64 for value in deposit['proof'].values())
+          assert all(len(value) == 64 for value in deposit['public_inputs'])
+
+          print('coordinate fixtures valid: withdrawal=10 inputs, deposit=3 inputs')
           PY
-      - name: Build matched xark wire fixture
+      - name: Build matched xark wire fixtures
         run: |
           python - <<'PY'
-          import json, pathlib
-          d=json.load(open('fixture-out/coordinates.json'))
-          q=21888242871839275222246405745257275088696311157297823662689037894645226208583
-          def le(h): return bytes.fromhex(h)[::-1]
-          def arr(b): return '['+','.join(f'0x{x:02x}' for x in b)+']\n'
-          p=d['proof']; v=d['vk']
-          ay=(q-int(p['a_y'],16)).to_bytes(32,'little')
-          proof=(le(p['a_x'])+ay+le(p['b_x0'])+le(p['b_x1'])+le(p['b_y0'])+le(p['b_y1'])+le(p['c_x'])+le(p['c_y']))
-          vk=le(v['alpha_x'])+le(v['alpha_y'])
-          for n in ('beta','gamma','delta'):
-              vk += le(v[n+'_x0'])+le(v[n+'_x1'])+le(v[n+'_y0'])+le(v[n+'_y1'])
-          for pt in v['ic']: vk += le(pt['x'])+le(pt['y'])
-          pub=b''.join(le(x) for x in d['public_inputs'])
-          assert len(proof)==256 and len(vk)==1152 and len(pub)==320
-          root=pathlib.Path('../../programs/watcher-protocol/src')
-          (root/'dev_proof_array.in').write_text(arr(proof))
-          (root/'dev_vk_array.in').write_text(arr(vk))
-          (root/'dev_public_inputs_array.in').write_text(arr(pub))
-          print('built one matched proof/VK/public-input fixture')
+          import json
+          import pathlib
+
+          base_field_modulus = 21888242871839275222246405745257275088696311157297823662689037894645226208583
+          output = pathlib.Path('../../programs/watcher-protocol/src')
+
+          def little_endian(hex_value):
+              return bytes.fromhex(hex_value)[::-1]
+
+          def rust_array(value):
+              return '[' + ','.join(f'0x{byte:02x}' for byte in value) + ']\n'
+
+          def build_fixture(source, stem, public_input_count, expected_vk_bytes):
+              coordinates = json.load(open(source))
+              proof_coordinates = coordinates['proof']
+              verifying_key = coordinates['vk']
+
+              negated_a_y = (
+                  base_field_modulus - int(proof_coordinates['a_y'], 16)
+              ).to_bytes(32, 'little')
+              proof = (
+                  little_endian(proof_coordinates['a_x'])
+                  + negated_a_y
+                  + little_endian(proof_coordinates['b_x0'])
+                  + little_endian(proof_coordinates['b_x1'])
+                  + little_endian(proof_coordinates['b_y0'])
+                  + little_endian(proof_coordinates['b_y1'])
+                  + little_endian(proof_coordinates['c_x'])
+                  + little_endian(proof_coordinates['c_y'])
+              )
+
+              vk = little_endian(verifying_key['alpha_x']) + little_endian(verifying_key['alpha_y'])
+              for point_name in ('beta', 'gamma', 'delta'):
+                  vk += (
+                      little_endian(verifying_key[point_name + '_x0'])
+                      + little_endian(verifying_key[point_name + '_x1'])
+                      + little_endian(verifying_key[point_name + '_y0'])
+                      + little_endian(verifying_key[point_name + '_y1'])
+                  )
+              for point in verifying_key['ic']:
+                  vk += little_endian(point['x']) + little_endian(point['y'])
+
+              public_inputs = b''.join(
+                  little_endian(value) for value in coordinates['public_inputs']
+              )
+              assert len(proof) == 256
+              assert len(vk) == expected_vk_bytes
+              assert len(public_inputs) == 32 * public_input_count
+
+              (output / f'{stem}_proof_array.in').write_text(rust_array(proof))
+              (output / f'{stem}_vk_array.in').write_text(rust_array(vk))
+              (output / f'{stem}_public_inputs_array.in').write_text(rust_array(public_inputs))
+
+          build_fixture('fixture-out/coordinates.json', 'dev', 10, 1152)
+          build_fixture('fixture-out/deposit_coordinates.json', 'dev_deposit', 3, 704)
+          print('built matched withdrawal and deposit proof/VK/public-input fixtures')
           PY
-      - name: Publish matched development verifier fixture
+      - name: Publish matched development verifier fixtures
         if: github.event_name == 'push'
         working-directory: .
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add programs/watcher-protocol/src/dev_proof_array.in programs/watcher-protocol/src/dev_vk_array.in programs/watcher-protocol/src/dev_public_inputs_array.in
+          git add \
+            programs/watcher-protocol/src/dev_proof_array.in \
+            programs/watcher-protocol/src/dev_vk_array.in \
+            programs/watcher-protocol/src/dev_public_inputs_array.in \
+            programs/watcher-protocol/src/dev_deposit_proof_array.in \
+            programs/watcher-protocol/src/dev_deposit_vk_array.in \
+            programs/watcher-protocol/src/dev_deposit_public_inputs_array.in
           if git diff --cached --quiet; then
-            echo 'fixture unchanged'
+            echo 'fixtures unchanged'
           else
-            git commit -m 'Sync matched Circuit V1 verifier fixture [skip circuit]'
+            git commit -m 'Sync matched Circuit V1 verifier fixtures [skip circuit]'
             cp -a circuits/withdraw/testdata /tmp/watcher-testdata
             cp -a circuits/withdraw/fixture-out /tmp/watcher-fixture-out
             git reset --hard HEAD
@@ -91,14 +146,15 @@ jobs:
             cp -a /tmp/watcher-testdata circuits/withdraw/testdata
             cp -a /tmp/watcher-fixture-out circuits/withdraw/fixture-out
           fi
-      - name: Show fixture manifest
+      - name: Show withdrawal fixture manifest
         run: cat testdata/v1_fixture/manifest.json
-      - name: Upload development fixture
+      - name: Upload development fixtures
         uses: actions/upload-artifact@v4
         with:
-          name: watcher-circuit-v1-dev-fixture
+          name: watcher-circuit-v1-dev-fixtures
           path: |
             circuits/withdraw/testdata/v1_fixture/
             circuits/withdraw/fixture-out/coordinates.json
+            circuits/withdraw/fixture-out/deposit_coordinates.json
           if-no-files-found: error
           retention-days: 7
