@@ -4,29 +4,39 @@ use sha3::{Digest, Keccak256};
 use solana_program::{
     account_info::{next_account_info, AccountInfo},
     entrypoint::ProgramResult,
+    program::{invoke, invoke_signed},
     program_error::ProgramError,
     pubkey::Pubkey,
+    system_instruction, system_program,
+    sysvar::{rent::Rent, Sysvar},
 };
 
 use crate::{
     codec::{
-        append_unique_32, contains_32, ConfigAccount, WatcherInstruction, CONFIG_ACCOUNT_LEN,
-        REGISTRY_HEADER_LEN,
+        append_unique_32, contains_32, ConfigAccount, VaultAccount, WatcherInstruction,
+        CONFIG_ACCOUNT_LEN, REGISTRY_HEADER_LEN, VAULT_ACCOUNT_LEN,
     },
-    public_inputs::CircuitV1PublicInputs,
+    public_inputs::{
+        sol_asset_id_field_v1, withdraw_context_binding_v1, CircuitV1PublicInputs,
+    },
     root_history::{
         initialize_root_history, latest_root, push_root, require_recent_root,
         ROOT_HISTORY_ACCOUNT_LEN,
     },
-    verifier::verify_circuit_v1,
-    DepositRecord, WatcherError, WithdrawalStatement, STATE_VERSION,
+    verifier::{verify_circuit_v1, verify_deposit_v1},
+    DepositRecord, WatcherError, WithdrawalStatement, SOL_ASSET_ID_V1, STATE_VERSION,
 };
 
+pub const VAULT_SEED_V1: &[u8] = b"watcher-vault-v1";
 const MERKLE_DEPTH_V1: usize = 4;
 const MERKLE_LEAVES_V1: usize = 1 << MERKLE_DEPTH_V1;
 const DOMAIN_NOTE_V1: u64 = 91_001;
 const DOMAIN_MERKLE_V1: u64 = 91_003;
 const MIMC_ROUNDS_BN254: usize = 110;
+
+pub fn vault_address_v1(program_id: &Pubkey, config: &Pubkey) -> (Pubkey, u8) {
+    Pubkey::find_program_address(&[VAULT_SEED_V1, config.as_ref()], program_id)
+}
 
 pub fn process_instruction(
     program_id: &Pubkey,
@@ -35,9 +45,19 @@ pub fn process_instruction(
 ) -> ProgramResult {
     match WatcherInstruction::unpack(data)? {
         WatcherInstruction::Initialize { treasury } => initialize(program_id, accounts, treasury),
-        WatcherInstruction::Deposit { commitment, amount } => {
-            deposit(program_id, accounts, commitment, amount)
-        }
+        WatcherInstruction::Deposit {
+            commitment,
+            amount,
+            proof,
+            public_inputs,
+        } => deposit(
+            program_id,
+            accounts,
+            commitment,
+            amount,
+            &proof,
+            &public_inputs,
+        ),
         WatcherInstruction::Withdraw {
             nullifier_0,
             nullifier_1,
@@ -115,12 +135,63 @@ fn replace_account_data(account: &AccountInfo, replacement: &[u8]) -> ProgramRes
     Ok(())
 }
 
+fn set_lamports(account: &AccountInfo, value: u64) -> ProgramResult {
+    let mut lamports = account.try_borrow_mut_lamports()?;
+    **lamports = value;
+    Ok(())
+}
+
 fn initialize_registry(data: &mut [u8]) -> Result<(), WatcherError> {
     if data.len() < REGISTRY_HEADER_LEN {
         return Err(WatcherError::InvalidAccountData);
     }
     data.fill(0);
     data[0] = STATE_VERSION;
+    Ok(())
+}
+
+fn require_system_program(account: &AccountInfo) -> Result<(), ProgramError> {
+    if account.key != &system_program::id() {
+        return Err(WatcherError::InvalidSystemProgram.into());
+    }
+    Ok(())
+}
+
+fn rent_reserve_v1() -> Result<u64, ProgramError> {
+    Ok(Rent::get()?.minimum_balance(VAULT_ACCOUNT_LEN))
+}
+
+fn validate_vault_state(
+    program_id: &Pubkey,
+    config_key: &Pubkey,
+    vault: &AccountInfo,
+) -> Result<VaultAccount, ProgramError> {
+    let (expected_vault, expected_bump) = vault_address_v1(program_id, config_key);
+    if vault.key != &expected_vault {
+        return Err(WatcherError::InvalidVaultAddress.into());
+    }
+    owned_by(vault, program_id)?;
+    let state = VaultAccount::unpack(&vault.try_borrow_data()?)?;
+    if state.config != *config_key
+        || state.bump != expected_bump
+        || state.asset_id != SOL_ASSET_ID_V1
+    {
+        return Err(WatcherError::InvalidVaultState.into());
+    }
+    Ok(state)
+}
+
+fn validate_vault_balance(
+    vault: &AccountInfo,
+    state: &VaultAccount,
+    rent_reserve: u64,
+) -> Result<(), ProgramError> {
+    let required = rent_reserve
+        .checked_add(state.tracked_balance)
+        .ok_or(WatcherError::ArithmeticOverflow)?;
+    if vault.lamports() < required {
+        return Err(WatcherError::VaultBalanceInvariant.into());
+    }
     Ok(())
 }
 
@@ -131,20 +202,72 @@ fn initialize(program_id: &Pubkey, accounts: &[AccountInfo], treasury: Pubkey) -
     let commitments = next_account_info(&mut iterator)?;
     let nullifiers = next_account_info(&mut iterator)?;
     let root_history = next_account_info(&mut iterator)?;
+    let vault = next_account_info(&mut iterator)?;
+    let system_program_account = next_account_info(&mut iterator)?;
 
     if !authority.is_signer {
         return Err(ProgramError::MissingRequiredSignature);
     }
-    require_distinct(&[config, commitments, nullifiers, root_history])?;
+    require_system_program(system_program_account)?;
+    require_distinct(&[
+        authority,
+        config,
+        commitments,
+        nullifiers,
+        root_history,
+        vault,
+    ])?;
     for account in [config, commitments, nullifiers, root_history] {
         owned_by(account, program_id)?;
         require_writable(account)?;
     }
+    require_writable(authority)?;
+    require_writable(vault)?;
 
     let config_len = require_uninitialized(config, CONFIG_ACCOUNT_LEN)?;
     let commitments_len = require_uninitialized(commitments, REGISTRY_HEADER_LEN)?;
     let nullifiers_len = require_uninitialized(nullifiers, REGISTRY_HEADER_LEN)?;
     let root_history_len = require_uninitialized(root_history, ROOT_HISTORY_ACCOUNT_LEN)?;
+
+    let (expected_vault, bump) = vault_address_v1(program_id, config.key);
+    if vault.key != &expected_vault {
+        return Err(WatcherError::InvalidVaultAddress.into());
+    }
+
+    let rent_reserve = rent_reserve_v1()?;
+    if vault.owner == program_id {
+        require_uninitialized(vault, VAULT_ACCOUNT_LEN)?;
+        if vault.lamports() < rent_reserve {
+            return Err(WatcherError::VaultBalanceInvariant.into());
+        }
+    } else if *vault.owner == system_program::id()
+        && vault.data_is_empty()
+        && vault.lamports() == 0
+    {
+        let bump_seed = [bump];
+        let signer_seeds: &[&[u8]] = &[VAULT_SEED_V1, config.key.as_ref(), &bump_seed];
+        invoke_signed(
+            &system_instruction::create_account(
+                authority.key,
+                vault.key,
+                rent_reserve,
+                VAULT_ACCOUNT_LEN as u64,
+                program_id,
+            ),
+            &[
+                authority.clone(),
+                vault.clone(),
+                system_program_account.clone(),
+            ],
+            &[signer_seeds],
+        )?;
+        owned_by(vault, program_id)?;
+        if vault.data_len() < VAULT_ACCOUNT_LEN {
+            return Err(WatcherError::InvalidVaultState.into());
+        }
+    } else {
+        return Err(WatcherError::InvalidVaultState.into());
+    }
 
     let mut next_config = vec![0u8; config_len];
     ConfigAccount {
@@ -162,11 +285,20 @@ fn initialize(program_id: &Pubkey, accounts: &[AccountInfo], treasury: Pubkey) -
     initialize_registry(&mut next_nullifiers)?;
     let mut next_root_history = vec![0u8; root_history_len];
     initialize_root_history(&mut next_root_history)?;
+    let mut next_vault = vec![0u8; vault.data_len()];
+    VaultAccount {
+        config: *config.key,
+        bump,
+        asset_id: SOL_ASSET_ID_V1,
+        tracked_balance: 0,
+    }
+    .pack(&mut next_vault)?;
 
     replace_account_data(config, &next_config)?;
     replace_account_data(commitments, &next_commitments)?;
     replace_account_data(nullifiers, &next_nullifiers)?;
-    replace_account_data(root_history, &next_root_history)
+    replace_account_data(root_history, &next_root_history)?;
+    replace_account_data(vault, &next_vault)
 }
 
 fn mimc_constants_bn254() -> Vec<Fr> {
@@ -247,8 +379,6 @@ fn commitment_count(registry: &[u8]) -> Result<usize, WatcherError> {
 
 /// Circuit V1-compatible Merkle root. Commitments are canonical little-endian
 /// BN254 scalar field elements, placed sequentially into a fixed 16-leaf tree.
-/// Unused leaves are zero, and each parent is MiMC(domainMerkleV1,left,right),
-/// exactly matching circuits/withdraw/circuit_v1.go.
 pub fn commitment_root(registry: &[u8]) -> Result<[u8; 32], WatcherError> {
     let count = commitment_count(registry)?;
     if count == 0 {
@@ -293,26 +423,44 @@ fn deposit(
     accounts: &[AccountInfo],
     commitment: [u8; 32],
     amount: u64,
+    proof: &[u8],
+    public_inputs: &[u8],
 ) -> ProgramResult {
     DepositRecord { commitment, amount }.validate()?;
     fr_from_canonical_le32(&commitment)?;
 
     let mut iterator = accounts.iter();
+    let depositor = next_account_info(&mut iterator)?;
     let config = next_account_info(&mut iterator)?;
     let commitments = next_account_info(&mut iterator)?;
     let root_history = next_account_info(&mut iterator)?;
+    let vault = next_account_info(&mut iterator)?;
+    let system_program_account = next_account_info(&mut iterator)?;
 
-    require_distinct(&[config, commitments, root_history])?;
+    if !depositor.is_signer {
+        return Err(ProgramError::MissingRequiredSignature);
+    }
+    require_system_program(system_program_account)?;
+    require_distinct(&[depositor, config, commitments, root_history, vault])?;
+    require_writable(depositor)?;
     for account in [config, commitments, root_history] {
         owned_by(account, program_id)?;
         require_writable(account)?;
     }
+    require_writable(vault)?;
 
     let config_data = config.try_borrow_data()?.to_vec();
     let commitments_data = commitments.try_borrow_data()?.to_vec();
     let root_history_data = root_history.try_borrow_data()?.to_vec();
     let mut parsed_config = ConfigAccount::unpack(&config_data)?;
     validate_root_state(&parsed_config, &root_history_data)?;
+
+    let rent_reserve = rent_reserve_v1()?;
+    let mut vault_state = validate_vault_state(program_id, config.key, vault)?;
+    validate_vault_balance(vault, &vault_state, rent_reserve)?;
+
+    let asset_id = sol_asset_id_field_v1();
+    verify_deposit_v1(&commitment, amount, &asset_id, proof, public_inputs)?;
 
     if commitment_count(&commitments_data)? >= MERKLE_LEAVES_V1 {
         return Err(WatcherError::MerkleTreeFull.into());
@@ -329,9 +477,32 @@ fn deposit(
     let mut next_config = config_data;
     parsed_config.pack(&mut next_config)?;
 
+    vault_state.tracked_balance = vault_state
+        .tracked_balance
+        .checked_add(amount)
+        .ok_or(WatcherError::ArithmeticOverflow)?;
+    let mut next_vault = vault.try_borrow_data()?.to_vec();
+    vault_state.pack(&mut next_vault)?;
+    let minimum_after = rent_reserve
+        .checked_add(vault_state.tracked_balance)
+        .ok_or(WatcherError::ArithmeticOverflow)?;
+
+    invoke(
+        &system_instruction::transfer(depositor.key, vault.key, amount),
+        &[
+            depositor.clone(),
+            vault.clone(),
+            system_program_account.clone(),
+        ],
+    )?;
+    if vault.lamports() < minimum_after {
+        return Err(WatcherError::VaultBalanceInvariant.into());
+    }
+
     replace_account_data(commitments, &next_commitments)?;
     replace_account_data(root_history, &next_root_history)?;
-    replace_account_data(config, &next_config)
+    replace_account_data(config, &next_config)?;
+    replace_account_data(vault, &next_vault)
 }
 
 fn withdraw(
@@ -353,11 +524,30 @@ fn withdraw(
     let commitments = next_account_info(&mut iterator)?;
     let nullifiers = next_account_info(&mut iterator)?;
     let root_history = next_account_info(&mut iterator)?;
+    let vault = next_account_info(&mut iterator)?;
+    let recipient = next_account_info(&mut iterator)?;
+    let relayer = next_account_info(&mut iterator)?;
+    let treasury = next_account_info(&mut iterator)?;
 
-    require_distinct(&[config, commitments, nullifiers, root_history])?;
+    require_distinct(&[
+        config,
+        commitments,
+        nullifiers,
+        root_history,
+        vault,
+        recipient,
+        relayer,
+        treasury,
+    ])?;
     for account in [config, commitments, nullifiers, root_history] {
         owned_by(account, program_id)?;
         require_writable(account)?;
+    }
+    for account in [vault, recipient, relayer, treasury] {
+        require_writable(account)?;
+    }
+    if recipient.key != &statement.recipient {
+        return Err(WatcherError::InvalidPayoutAccount.into());
     }
 
     let config_data = config.try_borrow_data()?.to_vec();
@@ -365,8 +555,15 @@ fn withdraw(
     let nullifiers_data = nullifiers.try_borrow_data()?.to_vec();
     let root_history_data = root_history.try_borrow_data()?.to_vec();
     let mut parsed_config = ConfigAccount::unpack(&config_data)?;
+    if treasury.key != &parsed_config.treasury {
+        return Err(WatcherError::InvalidPayoutAccount.into());
+    }
     validate_root_state(&parsed_config, &root_history_data)?;
     require_recent_root(&root_history_data, &decoded_inputs.merkle_root)?;
+
+    let rent_reserve = rent_reserve_v1()?;
+    let mut vault_state = validate_vault_state(program_id, config.key, vault)?;
+    validate_vault_balance(vault, &vault_state, rent_reserve)?;
 
     if parsed_config.fees_enabled || parsed_config.protocol_fee_bps != 0 {
         return Err(WatcherError::FeesDisabledDuringDevelopment.into());
@@ -376,6 +573,38 @@ fn withdraw(
     {
         return Err(WatcherError::NullifierAlreadySpent.into());
     }
+    if statement.change_commitment != [0u8; 32]
+        && commitment_count(&commitments_data)? >= MERKLE_LEAVES_V1
+    {
+        return Err(WatcherError::MerkleTreeFull.into());
+    }
+
+    let asset_id = sol_asset_id_field_v1();
+    let context_binding = withdraw_context_binding_v1(
+        program_id,
+        config.key,
+        vault.key,
+        relayer.key,
+        treasury.key,
+        &asset_id,
+    );
+    verify_circuit_v1(
+        &statement,
+        &decoded_inputs.merkle_root,
+        &asset_id,
+        &context_binding,
+        proof,
+        public_inputs,
+    )?;
+
+    let payout = statement
+        .public_amount
+        .checked_add(statement.protocol_fee)
+        .and_then(|value| value.checked_add(statement.relayer_fee))
+        .ok_or(WatcherError::ArithmeticOverflow)?;
+    if vault_state.tracked_balance < payout {
+        return Err(WatcherError::InsufficientVaultBalance.into());
+    }
 
     let mut next_nullifiers = nullifiers_data;
     append_nullifier(&mut next_nullifiers, statement.nullifier_0)?;
@@ -384,11 +613,7 @@ fn withdraw(
     let mut next_commitments = commitments_data;
     let mut next_root_history = root_history_data;
     let mut next_config = config_data;
-
     if statement.change_commitment != [0u8; 32] {
-        if commitment_count(&next_commitments)? >= MERKLE_LEAVES_V1 {
-            return Err(WatcherError::MerkleTreeFull.into());
-        }
         append_unique_32(&mut next_commitments, statement.change_commitment)?;
         let new_root = commitment_root(&next_commitments)?;
         push_root(&mut next_root_history, new_root)?;
@@ -396,12 +621,32 @@ fn withdraw(
         parsed_config.pack(&mut next_config)?;
     }
 
-    verify_circuit_v1(
-        &statement,
-        &decoded_inputs.merkle_root,
-        proof,
-        public_inputs,
-    )?;
+    vault_state.tracked_balance -= payout;
+    let mut next_vault = vault.try_borrow_data()?.to_vec();
+    vault_state.pack(&mut next_vault)?;
+
+    let vault_after = vault
+        .lamports()
+        .checked_sub(payout)
+        .ok_or(WatcherError::InsufficientVaultBalance)?;
+    let required_after = rent_reserve
+        .checked_add(vault_state.tracked_balance)
+        .ok_or(WatcherError::ArithmeticOverflow)?;
+    if vault_after < required_after {
+        return Err(WatcherError::VaultBalanceInvariant.into());
+    }
+    let recipient_after = recipient
+        .lamports()
+        .checked_add(statement.public_amount)
+        .ok_or(WatcherError::ArithmeticOverflow)?;
+    let relayer_after = relayer
+        .lamports()
+        .checked_add(statement.relayer_fee)
+        .ok_or(WatcherError::ArithmeticOverflow)?;
+    let treasury_after = treasury
+        .lamports()
+        .checked_add(statement.protocol_fee)
+        .ok_or(WatcherError::ArithmeticOverflow)?;
 
     replace_account_data(nullifiers, &next_nullifiers)?;
     if statement.change_commitment != [0u8; 32] {
@@ -409,7 +654,12 @@ fn withdraw(
         replace_account_data(root_history, &next_root_history)?;
         replace_account_data(config, &next_config)?;
     }
-    Ok(())
+    replace_account_data(vault, &next_vault)?;
+
+    set_lamports(vault, vault_after)?;
+    set_lamports(recipient, recipient_after)?;
+    set_lamports(relayer, relayer_after)?;
+    set_lamports(treasury, treasury_after)
 }
 
 #[cfg(test)]
@@ -418,7 +668,7 @@ mod tests {
     use crate::dev_fixture::DEV_PUBLIC_INPUT_BYTES;
 
     #[test]
-    fn rust_mimc_tree_matches_circuit_v1_fixture_root() {
+    fn rust_mimc_tree_matches_sequential_circuit_v1_fixture_root() {
         let commitment_0 = mimc_hash_v1(&[
             Fr::from(DOMAIN_NOTE_V1),
             Fr::from(1u64),
@@ -434,9 +684,26 @@ mod tests {
             Fr::from(4444u64),
         ]);
         let mut leaves = [Fr::ZERO; MERKLE_LEAVES_V1];
-        leaves[2] = commitment_0;
-        leaves[7] = commitment_1;
+        leaves[0] = commitment_0;
+        leaves[1] = commitment_1;
         let root = fr_to_le32(merkle_root_from_leaves_v1(leaves));
         assert_eq!(root, DEV_PUBLIC_INPUT_BYTES[..32]);
+    }
+
+    #[test]
+    fn fixed_custody_fixture_uses_the_real_vault_pda() {
+        let program_id = Pubkey::new_from_array([42u8; 32]);
+        let config = Pubkey::new_from_array([43u8; 32]);
+        let (vault, bump) = vault_address_v1(&program_id, &config);
+        assert_eq!(bump, 255);
+        assert_eq!(
+            vault.to_bytes(),
+            [
+                0x53, 0x00, 0x97, 0x5d, 0xd0, 0xc0, 0x7b, 0x8b,
+                0xc9, 0x07, 0x1d, 0x94, 0xad, 0x6f, 0xcd, 0x4d,
+                0x6e, 0x87, 0xb5, 0xf1, 0xef, 0x54, 0xe1, 0x8d,
+                0xd9, 0x6f, 0x65, 0x42, 0xba, 0x55, 0x31, 0xf1,
+            ]
+        );
     }
 }
