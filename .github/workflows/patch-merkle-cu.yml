@@ -1,5 +1,6 @@
 name: Patch Watcher Merkle CU Path
 
+# Re-run after the native verifier wire-order fix.
 on:
   push:
     branches: [watcher-protocol]
