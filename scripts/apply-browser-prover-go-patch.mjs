@@ -158,13 +158,13 @@ if (!setup.includes('"withdraw.r1cs"')) {
   setup = replaceOnce(
     setup,
     'type setupResult struct {\n\tprovingKey, verifyingKey []byte',
-    'type setupResult struct {\n\tconstraintSystem        []byte\n\tprovingKey, verifyingKey []byte',
+    'type setupResult struct {\n\tconstraintSystem         []byte\n\tprovingKey, verifyingKey []byte',
     'withdraw setup result R1CS field',
   );
   setup = replaceOnce(
     setup,
     'type depositSetupResult struct {\n\tprovingKey, verifyingKey []byte',
-    'type depositSetupResult struct {\n\tconstraintSystem        []byte\n\tprovingKey, verifyingKey []byte',
+    'type depositSetupResult struct {\n\tconstraintSystem         []byte\n\tprovingKey, verifyingKey []byte',
     'deposit setup result R1CS field',
   );
   setup = replaceOnce(
@@ -179,7 +179,24 @@ if (!setup.includes('"withdraw.r1cs"')) {
     'return depositSetupResult{\n\t\tconstraintSystem: writeToBytes(ccs),\n\t\tprovingKey: writeToBytes(pk), verifyingKey: writeToBytes(vk), verifierWire: vkWire,',
     'deposit setup result assignment',
   );
-  writeFileSync(setupPath, setup);
 }
+
+// gnark v0.14 exposes the concrete witness type from backend/witness rather
+// than frontend. Normalize the existing helper so the whole setup command
+// builds before compiling the WebAssembly target.
+if (setup.includes('frontend.Witness')) {
+  setup = setup.replaceAll('frontend.Witness', 'witness.Witness');
+  const importMarker = '\t"github.com/consensys/gnark/backend/groth16"\n';
+  const witnessImport = '\t"github.com/consensys/gnark/backend/witness"\n';
+  if (!setup.includes(witnessImport)) {
+    setup = replaceOnce(
+      setup,
+      importMarker,
+      importMarker + witnessImport,
+      'gnark witness import marker',
+    );
+  }
+}
+writeFileSync(setupPath, setup);
 
 console.log('Browser prover Go patch applied.');
