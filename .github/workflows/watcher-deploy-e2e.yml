@@ -1,0 +1,194 @@
+name: Watcher Protocol RPC E2E
+
+on:
+  push:
+    branches: [watcher-protocol]
+    paths:
+      - '.github/workflows/watcher-deploy-e2e.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  build-and-exercise:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    env:
+      SOLANA_VERSION: v2.3.13
+      MATCHED_PROVER_RUN_ID: '33078034559'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install matched Agave toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 \
+            "https://github.com/anza-xyz/agave/releases/download/${SOLANA_VERSION}/solana-release-x86_64-unknown-linux-gnu.tar.bz2" \
+            --output /tmp/solana-release.tar.bz2
+          mkdir -p /tmp/solana-release
+          tar -xjf /tmp/solana-release.tar.bz2 -C /tmp/solana-release --strip-components=1
+          echo "/tmp/solana-release/bin" >> "$GITHUB_PATH"
+          /tmp/solana-release/bin/solana --version
+          /tmp/solana-release/bin/cargo-build-sbf --version
+
+      - name: Build the actual SBF program
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p target/deploy
+          cargo build-sbf \
+            --manifest-path programs/watcher-protocol/Cargo.toml \
+            --sbf-out-dir target/deploy
+          test -s target/deploy/watcher_protocol_program.so
+          sha256sum target/deploy/watcher_protocol_program.so | tee /tmp/program-sha256.txt
+          ls -lh target/deploy/watcher_protocol_program.so
+
+      - name: Download the exact matched local-prover bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: watcher-local-prover-v1-dev
+          path: /tmp/watcher-prover
+          github-token: ${{ github.token }}
+          repository: TheTradoor/watcher-cash
+          run-id: ${{ env.MATCHED_PROVER_RUN_ID }}
+
+      - name: Start and verify the local prover
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x /tmp/watcher-prover/watcher-prover-linux-amd64
+          nohup /tmp/watcher-prover/watcher-prover-linux-amd64 \
+            -assets /tmp/watcher-prover \
+            -listen 127.0.0.1:8090 \
+            -origins http://localhost:3000,http://127.0.0.1:3000 \
+            >/tmp/watcher-prover.log 2>&1 &
+          echo $! >/tmp/watcher-prover.pid
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:8090/healthz | tee /tmp/prover-health.json; then
+              exit 0
+            fi
+            sleep 1
+          done
+          cat /tmp/watcher-prover.log
+          exit 1
+
+      - name: Install JS transaction dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Exercise deployed SBF on a fresh local validator
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/watcher-validator-ledger
+          nohup solana-test-validator \
+            --reset \
+            --ledger /tmp/watcher-validator-ledger \
+            --rpc-port 8899 \
+            --faucet-port 9900 \
+            >/tmp/watcher-validator.log 2>&1 &
+          echo $! >/tmp/watcher-validator.pid
+          for attempt in $(seq 1 60); do
+            if solana cluster-version --url http://127.0.0.1:8899 >/dev/null 2>&1; then
+              break
+            fi
+            sleep 1
+          done
+          solana-keygen new --silent --no-bip39-passphrase --force --outfile /tmp/local-payer.json
+          solana-keygen new --silent --no-bip39-passphrase --force --outfile /tmp/local-program.json
+          LOCAL_PAYER=$(solana address --keypair /tmp/local-payer.json)
+          LOCAL_PROGRAM=$(solana address --keypair /tmp/local-program.json)
+          solana airdrop 100 "$LOCAL_PAYER" --url http://127.0.0.1:8899
+          solana program deploy \
+            --url http://127.0.0.1:8899 \
+            --keypair /tmp/local-payer.json \
+            --program-id /tmp/local-program.json \
+            target/deploy/watcher_protocol_program.so \
+            | tee /tmp/local-deploy.log
+          printf '%s\n' "$LOCAL_PROGRAM" >/tmp/local-program-id.txt
+          WATCHER_PROGRAM_ID="$LOCAL_PROGRAM" \
+          WATCHER_PAYER_KEYPAIR=/tmp/local-payer.json \
+          WATCHER_PROVER_URL=http://127.0.0.1:8090 \
+          WATCHER_DEVNET_RPC=http://127.0.0.1:8899 \
+          WATCHER_RECOVERY_FILE=/tmp/local-recovery.json \
+          npm run e2e:watcher-devnet | tee /tmp/local-rpc-e2e.log
+          rm -f /tmp/local-recovery.json /tmp/local-payer.json /tmp/local-program.json
+
+      - name: Try the same full flow on public Solana devnet
+        id: public_devnet
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          solana-keygen new --silent --no-bip39-passphrase --force --outfile /tmp/devnet-payer.json
+          solana-keygen new --silent --no-bip39-passphrase --force --outfile /tmp/devnet-program.json
+          DEVNET_PAYER=$(solana address --keypair /tmp/devnet-payer.json)
+          DEVNET_PROGRAM=$(solana address --keypair /tmp/devnet-program.json)
+          printf '%s\n' "$DEVNET_PROGRAM" >/tmp/devnet-program-id.txt
+
+          funded=0
+          for attempt in $(seq 1 6); do
+            if solana airdrop 2 "$DEVNET_PAYER" --url https://api.devnet.solana.com; then
+              funded=1
+            fi
+            sleep 8
+          done
+          if [ "$funded" -ne 1 ]; then
+            echo 'Public devnet faucet did not fund the ephemeral signer.' >&2
+            exit 1
+          fi
+          solana balance "$DEVNET_PAYER" --url https://api.devnet.solana.com | tee /tmp/devnet-balance.txt
+          solana program deploy \
+            --url https://api.devnet.solana.com \
+            --keypair /tmp/devnet-payer.json \
+            --program-id /tmp/devnet-program.json \
+            target/deploy/watcher_protocol_program.so \
+            | tee /tmp/devnet-deploy.log
+          WATCHER_PROGRAM_ID="$DEVNET_PROGRAM" \
+          WATCHER_PAYER_KEYPAIR=/tmp/devnet-payer.json \
+          WATCHER_PROVER_URL=http://127.0.0.1:8090 \
+          WATCHER_DEVNET_RPC=https://api.devnet.solana.com \
+          WATCHER_RECOVERY_FILE=/tmp/devnet-recovery.json \
+          npm run e2e:watcher-devnet | tee /tmp/devnet-rpc-e2e.log
+          rm -f /tmp/devnet-recovery.json /tmp/devnet-payer.json /tmp/devnet-program.json
+
+      - name: Record public-devnet status without leaking keys or note secrets
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "public_devnet_outcome=${{ steps.public_devnet.outcome }}"
+            if [ -f /tmp/devnet-program-id.txt ]; then
+              echo -n 'program_id='
+              cat /tmp/devnet-program-id.txt
+            fi
+          } | tee /tmp/public-devnet-status.txt
+          rm -f /tmp/devnet-recovery.json /tmp/devnet-payer.json /tmp/devnet-program.json
+
+      - name: Upload sanitized RPC E2E evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: watcher-rpc-e2e-evidence
+          path: |
+            /tmp/program-sha256.txt
+            /tmp/prover-health.json
+            /tmp/local-program-id.txt
+            /tmp/local-deploy.log
+            /tmp/local-rpc-e2e.log
+            /tmp/public-devnet-status.txt
+            /tmp/devnet-program-id.txt
+            /tmp/devnet-balance.txt
+            /tmp/devnet-deploy.log
+            /tmp/devnet-rpc-e2e.log
+          if-no-files-found: warn
+          retention-days: 7
