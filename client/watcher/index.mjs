@@ -4,4 +4,6 @@ export * from './merkle.mjs';
 export * from './witness.mjs';
 export * from './instructions.mjs';
 export * from './prover.mjs';
+export * from './browser-prover.mjs';
+export * from './vault.mjs';
 export * from './flows.mjs';
