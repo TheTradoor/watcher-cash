@@ -14,7 +14,7 @@ no-entrypoint = []
 [dependencies]
 solana-program = "2.3.0"
 thiserror = "2"
-xark-verifier = "0.2.1"
+groth16-solana = { git = "https://github.com/Lightprotocol/groth16-solana", rev = "43fee1a67e91c0df7bb4edad5ba87ae4602aa208" }
 ark-bn254 = "0.6"
 ark-ff = "0.6"
 sha3 = "0.10"
