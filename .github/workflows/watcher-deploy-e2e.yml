@@ -48,9 +48,12 @@ jobs:
           test -s programs/watcher-protocol/Cargo.lock
           mkdir -p target/deploy
           cargo build-sbf \
+            --arch v3 \
             --manifest-path programs/watcher-protocol/Cargo.toml \
             --sbf-out-dir target/deploy
           test -s target/deploy/watcher_protocol_program.so
+          readelf --header target/deploy/watcher_protocol_program.so | grep 'Flags:' | tee /tmp/program-sbpf-flags.txt
+          grep -q 'Flags:.*0x3' /tmp/program-sbpf-flags.txt
           sha256sum target/deploy/watcher_protocol_program.so | tee /tmp/program-sha256.txt
           ls -lh target/deploy/watcher_protocol_program.so
 
@@ -181,6 +184,7 @@ jobs:
         with:
           name: watcher-rpc-e2e-evidence
           path: |
+            /tmp/program-sbpf-flags.txt
             /tmp/program-sha256.txt
             /tmp/prover-health.json
             /tmp/local-program-id.txt
