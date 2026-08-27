@@ -1,0 +1,112 @@
+name: Diagnose Watcher Prover Client
+
+on:
+  push:
+    branches: [watcher-protocol]
+    paths:
+      - '.github/workflows/watcher-prover-diagnostics.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: watcher-protocol
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Patch bundle installer idempotently
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('client/watcher/bundle.node.mjs')
+          text = path.read_text()
+          text = text.replace(
+              "import { access, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';",
+              "import { access, cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';",
+          )
+          text = text.replace(
+              "  const target = path.resolve(cacheDirectory, 'local-prover');\n",
+              "  const target = path.resolve(cacheDirectory, 'local-prover');\n  await mkdir(path.dirname(target), { recursive: true });\n",
+          )
+          text = text.replace(
+              "    await rename(extracted, target);\n",
+              "    await cp(extracted, target, { recursive: true, force: true });\n",
+          )
+          path.write_text(text)
+          PY
+
+      - name: Install dependencies
+        id: install
+        continue-on-error: true
+        run: |
+          mkdir -p .github/prover-diagnostics
+          npm install > .github/prover-diagnostics/npm-install.log 2>&1
+
+      - name: Test binding helpers
+        id: bindings
+        if: steps.install.outcome == 'success'
+        continue-on-error: true
+        run: node --test client/watcher/bindings.test.mjs > .github/prover-diagnostics/bindings.log 2>&1
+
+      - name: Test instruction builders
+        id: instructions
+        if: steps.install.outcome == 'success'
+        continue-on-error: true
+        run: node --test client/watcher/instructions.test.mjs > .github/prover-diagnostics/instructions.log 2>&1
+
+      - name: Test local prover adapter
+        id: prover
+        if: steps.install.outcome == 'success'
+        continue-on-error: true
+        run: node --test client/watcher/prover.node.test.mjs > .github/prover-diagnostics/prover.log 2>&1
+
+      - name: Test existing Watcher client suite
+        id: existing
+        if: steps.install.outcome == 'success'
+        continue-on-error: true
+        run: node --test client/watcher/field.test.mjs client/watcher/merkle.test.mjs client/watcher/registry.test.mjs client/watcher/witness.test.mjs > .github/prover-diagnostics/existing.log 2>&1
+
+      - name: Record outcomes and commit
+        env:
+          INSTALL: ${{ steps.install.outcome }}
+          BINDINGS: ${{ steps.bindings.outcome }}
+          INSTRUCTIONS: ${{ steps.instructions.outcome }}
+          PROVER: ${{ steps.prover.outcome }}
+          EXISTING: ${{ steps.existing.outcome }}
+        run: |
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          outcomes = {
+              'install': os.environ.get('INSTALL', 'skipped'),
+              'bindings': os.environ.get('BINDINGS', 'skipped'),
+              'instructions': os.environ.get('INSTRUCTIONS', 'skipped'),
+              'prover': os.environ.get('PROVER', 'skipped'),
+              'existing': os.environ.get('EXISTING', 'skipped'),
+          }
+          root = Path('.github/prover-diagnostics')
+          root.mkdir(parents=True, exist_ok=True)
+          (root / 'status.json').write_text(json.dumps(outcomes, indent=2) + '\n')
+          all_pass = all(value == 'success' for value in outcomes.values())
+          if all_pass:
+              Path('client/watcher/.local-prover-ready').write_text('all client prover tests passed\n')
+              for path in [
+                  Path('.github/workflows/watcher-prover-finalize.yml'),
+                  Path('.github/workflows/watcher-prover-sync-trigger.yml'),
+              ]:
+                  path.unlink(missing_ok=True)
+          PY
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'Record Watcher prover client diagnostics and finalize bundle install'
+          git push origin HEAD:watcher-protocol
