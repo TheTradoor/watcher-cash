@@ -67,8 +67,8 @@ patch(
             "        publicInputs: bytes(415, 6),",
         ),
         (
-            "    /320 bytes/ ,",
-            "    /416 bytes/ ,",
+            '    /320 bytes/,',
+            '    /416 bytes/,',
         ),
     ],
 )
