@@ -1,0 +1,159 @@
+name: Watcher Local Prover Sync
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: watcher-local-prover-sync
+  cancel-in-progress: false
+
+jobs:
+  sync-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: watcher-protocol
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+          cache-dependency-path: circuits/withdraw/go.sum
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Normalize local prover source
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          paths = [
+              Path('circuits/withdraw/cmd/watcher-prover/main.go'),
+              Path('circuits/withdraw/cmd/watcher-setup/main.go'),
+          ]
+          for path in paths:
+              text = path.read_text()
+              if 'frontend.Witness' in text:
+                  text = text.replace('frontend.Witness', 'witness.Witness')
+                  marker = '\t"github.com/consensys/gnark/backend/groth16"\n'
+                  import_line = '\t"github.com/consensys/gnark/backend/witness"\n'
+                  if import_line not in text:
+                      if marker not in text:
+                          raise SystemExit(f'could not locate gnark import marker in {path}')
+                      text = text.replace(marker, marker + import_line, 1)
+                  path.write_text(text)
+          PY
+          gofmt -w \
+            circuits/withdraw/cmd/watcher-prover/main.go \
+            circuits/withdraw/cmd/watcher-setup/main.go
+
+      - name: Test and resolve Go modules
+        working-directory: circuits/withdraw
+        run: |
+          go mod tidy
+          go test -v ./...
+
+      - name: Generate matched proving bundle and Rust verifier fixtures
+        working-directory: circuits/withdraw
+        run: |
+          rm -rf fixture-out/local-prover
+          go run ./cmd/watcher-setup \
+            --bundle-out fixture-out/local-prover \
+            --rust-out ../../programs/watcher-protocol/src
+
+      - name: Prove sample deposits and withdrawal locally
+        working-directory: circuits/withdraw
+        run: |
+          rm -rf fixture-out/local-proof-deposit fixture-out/local-proof-withdraw
+          go run ./cmd/watcher-prover \
+            --circuit deposit \
+            --pk fixture-out/local-prover/deposit.pk \
+            --vk fixture-out/local-prover/deposit.vk \
+            --witness fixture-out/local-prover/sample-deposit-0-witness.json \
+            --out fixture-out/local-proof-deposit
+          cmp \
+            fixture-out/local-prover/sample-deposit-0-public-inputs.bin \
+            fixture-out/local-proof-deposit/public-inputs.bin
+          go run ./cmd/watcher-prover \
+            --circuit withdraw \
+            --pk fixture-out/local-prover/withdraw.pk \
+            --vk fixture-out/local-prover/withdraw.vk \
+            --witness fixture-out/local-prover/sample-withdraw-witness.json \
+            --out fixture-out/local-proof-withdraw
+          cmp \
+            fixture-out/local-prover/sample-withdraw-public-inputs.bin \
+            fixture-out/local-proof-withdraw/public-inputs.bin
+
+      - name: Test Watcher client
+        run: |
+          npm install
+          npm run test:watcher-client
+
+      - name: Test Solana program against the matched bundle
+        working-directory: programs/watcher-protocol
+        run: cargo test --all-targets
+
+      - name: Package development prover bundle
+        working-directory: circuits/withdraw/fixture-out
+        run: |
+          tar -czf watcher-development-prover-bundle.tar.gz local-prover
+          sha256sum watcher-development-prover-bundle.tar.gz > watcher-development-prover-bundle.tar.gz.sha256
+
+      - name: Commit normalized source and matched verifier fixtures
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add \
+            circuits/withdraw/go.mod \
+            circuits/withdraw/go.sum \
+            circuits/withdraw/cmd/watcher-prover/main.go \
+            circuits/withdraw/cmd/watcher-setup/main.go \
+            programs/watcher-protocol/src/dev_vk_array.in \
+            programs/watcher-protocol/src/dev_proof_array.in \
+            programs/watcher-protocol/src/dev_public_inputs_array.in \
+            programs/watcher-protocol/src/dev_deposit_vk_array.in \
+            programs/watcher-protocol/src/dev_deposit_proof_array.in \
+            programs/watcher-protocol/src/dev_deposit_public_inputs_array.in \
+            programs/watcher-protocol/src/dev_deposit_proof_1_array.in \
+            programs/watcher-protocol/src/dev_deposit_public_inputs_1_array.in \
+            programs/watcher-protocol/src/development_prover_manifest.json
+          if git diff --cached --quiet; then
+            echo 'matched prover fixtures unchanged'
+          else
+            git commit -m 'Sync matched local prover bundle and verifier fixtures'
+            git push origin HEAD:watcher-protocol
+          fi
+
+      - name: Publish development-only prover bundle
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! gh release view watcher-dev-prover >/dev/null 2>&1; then
+            gh release create watcher-dev-prover \
+              --prerelease \
+              --title 'Watcher development prover bundle' \
+              --notes 'Development single-party Groth16 setup only. Never use this bundle with production funds.'
+          fi
+          gh release upload watcher-dev-prover \
+            circuits/withdraw/fixture-out/watcher-development-prover-bundle.tar.gz \
+            circuits/withdraw/fixture-out/watcher-development-prover-bundle.tar.gz.sha256 \
+            --clobber
+
+      - name: Upload CI prover bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: watcher-development-prover-bundle
+          path: |
+            circuits/withdraw/fixture-out/watcher-development-prover-bundle.tar.gz
+            circuits/withdraw/fixture-out/watcher-development-prover-bundle.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 7
