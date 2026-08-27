@@ -24,7 +24,7 @@ test('withdraw context binds program, config, vault, relayer, treasury and SOL a
     programId: fixed(42),
     config: fixed(43),
     vault: Uint8Array.from(
-      Buffer.from('2b33e598efa1e87999f053a3eec61a80b874da7f6085a0a198da89eae54771fe', 'hex'),
+      Buffer.from('5300975dd0c07b8bc9071d94ad6fcd4d6e87b5f1ef54e18dd96f6542ba5531f1', 'hex'),
     ),
     relayer: fixed(44),
     treasury: fixed(45),
