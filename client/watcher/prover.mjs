@@ -1,6 +1,6 @@
 import { asBytes, hexToBytes } from './keccak.mjs';
 import {
-  DEPOSIT_PUBLIC_INPUT_BYTES_V1,
+  DEPOSIT_INSTRUCTION_PUBLIC_INPUT_BYTES_V1,
   WITHDRAW_PUBLIC_INPUT_BYTES_V1,
   XARK_PROOF_BYTES_V1,
 } from './instructions.mjs';
@@ -104,7 +104,7 @@ export function proveDepositWithLocalProverV1({
     path: '/v1/prove/deposit',
     witness,
     expectedPublicInputs,
-    expectedPublicInputBytes: DEPOSIT_PUBLIC_INPUT_BYTES_V1,
+    expectedPublicInputBytes: DEPOSIT_INSTRUCTION_PUBLIC_INPUT_BYTES_V1,
     fetchImpl,
   });
 }
