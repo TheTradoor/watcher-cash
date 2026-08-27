@@ -2,8 +2,8 @@
 
 Status: FAILED
 Branch: watcher-protocol
-Source commit: 70e69270c3265e72bcd62498d7848c1d9d824f2a
-Workflow run: 33125021158
+Source commit: 314bc400a8d203b51e4084ce218d3874fc2046cf
+Workflow run: 33125061496
 Failed step: remove legacy runtime
 
 Last validation output:
