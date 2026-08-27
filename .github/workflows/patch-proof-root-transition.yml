@@ -45,6 +45,8 @@ jobs:
           set -o pipefail
           python scripts/fix-proof-root-patcher.py
           python scripts/apply-proof-carried-root-transitions.py 2>&1 | tee /tmp/root-transition-patch.log
+          sed -i 's/deposit\.public\.xark/sample-deposit-0-public-inputs.bin/g' circuits/withdraw/prover_v1_test.go
+          sed -i 's/withdraw\.public\.xark/sample-withdraw-public-inputs.bin/g' circuits/withdraw/prover_v1_test.go
 
       - name: Format Go and Rust sources
         shell: bash
