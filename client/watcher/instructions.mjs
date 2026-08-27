@@ -13,7 +13,7 @@ export const ROOT_HISTORY_ACCOUNT_LEN_V1 = 1 + 4 + 4 + (32 * 32);
 export const VAULT_ACCOUNT_LEN_V1 = 50;
 
 export const XARK_PROOF_BYTES_V1 = 256;
-export const DEPOSIT_PUBLIC_INPUT_BYTES_V1 = 96;
+export const DEPOSIT_INSTRUCTION_PUBLIC_INPUT_BYTES_V1 = 96;
 export const WITHDRAW_PUBLIC_INPUT_BYTES_V1 = 320;
 
 export function publicKeyBytesV1(value, label = 'public key') {
@@ -89,7 +89,11 @@ export function encodeDepositDataV1({ commitment, amount, proof, publicInputs })
     exactBytes(commitment, 32, 'commitment'),
     u64LE(amount, 'amount'),
     prefixedBytes(proof, XARK_PROOF_BYTES_V1, 'deposit proof'),
-    prefixedBytes(publicInputs, DEPOSIT_PUBLIC_INPUT_BYTES_V1, 'deposit public inputs'),
+    prefixedBytes(
+      publicInputs,
+      DEPOSIT_INSTRUCTION_PUBLIC_INPUT_BYTES_V1,
+      'deposit public inputs',
+    ),
   );
 }
 
