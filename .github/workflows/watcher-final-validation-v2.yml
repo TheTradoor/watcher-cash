@@ -1,0 +1,161 @@
+name: Deterministic Final Watcher Browser Validation
+
+on:
+  push:
+    branches: [watcher-protocol]
+    paths:
+      - '.github/workflows/watcher-final-validation-v2.yml'
+      - 'config/watcher-page-entry-v2.jsx'
+      - 'config/watcher-pages-v3.yml'
+      - 'config/watcher-ui-ci.yml'
+      - 'scripts/harden-watcher-browser-page.mjs'
+      - 'scripts/fix-watcher-page-imports-v2.mjs'
+      - 'scripts/remove-legacy-privacycash-runtime.mjs'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: watcher-protocol
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+          cache-dependency-path: circuits/withdraw/go.sum
+
+      - name: Apply, test, and record the complete migration
+        shell: bash
+        env:
+          NEXT_PUBLIC_WATCHER_BASE_PATH: /watcher-cash
+          NEXT_PUBLIC_WATCHER_RPC_URL: https://api.devnet.solana.com
+          SOURCE_SHA: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set +e
+          LOG=/tmp/watcher-final-v2.log
+          : > "$LOG"
+          status=VERIFIED
+          failed_step=''
+
+          attempt() {
+            label="$1"
+            shift
+            echo "===== ${label} =====" | tee -a "$LOG"
+            "$@" >> "$LOG" 2>&1
+            code=$?
+            cat "$LOG" | tail -n 80
+            if [[ $code -ne 0 ]]; then
+              status=FAILED
+              failed_step="$label"
+            fi
+            return $code
+          }
+
+          cp config/watcher-page-entry-v2.jsx app/page.jsx || { status=FAILED; failed_step='apply page entry'; }
+          if [[ "$status" == VERIFIED ]]; then cp config/watcher-pages-v3.yml .github/workflows/pages.yml || { status=FAILED; failed_step='apply Pages workflow'; }; fi
+          if [[ "$status" == VERIFIED ]]; then cp config/watcher-ui-ci.yml .github/workflows/watcher-ui.yml || { status=FAILED; failed_step='apply UI CI workflow'; }; fi
+          if [[ "$status" == VERIFIED ]]; then attempt 'harden devnet route' node scripts/harden-watcher-browser-page.mjs; fi
+          if [[ "$status" == VERIFIED ]]; then attempt 'fix direct imports' node scripts/fix-watcher-page-imports-v2.mjs; fi
+          if [[ "$status" == VERIFIED ]]; then attempt 'remove legacy runtime' node scripts/remove-legacy-privacycash-runtime.mjs; fi
+
+          if [[ "$status" == VERIFIED ]]; then
+            echo '===== runtime isolation =====' | tee -a "$LOG"
+            if grep -R -n -F 'privacycash' app client src package.json >> "$LOG" 2>&1; then
+              status=FAILED
+              failed_step='legacy privacycash runtime search'
+            fi
+          fi
+          if [[ "$status" == VERIFIED ]]; then
+            if grep -R -n -F '@lightprotocol/hasher.rs' app client src package.json >> "$LOG" 2>&1; then
+              status=FAILED
+              failed_step='legacy hasher runtime search'
+            fi
+          fi
+          if [[ "$status" == VERIFIED ]] && grep -q "from '../client/watcher/index.mjs'" app/watcher-protocol-page.jsx; then
+            status=FAILED
+            failed_step='barrel import remains'
+          fi
+          if [[ "$status" == VERIFIED ]] && ! grep -q "import { bytesToHex } from '../client/watcher/keccak.mjs';" app/watcher-protocol-page.jsx; then
+            status=FAILED
+            failed_step='keccak direct import missing'
+          fi
+          if [[ "$status" == VERIFIED ]] && ! grep -q "from '../client/watcher/field.mjs';" app/watcher-protocol-page.jsx; then
+            status=FAILED
+            failed_step='field direct import missing'
+          fi
+          if [[ "$status" == VERIFIED ]] && ! grep -q "from '../client/watcher/instructions.mjs';" app/watcher-protocol-page.jsx; then
+            status=FAILED
+            failed_step='instruction direct import missing'
+          fi
+          if [[ "$status" == VERIFIED ]] && ! grep -q 'paths-ignore:' .github/workflows/pages.yml; then
+            status=FAILED
+            failed_step='loop-safe Pages configuration missing'
+          fi
+
+          if [[ "$status" == VERIFIED ]]; then attempt 'npm install' npm install --no-audit --no-fund; fi
+          if [[ "$status" == VERIFIED ]]; then attempt 'Watcher client tests' node --test client/watcher/*.test.mjs; fi
+          if [[ "$status" == VERIFIED ]]; then attempt 'worker syntax' node --check public/watcher-prover-worker.js; fi
+          if [[ "$status" == VERIFIED ]]; then attempt 'Next production build' npm run build; fi
+          if [[ "$status" == VERIFIED ]]; then attempt 'Go prover tests' bash -c 'cd circuits/withdraw && go test ./...'; fi
+          if [[ "$status" == VERIFIED ]]; then attempt 'Go WASM prover build' bash -c 'cd circuits/withdraw && GOOS=js GOARCH=wasm go build -trimpath -o /tmp/watcher-prover.wasm ./cmd/watcher-prover-wasm && test -s /tmp/watcher-prover.wasm'; fi
+
+          if [[ "$status" == FAILED ]]; then
+            git reset --hard HEAD
+            git clean -fd
+          fi
+
+          {
+            echo '# Final Watcher Browser Validation'
+            echo
+            echo "Status: ${status}"
+            echo 'Branch: watcher-protocol'
+            echo "Source commit: ${SOURCE_SHA}"
+            echo "Workflow run: ${RUN_ID}"
+            if [[ -n "$failed_step" ]]; then echo "Failed step: ${failed_step}"; fi
+            echo
+            if [[ "$status" == VERIFIED ]]; then
+              echo 'Passed:'
+              echo '- clean-room runtime isolation'
+              echo '- direct module import validation'
+              echo '- Watcher JavaScript client tests'
+              echo '- Web Worker syntax validation'
+              echo '- static Next.js production build'
+              echo '- native Go prover tests'
+              echo '- Go WebAssembly prover compilation'
+              echo '- loop-safe GitHub Pages configuration'
+              echo
+              echo 'Boundary: Solana devnet and development Groth16 setup only.'
+            else
+              echo 'Last validation output:'
+              echo
+              echo '```text'
+              tail -n 220 "$LOG"
+              echo '```'
+            fi
+          } > WATCHER_FINAL_VALIDATION.md
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          if [[ "$status" == VERIFIED ]]; then git add -A; else git add WATCHER_FINAL_VALIDATION.md; fi
+          if ! git diff --cached --quiet; then
+            if [[ "$status" == VERIFIED ]]; then
+              git commit -m 'Publish deterministically verified Watcher browser deployment'
+            else
+              git commit -m 'Record deterministic Watcher browser validation failure'
+            fi
+            git pull --rebase origin watcher-protocol
+            git push origin HEAD:watcher-protocol
+          fi
+
+          if [[ "$status" == FAILED ]]; then exit 1; fi
