@@ -10,96 +10,131 @@ use groth16_solana::groth16::{Groth16Verifier, Groth16Verifyingkey};
 
 pub const GROTH16_BN254_PROOF_BYTES: usize = 256;
 
-// The existing circuit/exporter wire format is little-endian per 32-byte field.
-// groth16-solana consumes the same point/component order in big-endian form.
-// Converting the static VKs in const-eval keeps the on-chain hot path limited to
-// proof/public-input conversion plus the native alt_bn128 syscalls.
-const fn field_chunks_le_to_be<const N: usize>(input: [u8; N]) -> [u8; N] {
-    let mut output = [0u8; N];
-    let mut chunk = 0usize;
-    while chunk < N {
-        let mut offset = 0usize;
-        while offset < 32 {
-            output[chunk + offset] = input[chunk + 31 - offset];
-            offset += 1;
-        }
-        chunk += 32;
-    }
-    output
-}
-
-const fn take_bytes<const SOURCE: usize, const OUTPUT: usize>(
+// Watcher's existing xark fixtures store every field element little-endian.
+// Their G2 component order is A0, A1 for each Fp2 coordinate, while gnark's
+// WriteRawTo / groth16-solana wire format is A1, A0. Both endian conversion
+// and the Fp2 component swap therefore have to happen at the boundary.
+const fn reverse_field_from<const SOURCE: usize>(
     source: &[u8; SOURCE],
     start: usize,
-) -> [u8; OUTPUT] {
-    let mut output = [0u8; OUTPUT];
+) -> [u8; 32] {
+    let mut output = [0u8; 32];
     let mut index = 0usize;
-    while index < OUTPUT {
-        output[index] = source[start + index];
+    while index < 32 {
+        output[index] = source[start + 31 - index];
         index += 1;
     }
     output
 }
 
-const fn take_g1_points<const SOURCE: usize, const POINTS: usize>(
+const fn copy_field<const OUTPUT: usize>(
+    output: &mut [u8; OUTPUT],
+    output_start: usize,
+    field: &[u8; 32],
+) {
+    let mut index = 0usize;
+    while index < 32 {
+        output[output_start + index] = field[index];
+        index += 1;
+    }
+}
+
+const fn g1_xark_le_to_gnark_be<const SOURCE: usize>(
+    source: &[u8; SOURCE],
+    start: usize,
+) -> [u8; 64] {
+    let mut output = [0u8; 64];
+    let x = reverse_field_from(source, start);
+    let y = reverse_field_from(source, start + 32);
+    copy_field(&mut output, 0, &x);
+    copy_field(&mut output, 32, &y);
+    output
+}
+
+const fn g2_xark_le_to_gnark_be<const SOURCE: usize>(
+    source: &[u8; SOURCE],
+    start: usize,
+) -> [u8; 128] {
+    let mut output = [0u8; 128];
+    // xark: X.A0 | X.A1 | Y.A0 | Y.A1 (little-endian fields)
+    // gnark: X.A1 | X.A0 | Y.A1 | Y.A0 (big-endian fields)
+    let x_a1 = reverse_field_from(source, start + 32);
+    let x_a0 = reverse_field_from(source, start);
+    let y_a1 = reverse_field_from(source, start + 96);
+    let y_a0 = reverse_field_from(source, start + 64);
+    copy_field(&mut output, 0, &x_a1);
+    copy_field(&mut output, 32, &x_a0);
+    copy_field(&mut output, 64, &y_a1);
+    copy_field(&mut output, 96, &y_a0);
+    output
+}
+
+const fn g1_points_xark_le_to_gnark_be<const SOURCE: usize, const POINTS: usize>(
     source: &[u8; SOURCE],
     start: usize,
 ) -> [[u8; 64]; POINTS] {
     let mut output = [[0u8; 64]; POINTS];
     let mut point = 0usize;
     while point < POINTS {
-        let mut byte = 0usize;
-        while byte < 64 {
-            output[point][byte] = source[start + point * 64 + byte];
-            byte += 1;
-        }
+        output[point] = g1_xark_le_to_gnark_be(source, start + point * 64);
         point += 1;
     }
     output
 }
 
-const DEV_DEPOSIT_VK_BE_BYTES: [u8; 704] = field_chunks_le_to_be(DEV_DEPOSIT_VK_BYTES);
-const DEV_WITHDRAW_VK_BE_BYTES: [u8; 1152] = field_chunks_le_to_be(DEV_VK_BYTES);
-
 static DEV_DEPOSIT_IC_BE: [[u8; 64]; 4] =
-    take_g1_points::<704, 4>(&DEV_DEPOSIT_VK_BE_BYTES, 448);
+    g1_points_xark_le_to_gnark_be::<704, 4>(&DEV_DEPOSIT_VK_BYTES, 448);
 static DEV_WITHDRAW_IC_BE: [[u8; 64]; 11] =
-    take_g1_points::<1152, 11>(&DEV_WITHDRAW_VK_BE_BYTES, 448);
+    g1_points_xark_le_to_gnark_be::<1152, 11>(&DEV_VK_BYTES, 448);
 
 static DEV_DEPOSIT_VERIFYING_KEY: Groth16Verifyingkey<'static> = Groth16Verifyingkey {
     nr_pubinputs: 3,
-    vk_alpha_g1: take_bytes::<704, 64>(&DEV_DEPOSIT_VK_BE_BYTES, 0),
-    vk_beta_g2: take_bytes::<704, 128>(&DEV_DEPOSIT_VK_BE_BYTES, 64),
-    vk_gamma_g2: take_bytes::<704, 128>(&DEV_DEPOSIT_VK_BE_BYTES, 192),
-    vk_delta_g2: take_bytes::<704, 128>(&DEV_DEPOSIT_VK_BE_BYTES, 320),
+    vk_alpha_g1: g1_xark_le_to_gnark_be(&DEV_DEPOSIT_VK_BYTES, 0),
+    vk_beta_g2: g2_xark_le_to_gnark_be(&DEV_DEPOSIT_VK_BYTES, 64),
+    vk_gamma_g2: g2_xark_le_to_gnark_be(&DEV_DEPOSIT_VK_BYTES, 192),
+    vk_delta_g2: g2_xark_le_to_gnark_be(&DEV_DEPOSIT_VK_BYTES, 320),
     vk_ic: &DEV_DEPOSIT_IC_BE,
     vk_commitment: None,
 };
 
 static DEV_WITHDRAW_VERIFYING_KEY: Groth16Verifyingkey<'static> = Groth16Verifyingkey {
     nr_pubinputs: 10,
-    vk_alpha_g1: take_bytes::<1152, 64>(&DEV_WITHDRAW_VK_BE_BYTES, 0),
-    vk_beta_g2: take_bytes::<1152, 128>(&DEV_WITHDRAW_VK_BE_BYTES, 64),
-    vk_gamma_g2: take_bytes::<1152, 128>(&DEV_WITHDRAW_VK_BE_BYTES, 192),
-    vk_delta_g2: take_bytes::<1152, 128>(&DEV_WITHDRAW_VK_BE_BYTES, 320),
+    vk_alpha_g1: g1_xark_le_to_gnark_be(&DEV_VK_BYTES, 0),
+    vk_beta_g2: g2_xark_le_to_gnark_be(&DEV_VK_BYTES, 64),
+    vk_gamma_g2: g2_xark_le_to_gnark_be(&DEV_VK_BYTES, 192),
+    vk_delta_g2: g2_xark_le_to_gnark_be(&DEV_VK_BYTES, 320),
     vk_ic: &DEV_WITHDRAW_IC_BE,
     vk_commitment: None,
 };
 
-fn proof_le_to_be(proof: &[u8]) -> Result<[u8; GROTH16_BN254_PROOF_BYTES], WatcherError> {
+fn reverse_field_into(output: &mut [u8], output_start: usize, source: &[u8], source_start: usize) {
+    let mut index = 0usize;
+    while index < 32 {
+        output[output_start + index] = source[source_start + 31 - index];
+        index += 1;
+    }
+}
+
+fn proof_xark_le_to_gnark_be(
+    proof: &[u8],
+) -> Result<[u8; GROTH16_BN254_PROOF_BYTES], WatcherError> {
     if proof.len() != GROTH16_BN254_PROOF_BYTES {
         return Err(WatcherError::InvalidProofEncoding);
     }
+
     let mut output = [0u8; GROTH16_BN254_PROOF_BYTES];
-    let mut chunk = 0usize;
-    while chunk < GROTH16_BN254_PROOF_BYTES {
-        let mut offset = 0usize;
-        while offset < 32 {
-            output[chunk + offset] = proof[chunk + 31 - offset];
-            offset += 1;
-        }
-        chunk += 32;
-    }
+    // A is already pre-negated by the Watcher fixture exporter.
+    reverse_field_into(&mut output, 0, proof, 0);
+    reverse_field_into(&mut output, 32, proof, 32);
+
+    // B needs the same Fp2 component swap as each G2 point in the VK.
+    reverse_field_into(&mut output, 64, proof, 96); // X.A1
+    reverse_field_into(&mut output, 96, proof, 64); // X.A0
+    reverse_field_into(&mut output, 128, proof, 160); // Y.A1
+    reverse_field_into(&mut output, 160, proof, 128); // Y.A0
+
+    reverse_field_into(&mut output, 192, proof, 192);
+    reverse_field_into(&mut output, 224, proof, 224);
     Ok(output)
 }
 
@@ -141,7 +176,7 @@ fn verify_native<const INPUTS: usize>(
     proof_le: &[u8],
     public_inputs_be: &[[u8; 32]; INPUTS],
 ) -> Result<(), WatcherError> {
-    let proof_be = proof_le_to_be(proof_le)?;
+    let proof_be = proof_xark_le_to_gnark_be(proof_le)?;
     let proof_a: &[u8; 64] = proof_be[0..64]
         .try_into()
         .map_err(|_| WatcherError::InvalidProofEncoding)?;
