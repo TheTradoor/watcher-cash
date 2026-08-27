@@ -10,7 +10,7 @@ if old_regex in source:
 elif new_regex not in source:
     raise SystemExit("replace_regex implementation is not recognized")
 
-old_first_append = r'''\tcomputedOldRoot, err := merkleRootV1(api, 0, c.Path, c.Index)
+old_first_append = '''\tcomputedOldRoot, err := merkleRootV1(api, 0, c.Path, c.Index)
 \tif err != nil {
 \t\treturn err
 \t}
@@ -24,7 +24,7 @@ old_first_append = r'''\tcomputedOldRoot, err := merkleRootV1(api, 0, c.Path, c.
 \t\t0,
 \t)'''
 
-new_first_append = r'''\tcomputedOldRoot, err := merkleRootV1(api, 0, c.Path, c.Index)
+new_first_append = '''\tcomputedOldRoot, err := merkleRootV1(api, 0, c.Path, c.Index)
 \tif err != nil {
 \t\treturn err
 \t}
