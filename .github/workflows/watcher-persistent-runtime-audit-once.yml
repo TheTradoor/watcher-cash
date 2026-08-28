@@ -1,0 +1,161 @@
+name: Audit persistent Watcher runtime once
+
+on:
+  push:
+    branches: [watcher-protocol]
+    paths:
+      - '.github/workflows/watcher-persistent-runtime-audit-once.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: watcher-persistent-runtime-audit
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      IMMUTABLE_TAG: watcher-persistent-devnet-v1
+      DEPLOYER_SECRET_PRESENT: ${{ secrets.WATCHER_DEVNET_DEPLOYER_KEYPAIR_JSON != '' }}
+      PROGRAM_SECRET_PRESENT: ${{ secrets.WATCHER_DEVNET_PROGRAM_KEYPAIR_JSON != '' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: watcher-protocol
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+          cache-dependency-path: circuits/withdraw/go.sum
+
+      - name: Run persistent runtime audit
+        shell: bash
+        run: |
+          set +e
+          mkdir -p docs /tmp/watcher-audit
+          report=docs/PERSISTENT_RUNTIME_AUDIT.md
+          json=docs/PERSISTENT_RUNTIME_AUDIT.json
+          checks=/tmp/watcher-audit/checks.tsv
+          : > "$checks"
+
+          check() {
+            name="$1"; shift
+            "$@" >/tmp/watcher-audit/${name}.log 2>&1
+            rc=$?
+            if [[ $rc -eq 0 ]]; then result=PASS; else result=FAIL; fi
+            printf '%s\t%s\t%s\n' "$name" "$result" "$rc" >> "$checks"
+            return 0
+          }
+
+          check immutable_release gh release view "$IMMUTABLE_TAG" --repo "$GITHUB_REPOSITORY"
+          check persistent_workflow bash -lc "grep -l -E 'WATCHER_DEVNET_(DEPLOYER|PROGRAM)_KEYPAIR' .github/workflows/*.yml | grep -v persistent-runtime-audit | head -n1 | grep -q ."
+          check pages_persistent bash -lc "grep -q '$IMMUTABLE_TAG' .github/workflows/pages.yml && ! grep -qi 'ephemeral devnet deployment' .github/workflows/pages.yml && ! grep -q 'watcher-setup' .github/workflows/pages.yml"
+          check runtime_file test -s public/watcher-protocol/devnet.json
+          check runtime_ready bash -lc "jq -e '.status == \"ready\" and .cluster == \"devnet\" and (.programId|type==\"string\" and length>20)' public/watcher-protocol/devnet.json"
+
+          check npm_install npm install --ignore-scripts --no-audit --no-fund
+          check client_tests node --test client/watcher/*.test.mjs
+          check worker_syntax node --check client/watcher/browser-prover.worker.js
+          check next_build npm run build
+          check go_tests go -C circuits/withdraw test ./...
+          check wasm_build env GOOS=js GOARCH=wasm go -C circuits/withdraw build -trimpath -o /tmp/watcher-audit/watcher-prover.wasm ./cmd/watcher-prover-wasm
+          check rust_tests cargo test --manifest-path programs/watcher-protocol/Cargo.toml --all-targets
+          check clean_diff git diff --check
+
+          overall=PASS
+          if grep -q $'\tFAIL\t' "$checks"; then overall=BLOCKED; fi
+          secrets_status=READY
+          if [[ "$DEPLOYER_SECRET_PRESENT" != true || "$PROGRAM_SECRET_PRESENT" != true ]]; then
+            secrets_status=BLOCKED_MISSING_GITHUB_SECRETS
+            overall=BLOCKED
+          fi
+
+          {
+            echo '# Persistent Watcher runtime audit'
+            echo
+            echo "- Audited commit: \`$(git rev-parse HEAD)\`"
+            echo "- Immutable prover tag: \`$IMMUTABLE_TAG\`"
+            echo "- Deployer secret present: \`$DEPLOYER_SECRET_PRESENT\`"
+            echo "- Program keypair secret present: \`$PROGRAM_SECRET_PRESENT\`"
+            echo "- Deployment credential status: \`$secrets_status\`"
+            echo "- Overall status: \`$overall\`"
+            echo
+            echo '## Checks'
+            echo
+            echo '| Check | Result | Exit code |'
+            echo '|---|---:|---:|'
+            while IFS=$'\t' read -r name result rc; do
+              echo "| \`$name\` | **$result** | $rc |"
+            done < "$checks"
+            echo
+            if [[ "$secrets_status" != READY ]]; then
+              echo '## Required user action'
+              echo
+              echo 'Create the two documented **devnet-only** GitHub Actions secrets, then manually run the persistent deployment workflow. Do not paste private keys into chat.'
+              echo
+              echo '- `WATCHER_DEVNET_DEPLOYER_KEYPAIR_JSON`'
+              echo '- `WATCHER_DEVNET_PROGRAM_KEYPAIR_JSON`'
+            fi
+            echo
+            echo '## Safety'
+            echo
+            echo 'Development infrastructure only: Solana devnet, development Groth16 setup, fixed Circuit V1 capacity, and no independent production audit.'
+          } > "$report"
+
+          python - <<'PY'
+          import json, os, pathlib
+          rows=[]
+          for line in pathlib.Path('/tmp/watcher-audit/checks.tsv').read_text().splitlines():
+              name,result,code=line.split('\t')
+              rows.append({'check':name,'result':result,'exitCode':int(code)})
+          secrets_ready=os.environ.get('DEPLOYER_SECRET_PRESENT')=='true' and os.environ.get('PROGRAM_SECRET_PRESENT')=='true'
+          overall='PASS' if all(x['result']=='PASS' for x in rows) and secrets_ready else 'BLOCKED'
+          pathlib.Path('docs/PERSISTENT_RUNTIME_AUDIT.json').write_text(json.dumps({
+              'status':overall,
+              'auditedCommit':os.popen('git rev-parse HEAD').read().strip(),
+              'immutableProverTag':os.environ['IMMUTABLE_TAG'],
+              'deploymentSecretsReady':secrets_ready,
+              'checks':rows,
+              'safety':'development-only',
+          },indent=2)+'\n')
+          PY
+
+          rm -f .github/workflows/watcher-persistent-runtime-audit-once.yml
+          git checkout -- package-lock.json package.json 2>/dev/null || true
+          git clean -fd out .next node_modules public/watcher-prover/assets 2>/dev/null || true
+          git config user.name 'watcher-protocol-ci'
+          git config user.email 'watcher-protocol-ci@users.noreply.github.com'
+          git add docs/PERSISTENT_RUNTIME_AUDIT.md docs/PERSISTENT_RUNTIME_AUDIT.json .github/workflows/watcher-persistent-runtime-audit-once.yml
+          if ! git diff --cached --quiet; then
+            git commit -m "Audit persistent Watcher runtime: $overall"
+            git push origin HEAD:watcher-protocol
+          fi
+
+      - name: Remove temporary staging branches
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set +e
+          for branch in \
+            noop-test-ignore \
+            watcher-persistent-migration-stage \
+            watcher-persistent-runtime-v1 \
+            watcher-persistent-runtime-final \
+            watcher-persistent-runtime-final-2 \
+            watcher-persistent-runtime-final-3 \
+            watcher-persistent-runtime-final-4 \
+            watcher-persistent-runtime-final-5 \
+            watcher-persistent-runtime-final-6; do
+            gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/heads/$branch" >/dev/null 2>&1 || true
+          done
