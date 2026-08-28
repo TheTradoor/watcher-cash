@@ -10,6 +10,7 @@
     "build": "next build --webpack",
     "start": "next start",
     "test:watcher-client": "node --test client/watcher/*.test.mjs",
+    "audit:prod": "node scripts/audit-production.mjs",
     "e2e:watcher-devnet": "node scripts/watcher-devnet-e2e.mjs",
     "bootstrap:watcher-devnet": "node scripts/watcher-devnet-bootstrap.mjs"
   },
@@ -18,7 +19,7 @@
     "@solana/wallet-adapter-react-ui": "0.9.39",
     "@solana/web3.js": "1.98.4",
     "buffer": "6.0.3",
-    "next": "16.1.6",
+    "next": "16.3.3",
     "react": "19.2.3",
     "react-dom": "19.2.3"
   }
