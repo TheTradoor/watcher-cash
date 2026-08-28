@@ -39,6 +39,16 @@ async function waitForExactText(locator, expected, label) {
   fail(`${label}: expected ${JSON.stringify(expected)}, saw ${JSON.stringify(String(await locator.textContent().catch(() => '')).trim())}`);
 }
 
+async function waitForCount(locator, expected, label) {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    const count = await locator.count();
+    if (count === expected) return;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  fail(`${label}: expected ${expected} rows, saw ${await locator.count()}`);
+}
+
 async function main() {
   const browser = await chromium.launch({ headless: true });
   const context = await browser.newContext({
@@ -107,13 +117,20 @@ async function main() {
     await waitForExactText(page.locator('.capacity-card .capacity-number strong'), '3', 'final commitment count');
     await waitForExactText(page.locator('.capacity-card .side-data-row strong'), '2', 'final nullifier count');
 
+    // The encrypted inventory intentionally retains spent notes as local history.
+    // After two deposits and one two-input withdrawal it should contain two spent
+    // deposit records plus one confirmed private-change record.
     const noteRows = page.locator('.notes-list .note-row');
-    if (await noteRows.count() !== 1) {
-      fail(`Expected exactly one private change note, saw ${await noteRows.count()}`);
-    }
-    await waitForText(noteRows.first(), 'CONFIRMED', 'final note status');
-    await waitForText(noteRows.first(), '0.01 SOL', 'final note amount');
-    await waitForText(noteRows.first(), 'PRIVATE CHANGE', 'final note kind');
+    await waitForCount(noteRows, 3, 'final encrypted note inventory');
+
+    const spentRows = page.locator('.notes-list .note-row .note-status.note-spent');
+    await waitForCount(spentRows, 2, 'spent input notes');
+
+    const confirmedRows = page.locator('.notes-list .note-row .note-status.note-confirmed');
+    await waitForCount(confirmedRows, 1, 'confirmed private change');
+    const confirmedChangeRow = confirmedRows.first().locator('xpath=..').locator('xpath=..');
+    await waitForText(confirmedChangeRow, '0.01 SOL', 'final change amount');
+    await waitForText(confirmedChangeRow, 'PRIVATE CHANGE', 'final change kind');
 
     if (pageErrors.length > 0) {
       fail(`Browser page errors:\n${pageErrors.join('\n\n')}`);
@@ -125,6 +142,7 @@ async function main() {
       final: {
         privateBalanceSol: '0.01',
         confirmedNotes: 1,
+        spentNotes: 2,
         pendingNotes: 0,
         commitmentCount: 3,
         spentNullifiers: 2,
