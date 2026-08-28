@@ -1,0 +1,223 @@
+name: Watcher Browser End-to-End Regression
+
+on:
+  push:
+    branches: [watcher-protocol]
+    paths:
+      - 'app/**'
+      - 'client/watcher/**'
+      - 'programs/watcher-protocol/**'
+      - 'circuits/withdraw/**'
+      - 'scripts/watcher-browser-e2e.mjs'
+      - 'scripts/watcher-devnet-bootstrap.mjs'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'next.config.mjs'
+      - '.github/workflows/watcher-browser-e2e.yml'
+  pull_request:
+    paths:
+      - 'app/**'
+      - 'client/watcher/**'
+      - 'programs/watcher-protocol/**'
+      - 'circuits/withdraw/**'
+      - 'scripts/watcher-browser-e2e.mjs'
+      - 'scripts/watcher-devnet-bootstrap.mjs'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'next.config.mjs'
+      - '.github/workflows/watcher-browser-e2e.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: watcher-browser-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  WATCHER_E2E_SEED_HEX: 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
+  WATCHER_LOCAL_RPC: http://127.0.0.1:8899
+
+jobs:
+  browser-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+          cache-dependency-path: circuits/withdraw/go.sum
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Node and browser test dependencies
+        run: |
+          npm ci --no-audit --no-fund
+          npm install --no-save --package-lock=false playwright@1.55.0
+          npx playwright install --with-deps chromium
+
+      - name: Generate matched browser proving bundle
+        working-directory: circuits/withdraw
+        run: |
+          rm -rf fixture-out/browser-e2e
+          go run ./cmd/watcher-setup \
+            --bundle-out fixture-out/browser-e2e \
+            --rust-out ../../programs/watcher-protocol/src
+          GOOS=js GOARCH=wasm go build \
+            -trimpath \
+            -ldflags='-s -w' \
+            -o fixture-out/browser-e2e/watcher-prover.wasm \
+            ./cmd/watcher-prover-wasm
+          WASM_EXEC="$(go env GOROOT)/lib/wasm/wasm_exec.js"
+          if [ ! -f "$WASM_EXEC" ]; then
+            WASM_EXEC="$(go env GOROOT)/misc/wasm/wasm_exec.js"
+          fi
+          test -f "$WASM_EXEC"
+          cp "$WASM_EXEC" fixture-out/browser-e2e/wasm_exec.js
+
+      - name: Assemble browser prover assets
+        run: |
+          rm -rf public/watcher-prover
+          mkdir -p public/watcher-prover/assets
+          cp circuits/withdraw/fixture-out/browser-e2e/watcher-prover.wasm public/watcher-prover/
+          cp circuits/withdraw/fixture-out/browser-e2e/wasm_exec.js public/watcher-prover/
+          cp client/watcher/browser-prover.worker.js public/watcher-prover/worker.js
+          for name in deposit.r1cs deposit.pk deposit.vk withdraw.r1cs withdraw.pk withdraw.vk manifest.json; do
+            cp "circuits/withdraw/fixture-out/browser-e2e/$name" public/watcher-prover/assets/
+          done
+          test -s public/watcher-prover/watcher-prover.wasm
+          test -s public/watcher-prover/assets/manifest.json
+
+      - name: Install Agave CLI
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSfL https://release.anza.xyz/v2.3.13/install | sh
+          echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
+
+      - name: Build Watcher SBF program
+        env:
+          PATH: ${{ env.HOME }}/.local/share/solana/install/active_release/bin:${{ env.PATH }}
+        run: |
+          cargo build-sbf \
+            --manifest-path programs/watcher-protocol/Cargo.toml \
+            --sbf-out-dir target/deploy
+          test -s target/deploy/watcher_protocol_program.so
+
+      - name: Start isolated validator and deploy Watcher
+        env:
+          PATH: ${{ env.HOME }}/.local/share/solana/install/active_release/bin:${{ env.PATH }}
+        run: |
+          set -euo pipefail
+          mkdir -p .github/browser-e2e
+          solana-keygen new --no-bip39-passphrase --force --silent -o /tmp/watcher-browser-e2e-payer.json
+          solana-keygen new --no-bip39-passphrase --force --silent -o /tmp/watcher-browser-e2e-program.json
+          solana-test-validator \
+            --reset \
+            --quiet \
+            --ledger /tmp/watcher-browser-e2e-ledger \
+            > .github/browser-e2e/validator.log 2>&1 &
+          echo $! > /tmp/watcher-browser-e2e-validator.pid
+          for attempt in $(seq 1 60); do
+            if solana cluster-version --url "$WATCHER_LOCAL_RPC" >/dev/null 2>&1; then
+              break
+            fi
+            sleep 1
+          done
+          solana cluster-version --url "$WATCHER_LOCAL_RPC"
+          solana airdrop 100 \
+            --url "$WATCHER_LOCAL_RPC" \
+            --keypair /tmp/watcher-browser-e2e-payer.json
+          solana program deploy target/deploy/watcher_protocol_program.so \
+            --url "$WATCHER_LOCAL_RPC" \
+            --keypair /tmp/watcher-browser-e2e-payer.json \
+            --program-id /tmp/watcher-browser-e2e-program.json
+          solana address -k /tmp/watcher-browser-e2e-program.json > /tmp/watcher-browser-e2e-program-id
+
+      - name: Bootstrap isolated protocol runtime and fund browser wallet
+        env:
+          PATH: ${{ env.HOME }}/.local/share/solana/install/active_release/bin:${{ env.PATH }}
+          WATCHER_RPC_URL: http://127.0.0.1:8899
+          WATCHER_PUBLIC_RPC_URL: http://127.0.0.1:8899
+          WATCHER_PAYER_KEYPAIR: /tmp/watcher-browser-e2e-payer.json
+          WATCHER_RUNTIME_OUT: public/watcher-protocol/devnet.json
+          WATCHER_PUBLIC_BASE_PATH: ''
+        run: |
+          export WATCHER_PROGRAM_ID="$(cat /tmp/watcher-browser-e2e-program-id)"
+          node scripts/watcher-devnet-bootstrap.mjs > .github/browser-e2e/runtime.json
+          E2E_ADDRESS="$(node --input-type=module - <<'NODE'
+          import { Keypair } from '@solana/web3.js';
+          const seed = Buffer.from(process.env.WATCHER_E2E_SEED_HEX, 'hex');
+          console.log(Keypair.fromSeed(seed).publicKey.toBase58());
+          NODE
+          )"
+          echo "Browser E2E wallet: $E2E_ADDRESS"
+          solana airdrop 5 "$E2E_ADDRESS" --url "$WATCHER_LOCAL_RPC"
+          solana balance "$E2E_ADDRESS" --url "$WATCHER_LOCAL_RPC"
+
+      - name: Build isolated browser UI
+        env:
+          NEXT_PUBLIC_BASE_PATH: ''
+          NEXT_PUBLIC_RPC_URL: http://127.0.0.1:8899
+          NEXT_PUBLIC_WATCHER_RUNTIME_URL: /watcher-protocol/devnet.json
+          NEXT_PUBLIC_WATCHER_PROVER_BASE: /watcher-prover
+          NEXT_PUBLIC_WATCHER_E2E: '1'
+          NEXT_PUBLIC_WATCHER_E2E_SEED: ${{ env.WATCHER_E2E_SEED_HEX }}
+        run: npm run build
+
+      - name: Serve browser UI
+        run: |
+          python3 -m http.server 3000 --directory out > .github/browser-e2e/site.log 2>&1 &
+          echo $! > /tmp/watcher-browser-e2e-site.pid
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent http://127.0.0.1:3000/ >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo 'Static site did not become ready' >&2
+          exit 1
+
+      - name: Run full browser regression
+        env:
+          WATCHER_E2E_URL: http://127.0.0.1:3000/
+          WATCHER_E2E_TIMEOUT_MS: '300000'
+        run: |
+          node scripts/watcher-browser-e2e.mjs 2>&1 | tee .github/browser-e2e/test.log
+
+      - name: Preserve browser failure diagnostics
+        if: failure()
+        run: |
+          if test -f /tmp/watcher-browser-e2e-failure.png; then
+            cp /tmp/watcher-browser-e2e-failure.png .github/browser-e2e/failure.png
+          fi
+
+      - name: Upload browser E2E diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: watcher-browser-e2e-diagnostics
+          path: .github/browser-e2e/
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Stop isolated services and remove private material
+        if: always()
+        run: |
+          if test -f /tmp/watcher-browser-e2e-site.pid; then
+            kill "$(cat /tmp/watcher-browser-e2e-site.pid)" >/dev/null 2>&1 || true
+          fi
+          if test -f /tmp/watcher-browser-e2e-validator.pid; then
+            kill "$(cat /tmp/watcher-browser-e2e-validator.pid)" >/dev/null 2>&1 || true
+          fi
+          rm -rf \
+            /tmp/watcher-browser-e2e-payer.json \
+            /tmp/watcher-browser-e2e-program.json \
+            /tmp/watcher-browser-e2e-program-id \
+            /tmp/watcher-browser-e2e-ledger \
+            /tmp/watcher-browser-e2e-failure.png
