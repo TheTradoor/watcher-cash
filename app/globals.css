@@ -514,6 +514,45 @@ button:disabled {
   opacity: 0.48;
 }
 
+.locked-vault-state {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-height: 410px;
+  margin-top: 24px;
+  padding: 34px;
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  background:
+    radial-gradient(circle at 90% 10%, rgba(183, 255, 69, 0.08), transparent 30%),
+    linear-gradient(145deg, rgba(255, 255, 255, 0.028), rgba(255, 255, 255, 0.008));
+}
+
+.locked-vault-state .panel-kicker {
+  margin-bottom: 13px;
+}
+
+.locked-vault-state h3 {
+  max-width: 520px;
+  margin: 0;
+  font-size: 24px;
+  line-height: 1.1;
+  letter-spacing: -0.04em;
+}
+
+.locked-vault-state > p {
+  max-width: 570px;
+  margin: 14px 0 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.7;
+}
+
+.locked-vault-state .primary-action {
+  max-width: 470px;
+  margin-top: 28px;
+}
+
 .mode-tabs {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -959,6 +998,31 @@ button:disabled {
   text-align: right;
 }
 
+.records-heading-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 11px;
+}
+
+.backup-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.backup-actions .secondary-action {
+  width: auto;
+  min-height: 34px;
+  margin-top: 0;
+  white-space: nowrap;
+}
+
+.backup-file-input {
+  display: none;
+}
+
 .empty-state {
   display: flex;
   flex-direction: column;
@@ -1336,6 +1400,19 @@ footer > div:last-child a:hover {
     width: 100%;
   }
 
+  .locked-vault-state {
+    min-height: 340px;
+    padding: 24px 20px;
+  }
+
+  .locked-vault-state h3 {
+    font-size: 21px;
+  }
+
+  .locked-vault-state .primary-action {
+    max-width: none;
+  }
+
   .amount-input-row input {
     font-size: 42px;
   }
@@ -1365,6 +1442,21 @@ footer > div:last-child a:hover {
 
   .section-heading p {
     text-align: left;
+  }
+
+  .records-heading-actions {
+    width: 100%;
+    align-items: flex-start;
+  }
+
+  .backup-actions {
+    width: 100%;
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .backup-actions .secondary-action {
+    width: 100%;
   }
 
   .note-row {
