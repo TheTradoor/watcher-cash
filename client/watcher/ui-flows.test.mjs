@@ -40,7 +40,7 @@ test('browser deposit flow binds the live append transition and exact proof resp
   let witnessed;
   const connection = connectionFor([]);
   const prover = {
-    async proveDeposit(witness, expectedPublicInputs) {
+    async proveDeposit({ witness, expectedPublicInputs }) {
       witnessed = witness;
       return {
         proof: new Uint8Array(256).fill(9),
@@ -84,7 +84,7 @@ test('browser deposit flow binds the live append transition and exact proof resp
 test('browser deposit flow derives the next leaf index from a non-empty registry', async () => {
   const connection = connectionFor([123n]);
   const prover = {
-    async proveDeposit(_witness, expectedPublicInputs) {
+    async proveDeposit({ expectedPublicInputs }) {
       return {
         proof: new Uint8Array(256).fill(4),
         publicInputs: new Uint8Array(expectedPublicInputs),
@@ -109,7 +109,7 @@ test('browser deposit flow derives the next leaf index from a non-empty registry
 
 test('browser deposit flow rejects a prover that changes public inputs', async () => {
   const prover = {
-    async proveDeposit(_witness, expectedPublicInputs) {
+    async proveDeposit({ expectedPublicInputs }) {
       const changed = new Uint8Array(expectedPublicInputs);
       changed[0] ^= 1;
       if (bytesToHex(changed) !== bytesToHex(expectedPublicInputs)) {
