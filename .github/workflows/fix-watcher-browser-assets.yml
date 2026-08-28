@@ -56,33 +56,37 @@ jobs:
                   raise SystemExit(f'{label} is not in the expected state')
               source = source.replace(old, new, 1)
 
-          old_block = """    if (!proverRef.current) {
-      proverRef.current = createWatcherBrowserProverV1({
-        workerUrl: `${BASE_PATH}/watcher-prover-worker.js`,
-        assetBase: `${BASE_PATH}/watcher-prover-v1`,
-      });
-    }
-    setProverStatus('loading');
-    const result = await proverRef.current.ready();"""
-          new_block = """    if (!proverRef.current) {
-      const browserProver = getBrowserProverV1({
-        basePath: `${BASE_PATH}/watcher-prover`,
-      });
-      proverRef.current = {
-        ready: () => browserProver.initialize(),
-        proveDeposit: (witness, expectedPublicInputs) => browserProver.proveDeposit({
-          witness,
-          expectedPublicInputs,
-        }),
-        proveWithdraw: (witness, expectedPublicInputs) => browserProver.proveWithdraw({
-          witness,
-          expectedPublicInputs,
-        }),
-        terminate: () => browserProver.terminate(),
-      };
-    }
-    setProverStatus('loading');
-    const result = await proverRef.current.ready();"""
+          old_block = "\n".join([
+              "    if (!proverRef.current) {",
+              "      proverRef.current = createWatcherBrowserProverV1({",
+              "        workerUrl: `${BASE_PATH}/watcher-prover-worker.js`,",
+              "        assetBase: `${BASE_PATH}/watcher-prover-v1`,",
+              "      });",
+              "    }",
+              "    setProverStatus('loading');",
+              "    const result = await proverRef.current.ready();",
+          ])
+          new_block = "\n".join([
+              "    if (!proverRef.current) {",
+              "      const browserProver = getBrowserProverV1({",
+              "        basePath: `${BASE_PATH}/watcher-prover`,",
+              "      });",
+              "      proverRef.current = {",
+              "        ready: () => browserProver.initialize(),",
+              "        proveDeposit: (witness, expectedPublicInputs) => browserProver.proveDeposit({",
+              "          witness,",
+              "          expectedPublicInputs,",
+              "        }),",
+              "        proveWithdraw: (witness, expectedPublicInputs) => browserProver.proveWithdraw({",
+              "          witness,",
+              "          expectedPublicInputs,",
+              "        }),",
+              "        terminate: () => browserProver.terminate(),",
+              "      };",
+              "    }",
+              "    setProverStatus('loading');",
+              "    const result = await proverRef.current.ready();",
+          ])
           if source.count(old_block) != 1:
               raise SystemExit('browser prover initialization block is not in the expected state')
           source = source.replace(old_block, new_block, 1)
