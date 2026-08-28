@@ -10,6 +10,7 @@ import {
 } from '@solana/web3.js';
 
 const E2E_WALLET_NAME = 'Watcher E2E Wallet';
+const E2E_ALTERNATE_WALLET_NAME = 'Watcher E2E Alternate Wallet';
 const E2E_WALLET_ICON = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='18' fill='%23111310'/%3E%3Ccircle cx='32' cy='32' r='16' fill='none' stroke='%23b7ff45' stroke-width='4'/%3E%3Ccircle cx='32' cy='32' r='4' fill='%23b7ff45'/%3E%3C/svg%3E";
 
 function parseSeedHex(value) {
@@ -24,15 +25,21 @@ function parseSeedHex(value) {
   return bytes;
 }
 
+function alternateSeed(seed) {
+  const bytes = seed.slice();
+  bytes[bytes.length - 1] ^= 0x01;
+  return bytes;
+}
+
 class WatcherE2EWalletAdapter extends BaseSignerWalletAdapter {
-  name = E2E_WALLET_NAME;
   url = 'https://github.com/TheTradoor/watcher-cash';
   icon = E2E_WALLET_ICON;
   readyState = WalletReadyState.Installed;
   supportedTransactionVersions = new Set(['legacy', 0]);
 
-  constructor(seed) {
+  constructor(seed, name = E2E_WALLET_NAME) {
     super();
+    this.name = name;
     this._keypair = Keypair.fromSeed(seed);
     this._connected = false;
     this._connecting = false;
@@ -88,10 +95,17 @@ class WatcherE2EWalletAdapter extends BaseSignerWalletAdapter {
   }
 }
 
-export function createWatcherE2EWallet() {
-  if (process.env.NEXT_PUBLIC_WATCHER_E2E !== '1') return null;
+export function createWatcherE2EWallets() {
+  if (process.env.NEXT_PUBLIC_WATCHER_E2E !== '1') return [];
   const seed = parseSeedHex(process.env.NEXT_PUBLIC_WATCHER_E2E_SEED);
-  return new WatcherE2EWalletAdapter(seed);
+  return [
+    new WatcherE2EWalletAdapter(seed, E2E_WALLET_NAME),
+    new WatcherE2EWalletAdapter(alternateSeed(seed), E2E_ALTERNATE_WALLET_NAME),
+  ];
+}
+
+export function createWatcherE2EWallet() {
+  return createWatcherE2EWallets()[0] || null;
 }
 
 export function watcherE2EEnabled() {
