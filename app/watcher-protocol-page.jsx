@@ -31,7 +31,7 @@ import {
   ROOT_HISTORY_ACCOUNT_LEN_V1,
   VAULT_ACCOUNT_LEN_V1,
 } from '../client/watcher/instructions.mjs';
-import { createWatcherBrowserProverV1 } from '../client/watcher/ui-prover.mjs';
+import { getBrowserProverV1 } from '../client/watcher/browser-prover.mjs';
 import { prepareUiDepositV1, prepareUiWithdrawV1 } from '../client/watcher/ui-flows.mjs';
 import styles from './page.module.css';
 
@@ -278,7 +278,7 @@ export default function WatcherProtocolPage() {
 
   useEffect(() => {
     let cancelled = false;
-    fetch(`${BASE_PATH}/watcher-prover-v1/browser-manifest.json`, { cache: 'no-store' })
+    fetch(`${BASE_PATH}/watcher-prover/assets/manifest.json`, { cache: 'no-store' })
       .then((response) => {
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         return response.json();
@@ -294,13 +294,12 @@ export default function WatcherProtocolPage() {
 
   const ensureProver = useCallback(async () => {
     if (!proverRef.current) {
-      proverRef.current = createWatcherBrowserProverV1({
-        workerUrl: `${BASE_PATH}/watcher-prover-worker.js`,
-        assetBase: `${BASE_PATH}/watcher-prover-v1`,
+      proverRef.current = getBrowserProverV1({
+        basePath: `${BASE_PATH}/watcher-prover`,
       });
     }
     setProverStatus('loading');
-    const result = await proverRef.current.ready();
+    const result = await proverRef.current.initialize();
     setBundleDigest(result?.bundleDigest || '');
     setProverStatus('ready');
     return proverRef.current;
