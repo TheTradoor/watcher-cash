@@ -117,7 +117,7 @@ async function createLookupTable(connection, payer, addresses) {
 }
 
 async function sendVersioned(connection, payer, instructions, lookupTable) {
-  const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
+  const { blockhash } = await connection.getLatestBlockhash('confirmed');
   const message = new TransactionMessage({
     payerKey: payer.publicKey,
     recentBlockhash: blockhash,
@@ -125,20 +125,32 @@ async function sendVersioned(connection, payer, instructions, lookupTable) {
   }).compileToV0Message([lookupTable]);
   const transaction = new VersionedTransaction(message);
   transaction.sign([payer]);
-  const serializedLength = transaction.serialize().length;
+  const serialized = transaction.serialize();
+  const serializedLength = serialized.length;
   if (serializedLength > MAX_TRANSACTION_BYTES) {
     throw new Error(`v0 withdrawal transaction too large: ${serializedLength} > ${MAX_TRANSACTION_BYTES}`);
   }
   console.log(`v0 withdrawal transaction size: ${serializedLength}/${MAX_TRANSACTION_BYTES} bytes`);
-  const signature = await connection.sendTransaction(transaction, {
-    maxRetries: 5,
+  const signature = await connection.sendRawTransaction(serialized, {
+    maxRetries: 100,
     preflightCommitment: 'confirmed',
   });
-  await connection.confirmTransaction(
-    { signature, blockhash, lastValidBlockHeight },
-    'confirmed',
-  );
-  return signature;
+
+  const deadline = Date.now() + 120_000;
+  while (Date.now() < deadline) {
+    const { value } = await connection.getSignatureStatuses([signature], {
+      searchTransactionHistory: true,
+    });
+    const status = value[0];
+    if (status?.err) {
+      throw new Error(`withdrawal transaction ${signature} failed: ${JSON.stringify(status.err)}`);
+    }
+    if (status?.confirmationStatus === 'confirmed' || status?.confirmationStatus === 'finalized') {
+      return signature;
+    }
+    await sleep(500);
+  }
+  throw new Error(`withdrawal transaction ${signature} was not confirmed within 120 seconds`);
 }
 
 function accountSnapshot(accounts) {
@@ -230,9 +242,6 @@ async function main() {
     space,
     programId,
   }));
-  // A real validator enforces rent at transaction finalization. Seeding these
-  // zero-data payout accounts with one lamport works in some mocks but fails on
-  // RPC, even when the Watcher initialize instruction itself succeeds.
   const payoutSeedLamports = await connection.getMinimumBalanceForRentExemption(0, 'confirmed');
   recovery.payoutSeedLamports = payoutSeedLamports;
   await writeRecovery(recovery);
