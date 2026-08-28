@@ -9,6 +9,7 @@ on:
       - 'circuits/withdraw/**'
       - 'scripts/prepare-browser-prover.sh'
       - 'scripts/test-browser-prover-wasm.mjs'
+      - 'scripts/audit-production.mjs'
       - '.github/workflows/watcher-ui.yml'
       - '.github/workflows/pages.yml'
       - 'package.json'
@@ -21,6 +22,7 @@ on:
       - 'circuits/withdraw/**'
       - 'scripts/prepare-browser-prover.sh'
       - 'scripts/test-browser-prover-wasm.mjs'
+      - 'scripts/audit-production.mjs'
       - '.github/workflows/watcher-ui.yml'
       - 'package.json'
       - 'package-lock.json'
@@ -50,7 +52,7 @@ jobs:
         run: npm ci --ignore-scripts --no-audit --no-fund
 
       - name: Audit production dependencies
-        run: npm audit --omit=dev --audit-level=high
+        run: npm run audit:prod
 
       - name: Test Watcher browser modules
         run: node --test client/watcher/*.test.mjs
@@ -60,6 +62,7 @@ jobs:
           node --check client/watcher/browser-prover.worker.js
           node --check client/watcher/browser-prover.mjs
           node --check client/watcher/ui-flows.mjs
+          node --check scripts/audit-production.mjs
 
       - name: Test Go prover packages
         working-directory: circuits/withdraw
