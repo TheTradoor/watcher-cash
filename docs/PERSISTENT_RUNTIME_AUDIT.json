@@ -1,0 +1,74 @@
+{
+  "status": "BLOCKED",
+  "auditedCommit": "e09711c1f98b737903f8b2b026b72f51be4ddefe",
+  "immutableProverTag": "watcher-persistent-devnet-v1",
+  "deploymentSecretsReady": false,
+  "checks": [
+    {
+      "check": "immutable_release",
+      "result": "FAIL",
+      "exitCode": 1
+    },
+    {
+      "check": "persistent_workflow",
+      "result": "PASS",
+      "exitCode": 0
+    },
+    {
+      "check": "pages_persistent",
+      "result": "FAIL",
+      "exitCode": 1
+    },
+    {
+      "check": "runtime_file",
+      "result": "FAIL",
+      "exitCode": 1
+    },
+    {
+      "check": "runtime_ready",
+      "result": "FAIL",
+      "exitCode": 2
+    },
+    {
+      "check": "npm_install",
+      "result": "PASS",
+      "exitCode": 0
+    },
+    {
+      "check": "client_tests",
+      "result": "PASS",
+      "exitCode": 0
+    },
+    {
+      "check": "worker_syntax",
+      "result": "PASS",
+      "exitCode": 0
+    },
+    {
+      "check": "next_build",
+      "result": "PASS",
+      "exitCode": 0
+    },
+    {
+      "check": "go_tests",
+      "result": "PASS",
+      "exitCode": 0
+    },
+    {
+      "check": "wasm_build",
+      "result": "PASS",
+      "exitCode": 0
+    },
+    {
+      "check": "rust_tests",
+      "result": "PASS",
+      "exitCode": 0
+    },
+    {
+      "check": "clean_diff",
+      "result": "PASS",
+      "exitCode": 0
+    }
+  ],
+  "safety": "development-only"
+}
