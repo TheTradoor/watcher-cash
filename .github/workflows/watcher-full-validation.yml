@@ -1,0 +1,78 @@
+name: Watcher Full-Stack Validation
+
+on:
+  push:
+    branches: [watcher-protocol]
+    paths:
+      - 'app/**'
+      - 'components/**'
+      - 'client/watcher/**'
+      - 'programs/watcher-protocol/**'
+      - 'circuits/withdraw/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'next.config.*'
+      - '.github/workflows/watcher-full-validation.yml'
+  pull_request:
+    paths:
+      - 'app/**'
+      - 'components/**'
+      - 'client/watcher/**'
+      - 'programs/watcher-protocol/**'
+      - 'circuits/withdraw/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'next.config.*'
+      - '.github/workflows/watcher-full-validation.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: watcher-full-validation-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  client-and-web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - run: node --test client/watcher/*.test.mjs
+      - run: node --check client/watcher/browser-prover.mjs
+      - run: node --check client/watcher/browser-prover.worker.js
+      - run: npm run build
+        env:
+          NEXT_PUBLIC_WATCHER_BASE_PATH: /watcher-cash
+          NEXT_PUBLIC_WATCHER_RPC_URL: https://api.devnet.solana.com
+          NEXT_PUBLIC_BASE_PATH: /watcher-cash
+          NEXT_PUBLIC_RPC_URL: https://api.devnet.solana.com
+
+  circuits-and-wasm:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: circuits/withdraw
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+          cache-dependency-path: circuits/withdraw/go.sum
+      - run: go test ./...
+      - run: GOOS=js GOARCH=wasm go build -trimpath -o /tmp/watcher-prover.wasm ./cmd/watcher-prover-wasm
+      - run: test -s /tmp/watcher-prover.wasm
+
+  solana-program:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: programs/watcher-protocol
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --all-targets --locked
