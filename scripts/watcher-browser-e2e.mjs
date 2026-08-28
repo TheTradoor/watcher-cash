@@ -9,6 +9,9 @@ const WALLET_STORAGE_KEY = 'watcher-cash:walletName:v1';
 const LEGACY_WALLET_STORAGE_KEY = 'walletName';
 const E2E_WALLET_NAME = 'Watcher E2E Wallet';
 const E2E_ALTERNATE_WALLET_NAME = 'Watcher E2E Alternate Wallet';
+const E2E_REJECT_MESSAGE_KEY = 'watcher-e2e:reject-next-message';
+const E2E_REJECT_TRANSACTION_KEY = 'watcher-e2e:reject-next-transaction';
+const CANCELLED_MESSAGE = 'Request cancelled in your wallet. Nothing was signed or submitted. You can try again.';
 
 function fail(message) {
   throw new Error(message);
@@ -80,6 +83,10 @@ async function connectE2eWallet(page) {
   );
 }
 
+async function armWalletRejection(page, key) {
+  await page.evaluate((storageKey) => window.sessionStorage.setItem(storageKey, '1'), key);
+}
+
 async function main() {
   const browser = await chromium.launch({ headless: true });
   const context = await browser.newContext({
@@ -113,11 +120,29 @@ async function main() {
     await waitForCount(page.locator('.withdraw-readiness'), 0, 'locked withdrawal guidance hidden');
     await waitForExactText(page.locator('.capacity-card .side-data-row strong'), '—', 'locked nullifier placeholder');
 
+    console.log('Wallet message rejection + retry');
+    await armWalletRejection(page, E2E_REJECT_MESSAGE_KEY);
     await primary.click();
-    await waitForText(page.locator('.feedback-success'), 'Private note vault unlocked and synced.', 'vault unlock');
+    await waitForText(page.locator('.feedback'), CANCELLED_MESSAGE, 'friendly unlock rejection');
+    await waitForText(primary, 'Unlock private vault', 'unlock remains retryable after rejection');
+    await waitForCount(page.locator('#amount'), 0, 'unlock rejection keeps private form locked');
+
+    await primary.click();
+    await waitForText(page.locator('.feedback-success'), 'Private note vault unlocked and synced.', 'vault unlock retry');
 
     const amount = page.locator('#amount');
     await amount.fill('0.01');
+
+    console.log('Wallet transaction rejection + local draft recovery');
+    await armWalletRejection(page, E2E_REJECT_TRANSACTION_KEY);
+    await waitForText(primary, 'Generate proof & deposit', 'rejected deposit button');
+    await primary.click();
+    await waitForText(page.locator('.feedback'), CANCELLED_MESSAGE, 'friendly deposit rejection');
+    await waitForText(page.locator('.vault-panel'), '0 confirmed notes · 1 pending', 'rejected deposit draft retained locally');
+    const discardDraft = page.getByRole('button', { name: 'Discard local draft', exact: true });
+    await discardDraft.click();
+    await waitForText(page.locator('.feedback-success'), 'Local pending note draft removed.', 'rejected deposit draft cleanup');
+    await waitForText(page.locator('.vault-panel'), '0 confirmed notes · 0 pending', 'clean vault after rejected deposit');
 
     console.log('Deposit #1');
     await waitForText(primary, 'Generate proof & deposit', 'deposit #1 button');
@@ -278,6 +303,8 @@ async function main() {
         'connect',
         'namespaced-wallet-persistence',
         'locked-vault-form-hidden',
+        'wallet-message-rejection-retry',
+        'wallet-transaction-rejection-draft-recovery',
         'unlock',
         'deposit',
         'deposit',
@@ -303,6 +330,7 @@ async function main() {
         rememberedWalletAutoConnect: true,
         multiWalletModal: true,
         legacyWalletStorageMigrated: true,
+        walletRejectionRecovery: true,
       },
     }, null, 2));
   } catch (error) {
