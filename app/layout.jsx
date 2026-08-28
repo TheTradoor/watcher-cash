@@ -1,5 +1,6 @@
 import '@solana/wallet-adapter-react-ui/styles.css';
 import './globals.css';
+import './motion-theme.css';
 import Providers from './providers';
 
 export const metadata = {
