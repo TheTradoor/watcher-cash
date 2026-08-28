@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { readFile } from 'node:fs/promises';
 import { chromium } from 'playwright';
 
 const url = String(process.env.WATCHER_E2E_URL || 'http://127.0.0.1:3000/').trim();
@@ -49,6 +50,14 @@ async function waitForCount(locator, expected, label) {
   fail(`${label}: expected ${expected} rows, saw ${await locator.count()}`);
 }
 
+async function connectE2eWallet(page) {
+  const walletButton = page.locator('nav.topbar .wallet-adapter-button').first();
+  await walletButton.click({ timeout });
+  const e2eWalletButton = page.getByRole('button', { name: /Watcher E2E Wallet/i }).last();
+  await e2eWalletButton.waitFor({ state: 'visible', timeout });
+  await e2eWalletButton.click();
+}
+
 async function main() {
   const browser = await chromium.launch({ headless: true });
   const context = await browser.newContext({
@@ -68,22 +77,18 @@ async function main() {
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout });
 
     await waitForText(page.locator('.nav-statuses'), 'DEVNET VERIFIED', 'runtime verification');
-
-    const walletButton = page.locator('nav.topbar .wallet-adapter-button').first();
-    await walletButton.click({ timeout });
-    const e2eWalletButton = page.getByRole('button', { name: /Watcher E2E Wallet/i }).last();
-    await e2eWalletButton.waitFor({ state: 'visible', timeout });
-    await e2eWalletButton.click();
+    await connectE2eWallet(page);
 
     const primary = page.locator('.primary-action');
-    await waitForText(primary, 'Unlock private notes', 'wallet connection');
+    await waitForText(primary, 'Unlock private vault', 'wallet connection');
 
-    console.log('Locked withdrawal UX');
-    await page.getByRole('button', { name: 'Withdraw', exact: true }).click();
+    console.log('Locked vault UX');
+    await waitForText(page.locator('.locked-vault-state'), 'Unlock your private vault', 'locked vault card');
+    await waitForCount(page.locator('.mode-tabs'), 0, 'locked mode tabs hidden');
+    await waitForCount(page.locator('#amount'), 0, 'locked amount input hidden');
+    await waitForCount(page.locator('#recipient'), 0, 'locked recipient input hidden');
     await waitForCount(page.locator('.withdraw-readiness'), 0, 'locked withdrawal guidance hidden');
     await waitForExactText(page.locator('.capacity-card .side-data-row strong'), '—', 'locked nullifier placeholder');
-    await waitForText(primary, 'Unlock private notes', 'locked withdrawal action');
-    await page.getByRole('button', { name: 'Deposit privately', exact: true }).click();
 
     await primary.click();
     await waitForText(page.locator('.feedback-success'), 'Private note vault unlocked and synced.', 'vault unlock');
@@ -103,17 +108,69 @@ async function main() {
     await waitForText(page.locator('.vault-panel'), '2 confirmed notes · 0 pending', 'deposit #2 note sync');
     await waitForExactText(page.locator('.capacity-card .capacity-number strong'), '2', 'tree after deposits');
 
+    console.log('Encrypted vault backup');
+    const downloadPromise = page.waitForEvent('download', { timeout });
+    await page.getByRole('button', { name: 'Export encrypted backup', exact: true }).click();
+    const backupDownload = await downloadPromise;
+    const backupPath = await backupDownload.path();
+    if (!backupPath) fail('encrypted backup regression: browser did not provide a downloaded file');
+    const backup = JSON.parse(await readFile(backupPath, 'utf8'));
+    if (backup?.format !== 'watcher-cash-encrypted-vault-backup' || backup?.version !== 1) {
+      fail('encrypted backup regression: exported file has the wrong format/version');
+    }
+    if (backup?.ciphertextOnly !== true) {
+      fail('encrypted backup regression: exported file is not marked ciphertext-only');
+    }
+    const envelopeKeys = Object.keys(backup?.envelope || {}).sort().join(',');
+    if (envelopeKeys !== 'ciphertext,iv,version') {
+      fail(`encrypted backup regression: unexpected envelope fields ${envelopeKeys}`);
+    }
+    const backupText = JSON.stringify(backup);
+    if (backupText.includes('"owner"') || backupText.includes('"nonce"') || backupText.includes('"notes"')) {
+      fail('encrypted backup regression: private note plaintext leaked into exported backup');
+    }
+
+    const removedVaultKey = await page.evaluate(() => {
+      const key = Object.keys(window.localStorage)
+        .find((name) => name.startsWith('watcher-note-vault:v1:'));
+      if (!key) return '';
+      window.localStorage.removeItem(key);
+      return key;
+    });
+    if (!removedVaultKey) fail('encrypted backup regression: local encrypted vault was not found before loss simulation');
+
+    console.log('Encrypted vault recovery');
+    await page.reload({ waitUntil: 'domcontentloaded', timeout });
+    await waitForText(page.locator('.nav-statuses'), 'DEVNET VERIFIED', 'runtime verification after reload');
+    const primaryAfterReload = page.locator('.primary-action');
+    const primaryText = String(await primaryAfterReload.textContent().catch(() => '')).trim();
+    if (primaryText.includes('Connect wallet')) {
+      await connectE2eWallet(page);
+    }
+    await waitForText(primaryAfterReload, 'Unlock private vault', 'recovery wallet ready');
+    await primaryAfterReload.click();
+    await waitForText(page.locator('.feedback-success'), 'Private note vault unlocked and synced.', 'empty vault unlock after loss');
+    await waitForText(page.locator('.vault-panel'), '0 confirmed notes · 0 pending', 'vault loss reflected locally');
+
+    await page.locator('#vault-backup-input').setInputFiles(backupPath);
+    await waitForText(
+      page.locator('.feedback-success'),
+      'Encrypted vault backup restored and synced. 2 note records available.',
+      'encrypted vault restore',
+    );
+    await waitForText(page.locator('.vault-panel'), '2 confirmed notes · 0 pending', 'restored note sync');
+
     console.log('Withdrawal');
     await page.getByRole('button', { name: 'Withdraw', exact: true }).click();
-    await amount.fill('0.01');
+    await page.locator('#amount').fill('0.01');
     const recipient = page.locator('#recipient');
     if (!(await recipient.inputValue()).trim()) {
       await page.getByRole('button', { name: 'Use connected wallet', exact: true }).click();
     }
     await waitForText(page.locator('.preview-card'), 'Notes consumed', 'withdrawal preview');
     await waitForText(page.locator('.preview-card'), 'Private change', 'withdrawal change preview');
-    await waitForText(primary, 'Generate proof & withdraw', 'withdrawal button');
-    await primary.click();
+    await waitForText(primaryAfterReload, 'Generate proof & withdraw', 'withdrawal button');
+    await primaryAfterReload.click();
     await waitForText(page.locator('.feedback-success'), 'Withdrew 0.01 SOL. 0.01 SOL returned as private change.', 'withdrawal');
 
     const lookupTableAddress = await page.evaluate(() => {
@@ -138,21 +195,18 @@ async function main() {
       'Withdrawal requires 2 confirmed notes. You have 1. Deposit 1 more note to continue.',
       'post-withdraw guidance',
     );
-    await waitForText(primary, 'Deposit 1 more note', 'post-withdraw button label');
-    if (await primary.isDisabled()) {
+    await waitForText(primaryAfterReload, 'Deposit 1 more note', 'post-withdraw button label');
+    if (await primaryAfterReload.isDisabled()) {
       fail('post-withdraw UX regression: deposit shortcut should remain clickable');
     }
-    await primary.click();
-    await waitForText(primary, 'Generate proof & deposit', 'deposit shortcut destination');
+    await primaryAfterReload.click();
+    await waitForText(primaryAfterReload, 'Generate proof & deposit', 'deposit shortcut destination');
     await waitForText(
       page.locator('.feedback-info'),
       'Deposit 1 more private note, then return to Withdraw.',
       'deposit shortcut feedback',
     );
 
-    // The encrypted inventory intentionally retains spent notes as local history.
-    // After two deposits and one two-input withdrawal it should contain two spent
-    // deposit records plus one confirmed private-change record.
     const noteRows = page.locator('.notes-list .note-row');
     await waitForCount(noteRows, 3, 'final encrypted note inventory');
 
@@ -166,17 +220,20 @@ async function main() {
     await waitForText(confirmedChangeRow, 'PRIVATE CHANGE', 'final change kind');
 
     if (pageErrors.length > 0) {
-      fail(`Browser page errors:\n${pageErrors.join('\n\n')}`);
+      fail(`Browser page errors:\n\n${pageErrors.join('\n\n')}`);
     }
 
     console.log(JSON.stringify({
       status: 'pass',
       flow: [
         'connect',
-        'locked-withdraw-clean',
+        'locked-vault-form-hidden',
         'unlock',
         'deposit',
         'deposit',
+        'backup-export-ciphertext-only',
+        'local-vault-loss',
+        'backup-restore-and-sync',
         'withdraw-v0-alt',
         'sync',
         'post-withdraw-deposit-shortcut',
@@ -189,6 +246,7 @@ async function main() {
         pendingNotes: 0,
         commitmentCount: 3,
         spentNullifiers: 2,
+        encryptedBackupRecovery: true,
         depositShortcutReady: true,
       },
     }, null, 2));
