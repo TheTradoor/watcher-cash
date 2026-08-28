@@ -16,10 +16,12 @@ import {
   VersionedTransaction,
   clusterApiUrl,
 } from '@solana/web3.js';
+import { normalizeWatcherFailure } from '../client/watcher/failure-errors.mjs';
 import { createWatcherE2EWallets, watcherE2EEnabled } from './e2e-wallet';
 
 const WATCHER_RELIABLE_SEND_PATCH = '__watcherReliableDevnetSendV1';
-const WATCHER_WALLET_SEND_PATCH = '__watcherWalletOversizedSendV3';
+const WATCHER_CONFIRM_PATCH = '__watcherNormalizedConfirmV1';
+const WATCHER_WALLET_SEND_PATCH = '__watcherWalletOversizedSendV4';
 const WATCHER_WALLET_STORAGE_KEY = 'watcher-cash:walletName:v1';
 const LEGACY_WALLET_STORAGE_KEY = 'walletName';
 const MAX_TRANSACTION_BYTES = 1232;
@@ -44,8 +46,8 @@ function migrateWalletSelectionStorage() {
 
 function handleWalletError(error, adapter) {
   const walletName = adapter?.name ? ` (${adapter.name})` : '';
-  const message = error?.message || String(error || 'Unknown wallet error');
-  console.warn(`[Watcher Cash wallet${walletName}] ${message}`);
+  const normalized = normalizeWatcherFailure(error);
+  console.warn(`[Watcher Cash wallet${walletName}] ${normalized.message}`);
 }
 
 function installReliableDevnetSend() {
@@ -68,7 +70,12 @@ function installReliableDevnetSend() {
       maxRetries: Math.max(Number.isFinite(requestedRetries) ? requestedRetries : 0, 25),
     };
 
-    const signature = await originalSendRawTransaction.call(this, rawTransaction, sendOptions);
+    let signature;
+    try {
+      signature = await originalSendRawTransaction.call(this, rawTransaction, sendOptions);
+    } catch (error) {
+      throw normalizeWatcherFailure(error);
+    }
     const endpoint = String(this.rpcEndpoint || '');
 
     if (!endpoint.toLowerCase().includes('devnet') && !watcherE2EEnabled()) return signature;
@@ -105,6 +112,27 @@ function installReliableDevnetSend() {
     })();
 
     return signature;
+  };
+}
+
+function installNormalizedConfirm() {
+  const prototype = Connection.prototype;
+  if (prototype[WATCHER_CONFIRM_PATCH]) return;
+  const originalConfirmTransaction = prototype.confirmTransaction;
+
+  Object.defineProperty(prototype, WATCHER_CONFIRM_PATCH, {
+    value: true,
+    configurable: false,
+    enumerable: false,
+    writable: false,
+  });
+
+  prototype.confirmTransaction = async function confirmTransactionWithWatcherErrors(...args) {
+    try {
+      return await originalConfirmTransaction.apply(this, args);
+    } catch (error) {
+      throw normalizeWatcherFailure(error);
+    }
   };
 }
 
@@ -256,15 +284,15 @@ async function ensureWithdrawalBlockhashIsValid(rpc, blockhash) {
       }
       return;
     } catch (error) {
-      if (/blockhash expired while preparing/i.test(error?.message || String(error))) throw error;
+      if (/blockhash expired while preparing/i.test(error?.message || String(error))) throw normalizeWatcherFailure(error);
       lastError = error;
       await sleep(400);
     }
   }
 
-  throw new Error(
+  throw normalizeWatcherFailure(new Error(
     `Could not verify the withdrawal blockhash after lookup-table setup. Retry withdrawal; the cached table will be reused.${lastError?.message ? ` RPC: ${lastError.message}` : ''}`,
-  );
+  ));
 }
 
 async function convertOversizedLegacyTransaction(adapter, rpc, transaction) {
@@ -288,15 +316,47 @@ async function convertOversizedLegacyTransaction(adapter, rpc, transaction) {
   return versioned;
 }
 
+function wrapWalletMethod(adapter, methodName) {
+  const marker = `__watcherNormalized_${methodName}_v1`;
+  if (adapter?.[marker] || typeof adapter?.[methodName] !== 'function') return;
+  const original = adapter[methodName].bind(adapter);
+  try {
+    Object.defineProperty(adapter, marker, {
+      value: true,
+      configurable: false,
+      enumerable: false,
+      writable: false,
+    });
+    Object.defineProperty(adapter, methodName, {
+      configurable: true,
+      writable: true,
+      value: async (...args) => {
+        try {
+          return await original(...args);
+        } catch (error) {
+          throw normalizeWatcherFailure(error);
+        }
+      },
+    });
+  } catch {
+    // Some injected wallets expose non-configurable methods. Their native error
+    // still flows to WalletProvider.onError and the page-level error boundary.
+  }
+}
+
 function ReliableWalletTransport({ children }) {
   const { connection } = useConnection();
   const { wallet, connected } = useWallet();
 
   useEffect(() => {
     const adapter = wallet?.adapter;
-    if (!connected || !adapter || adapter[WATCHER_WALLET_SEND_PATCH]) return;
-    if (typeof adapter.sendTransaction !== 'function') return;
+    if (!connected || !adapter) return;
 
+    wrapWalletMethod(adapter, 'signTransaction');
+    wrapWalletMethod(adapter, 'signAllTransactions');
+    wrapWalletMethod(adapter, 'signMessage');
+
+    if (adapter[WATCHER_WALLET_SEND_PATCH] || typeof adapter.sendTransaction !== 'function') return;
     const originalSendTransaction = adapter.sendTransaction.bind(adapter);
 
     Object.defineProperty(adapter, WATCHER_WALLET_SEND_PATCH, {
@@ -310,29 +370,33 @@ function ReliableWalletTransport({ children }) {
       configurable: true,
       writable: true,
       value: async (transaction, targetConnection = connection, options = {}) => {
-        const rpc = targetConnection || connection;
-        const endpoint = String(rpc?.rpcEndpoint || '').toLowerCase();
-        const useDappTransport = endpoint.includes('devnet') || watcherE2EEnabled();
-        const oversizedLegacy = transaction instanceof Transaction && !legacyTransactionFits(transaction);
+        try {
+          const rpc = targetConnection || connection;
+          const endpoint = String(rpc?.rpcEndpoint || '').toLowerCase();
+          const useDappTransport = endpoint.includes('devnet') || watcherE2EEnabled();
+          const oversizedLegacy = transaction instanceof Transaction && !legacyTransactionFits(transaction);
 
-        // Keep normal deposits and any other transaction that fits Solana's packet
-        // limit on the wallet adapter's native transport. Only the oversized Groth16
-        // withdrawal needs our v0 + lookup-table conversion and direct RPC send.
-        if (!useDappTransport || !oversizedLegacy || typeof adapter.signTransaction !== 'function') {
-          return originalSendTransaction(transaction, rpc, options);
+          // Keep normal deposits and any other transaction that fits Solana's packet
+          // limit on the wallet adapter's native transport. Only the oversized Groth16
+          // withdrawal needs our v0 + lookup-table conversion and direct RPC send.
+          if (!useDappTransport || !oversizedLegacy || typeof adapter.signTransaction !== 'function') {
+            return await originalSendTransaction(transaction, rpc, options);
+          }
+
+          const transactionToSign = await convertOversizedLegacyTransaction(adapter, rpc, transaction);
+          const signedTransaction = await adapter.signTransaction(transactionToSign);
+          const rawTransaction = signedTransaction.serialize();
+          const requestedRetries = Number(options?.maxRetries || 0);
+
+          return await rpc.sendRawTransaction(rawTransaction, {
+            ...options,
+            skipPreflight: options?.skipPreflight ?? false,
+            preflightCommitment: options?.preflightCommitment || 'confirmed',
+            maxRetries: Math.max(Number.isFinite(requestedRetries) ? requestedRetries : 0, 25),
+          });
+        } catch (error) {
+          throw normalizeWatcherFailure(error);
         }
-
-        const transactionToSign = await convertOversizedLegacyTransaction(adapter, rpc, transaction);
-        const signedTransaction = await adapter.signTransaction(transactionToSign);
-        const rawTransaction = signedTransaction.serialize();
-        const requestedRetries = Number(options?.maxRetries || 0);
-
-        return rpc.sendRawTransaction(rawTransaction, {
-          ...options,
-          skipPreflight: options?.skipPreflight ?? false,
-          preflightCommitment: options?.preflightCommitment || 'confirmed',
-          maxRetries: Math.max(Number.isFinite(requestedRetries) ? requestedRetries : 0, 25),
-        });
       },
     });
   }, [connected, connection, wallet]);
@@ -363,6 +427,7 @@ export default function Providers({ children }) {
   useEffect(() => {
     migrateWalletSelectionStorage();
     installReliableDevnetSend();
+    installNormalizedConfirm();
     setHydrated(true);
   }, []);
 
