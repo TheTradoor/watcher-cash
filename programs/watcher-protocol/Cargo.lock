@@ -7997,6 +7997,7 @@ dependencies = [
  "solana-program",
  "solana-program-test",
  "solana-sdk",
+ "solana-system-interface",
  "thiserror 2.0.20",
  "tokio",
 ]
