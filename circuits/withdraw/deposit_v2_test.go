@@ -1,12 +1,12 @@
 package withdraw
 
 import (
+	"math/big"
 	"sync"
 	"testing"
 
 	"github.com/consensys/gnark-crypto/ecc"
 	"github.com/consensys/gnark/backend/groth16"
-	"github.com/consensys/gnark/constraint"
 	"github.com/consensys/gnark/frontend"
 	"github.com/consensys/gnark/frontend/cs/r1cs"
 )
@@ -53,18 +53,41 @@ func validFirstDepositV2() DepositCircuitV2 {
 	path, bits := empty.proof(0)
 	next := makeSparseTreeV2([]*big.Int{commitment})
 	return DepositCircuitV2{
-		Owner: owner,
-		Nonce: nonce,
-		Path: path,
-		Index: bits,
-		Commitment: commitment,
-		Amount: amount,
-		AssetID: asset,
-		Epoch: 0,
+		Owner:          owner,
+		Nonce:          nonce,
+		Path:           path,
+		Index:          bits,
+		Commitment:     commitment,
+		Amount:         amount,
+		AssetID:        asset,
+		Epoch:          0,
 		ContextBinding: fixtureWithdrawContextBinding(),
-		OldRoot: 0,
-		NewRoot: next.root(),
-		LeafIndex: 0,
+		OldRoot:        0,
+		NewRoot:        next.root(),
+		LeafIndex:      0,
+	}
+}
+
+func validSecondDepositV2() DepositCircuitV2 {
+	asset := bi(1)
+	first := noteNativeV1(asset, bi(8_000_000), bi(1111), bi(2222))
+	second := noteNativeV1(asset, bi(3_000_000), bi(3333), bi(4444))
+	before := makeSparseTreeV2([]*big.Int{first})
+	path, bits := before.proof(1)
+	after := makeSparseTreeV2([]*big.Int{first, second})
+	return DepositCircuitV2{
+		Owner:          bi(3333),
+		Nonce:          bi(4444),
+		Path:           path,
+		Index:          bits,
+		Commitment:     second,
+		Amount:         bi(3_000_000),
+		AssetID:        asset,
+		Epoch:          7,
+		ContextBinding: fixtureWithdrawContextBinding(),
+		OldRoot:        before.root(),
+		NewRoot:        after.root(),
+		LeafIndex:      1,
 	}
 }
 
@@ -89,34 +112,13 @@ func TestDepositCircuitV2FirstAppendProvesAndVerifies(t *testing.T) {
 }
 
 func TestDepositCircuitV2SecondAppendProves(t *testing.T) {
-	asset := bi(1)
-	first := noteNativeV1(asset, bi(8_000_000), bi(1111), bi(2222))
-	second := noteNativeV1(asset, bi(3_000_000), bi(3333), bi(4444))
-	before := makeSparseTreeV2([]*big.Int{first})
-	path, bits := before.proof(1)
-	after := makeSparseTreeV2([]*big.Int{first, second})
-	assignment := DepositCircuitV2{
-		Owner: bi(3333),
-		Nonce: bi(4444),
-		Path: path,
-		Index: bits,
-		Commitment: second,
-		Amount: bi(3_000_000),
-		AssetID: asset,
-		Epoch: 7,
-		ContextBinding: fixtureWithdrawContextBinding(),
-		OldRoot: before.root(),
-		NewRoot: after.root(),
-		LeafIndex: 1,
-	}
-	if err := proveDepositV2(t, assignment); err != nil {
+	if err := proveDepositV2(t, validSecondDepositV2()); err != nil {
 		t.Fatal(err)
 	}
 }
 
 func TestDepositCircuitV2RejectsWrongOldRoot(t *testing.T) {
-	assignment := validFirstDepositV2()
-	assignment.LeafIndex = 1
+	assignment := validSecondDepositV2()
 	assignment.OldRoot = 12345
 	if err := proveDepositV2(t, assignment); err == nil {
 		t.Fatal("expected invalid append root to fail")
