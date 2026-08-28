@@ -19,7 +19,13 @@ jobs:
         with:
           ref: watcher-protocol
 
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Install a Rust toolchain compatible with devnet-pow
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.74.1 --profile minimal --no-self-update
+          rustc +1.74.1 --version
+          cargo +1.74.1 --version
 
       - name: Install Agave CLI
         shell: bash
@@ -36,7 +42,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo install devnet-pow --version 0.1.4 --locked
+          cargo +1.74.1 install devnet-pow --version 0.1.4 --locked
           devnet-pow --version
 
       - name: Bootstrap transaction fees and mine a test reward
