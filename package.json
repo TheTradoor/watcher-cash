@@ -1,6 +1,7 @@
 {
   "name": "watcher-cash",
   "version": "1.0.0",
+  "description": "Watcher Protocol privacy interface for Solana.",
   "private": true,
   "engines": {
     "node": "24.x"
