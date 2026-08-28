@@ -23,6 +23,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
+          cache: npm
 
       - uses: actions/setup-go@v5
         with:
@@ -36,30 +37,34 @@ jobs:
         env:
           NEXT_PUBLIC_WATCHER_BASE_PATH: /watcher-cash
           NEXT_PUBLIC_WATCHER_RPC_URL: https://api.devnet.solana.com
+          NEXT_PUBLIC_BASE_PATH: /watcher-cash
+          NEXT_PUBLIC_RPC_URL: https://api.devnet.solana.com
         run: |
-          set -o pipefail
-          npm install --no-audit --no-fund 2>&1 | tee /tmp/watcher-final-npm.log
-          node --test client/watcher/*.test.mjs 2>&1 | tee /tmp/watcher-final-client.log
-          node --check public/watcher-prover-worker.js 2>&1 | tee /tmp/watcher-final-worker.log
-          npm run build 2>&1 | tee /tmp/watcher-final-next.log
+          set -euo pipefail
+          npm ci --ignore-scripts --no-audit --no-fund
+          node --test client/watcher/*.test.mjs
+          node --check client/watcher/browser-prover.mjs
+          node --check client/watcher/browser-prover.worker.js
+          npm run build
 
       - name: Validate native and WebAssembly provers
         working-directory: circuits/withdraw
         shell: bash
         run: |
-          set -o pipefail
-          go test ./... 2>&1 | tee /tmp/watcher-final-go.log
+          set -euo pipefail
+          go test ./...
           GOOS=js GOARCH=wasm go build -trimpath \
-            -o /tmp/watcher-final-prover.wasm ./cmd/watcher-prover-wasm \
-            2>&1 | tee /tmp/watcher-final-wasm.log
+            -o /tmp/watcher-final-prover.wasm ./cmd/watcher-prover-wasm
           test -s /tmp/watcher-final-prover.wasm
 
       - name: Validate Solana program
-        working-directory: programs/watcher-protocol
         shell: bash
         run: |
-          set -o pipefail
-          cargo test --all-targets 2>&1 | tee /tmp/watcher-final-program.log
+          set -euo pipefail
+          cargo test \
+            --manifest-path programs/watcher-protocol/Cargo.toml \
+            --all-targets \
+            --locked
 
       - name: Install permanent full-stack validation workflow
         shell: bash
@@ -74,7 +79,6 @@ jobs:
                 - 'app/**'
                 - 'components/**'
                 - 'client/watcher/**'
-                - 'public/watcher-prover-worker.js'
                 - 'programs/watcher-protocol/**'
                 - 'circuits/withdraw/**'
                 - 'package.json'
@@ -86,15 +90,19 @@ jobs:
                 - 'app/**'
                 - 'components/**'
                 - 'client/watcher/**'
-                - 'public/watcher-prover-worker.js'
                 - 'programs/watcher-protocol/**'
                 - 'circuits/withdraw/**'
                 - 'package.json'
                 - 'package-lock.json'
                 - 'next.config.*'
+                - '.github/workflows/watcher-full-validation.yml'
 
           permissions:
             contents: read
+
+          concurrency:
+            group: watcher-full-validation-${{ github.ref }}
+            cancel-in-progress: true
 
           jobs:
             client-and-web:
@@ -105,13 +113,16 @@ jobs:
                   with:
                     node-version: 24
                     cache: npm
-                - run: npm ci --no-audit --no-fund
+                - run: npm ci --ignore-scripts --no-audit --no-fund
                 - run: node --test client/watcher/*.test.mjs
-                - run: node --check public/watcher-prover-worker.js
+                - run: node --check client/watcher/browser-prover.mjs
+                - run: node --check client/watcher/browser-prover.worker.js
                 - run: npm run build
                   env:
                     NEXT_PUBLIC_WATCHER_BASE_PATH: /watcher-cash
                     NEXT_PUBLIC_WATCHER_RPC_URL: https://api.devnet.solana.com
+                    NEXT_PUBLIC_BASE_PATH: /watcher-cash
+                    NEXT_PUBLIC_RPC_URL: https://api.devnet.solana.com
 
             circuits-and-wasm:
               runs-on: ubuntu-latest
@@ -142,8 +153,7 @@ jobs:
       - name: Write permanent browser architecture and status notes
         shell: bash
         run: |
-          mkdir -p docs
-          cat > docs/WATCHER_BROWSER_ARCHITECTURE.md <<'MD'
+          cat > WATCHER_BROWSER_ARCHITECTURE.md <<'MD'
           # Watcher browser architecture
 
           The live client is a clean-room Watcher Protocol implementation for Solana devnet.
@@ -163,12 +173,14 @@ jobs:
 
           Status: VALIDATED DEVELOPMENT BUILD
 
-          The browser deposit flow uses the six-field, 192-byte deposit public-input wire format and derives the append transition from the live commitment registry before local proving. Client tests, static export, native Go prover tests, Go WebAssembly compilation, and Solana program tests are enforced by `.github/workflows/watcher-full-validation.yml`.
+          The browser deposit flow uses the six-field, 192-byte deposit public-input wire format and derives the append transition from the live commitment registry before local proving.
+
+          The permanent `.github/workflows/watcher-full-validation.yml` workflow enforces client tests, browser worker syntax, static export, native Go prover tests, Go WebAssembly compilation, and Solana program tests.
 
           Do not use production funds. The current proving setup is development-only and the protocol has not completed an independent audit or production ceremony.
           MD
 
-      - name: Remove one-off migration machinery
+      - name: Remove one-off migration and repair machinery
         shell: bash
         run: |
           rm -f \
@@ -181,37 +193,30 @@ jobs:
             .github/workflows/watcher-final-validation.yml \
             .github/workflows/watcher-final-validation-v2.yml \
             .github/workflows/watcher-final-validation-v3.yml \
+            .github/workflows/test-watcher-fee-bootstrap-v3.yml \
+            .github/workflows/test-watcher-pow-funding.yml \
+            .github/workflows/test-watcher-pow-funding-v2.yml \
+            .github/workflows/watcher-ui-failure-report.yml \
+            .github/workflows/watcher-ui-ready.yml \
             scripts/fix-browser-deposit-transition.py \
+            scripts/migrate-watcher-browser-prover.py \
             scripts/apply-compute-safe-merkle.mjs \
             scripts/apply-proof-carried-root-transitions.py \
             scripts/fix-proof-root-patcher.py
-          find .github/workflows -maxdepth 1 -type f \
-            \( -name '*migration*.yml' -o -name 'patch-*.yml' -o -name 'fix-*.yml' \) \
-            ! -name 'watcher-full-validation.yml' -delete
           git diff --check
 
       - name: Publish permanent clean state
         shell: bash
         run: |
+          set -euo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add -A
+          if git diff --cached --quiet; then
+            echo 'No finalization changes to publish.'
+            exit 0
+          fi
           git commit -m 'Finalize validated Watcher browser architecture'
-          git pull --rebase origin watcher-protocol
+          git fetch origin watcher-protocol
+          git rebase origin/watcher-protocol
           git push origin HEAD:watcher-protocol
-
-      - name: Upload finalization diagnostics
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: watcher-browser-finalization-logs
-          path: |
-            /tmp/watcher-final-npm.log
-            /tmp/watcher-final-client.log
-            /tmp/watcher-final-worker.log
-            /tmp/watcher-final-next.log
-            /tmp/watcher-final-go.log
-            /tmp/watcher-final-wasm.log
-            /tmp/watcher-final-program.log
-          if-no-files-found: warn
-          retention-days: 3
