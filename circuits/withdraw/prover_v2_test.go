@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"math/big"
 	"testing"
+
+	"github.com/consensys/gnark/frontend"
 )
 
 func decimalStringV2(value any) string {
@@ -57,18 +59,18 @@ func depositJSONV2(t *testing.T) []byte {
 	t.Helper()
 	assignment := validFirstDepositV2()
 	encoded := map[string]any{
-		"Owner": decimalStringV2(assignment.Owner),
-		"Nonce": decimalStringV2(assignment.Nonce),
-		"Path": pathStringsV2(assignment.Path),
-		"Index": bitValuesV2(assignment.Index),
-		"Commitment": decimalStringV2(assignment.Commitment),
-		"Amount": decimalStringV2(assignment.Amount),
-		"AssetID": decimalStringV2(assignment.AssetID),
-		"Epoch": decimalStringV2(assignment.Epoch),
+		"Owner":          decimalStringV2(assignment.Owner),
+		"Nonce":          decimalStringV2(assignment.Nonce),
+		"Path":           pathStringsV2(assignment.Path),
+		"Index":          bitValuesV2(assignment.Index),
+		"Commitment":     decimalStringV2(assignment.Commitment),
+		"Amount":         decimalStringV2(assignment.Amount),
+		"AssetID":        decimalStringV2(assignment.AssetID),
+		"Epoch":          decimalStringV2(assignment.Epoch),
 		"ContextBinding": decimalStringV2(assignment.ContextBinding),
-		"OldRoot": decimalStringV2(assignment.OldRoot),
-		"NewRoot": decimalStringV2(assignment.NewRoot),
-		"LeafIndex": decimalStringV2(assignment.LeafIndex),
+		"OldRoot":        decimalStringV2(assignment.OldRoot),
+		"NewRoot":        decimalStringV2(assignment.NewRoot),
+		"LeafIndex":      decimalStringV2(assignment.LeafIndex),
 	}
 	data, err := json.Marshal(encoded)
 	if err != nil {
@@ -83,13 +85,13 @@ func withdrawJSONV2(t *testing.T, inputCount int, changeAmount int64) []byte {
 	inputs := make([]map[string]any, MaxInputsV2)
 	for index := 0; index < MaxInputsV2; index++ {
 		inputs[index] = map[string]any{
-			"Enabled": assignment.InputEnabled[index],
-			"Amount": decimalStringV2(assignment.InputAmount[index]),
-			"Owner": decimalStringV2(assignment.InputOwner[index]),
-			"Nonce": decimalStringV2(assignment.InputNonce[index]),
-			"Path": pathStringsV2(assignment.InputPath[index]),
-			"Index": bitValuesV2(assignment.InputIndex[index]),
-			"Root": decimalStringV2(assignment.InputRoots[index]),
+			"Enabled":   assignment.InputEnabled[index],
+			"Amount":    decimalStringV2(assignment.InputAmount[index]),
+			"Owner":     decimalStringV2(assignment.InputOwner[index]),
+			"Nonce":     decimalStringV2(assignment.InputNonce[index]),
+			"Path":      pathStringsV2(assignment.InputPath[index]),
+			"Index":     bitValuesV2(assignment.InputIndex[index]),
+			"Root":      decimalStringV2(assignment.InputRoots[index]),
 			"Nullifier": decimalStringV2(assignment.Nullifiers[index]),
 		}
 	}
@@ -97,23 +99,23 @@ func withdrawJSONV2(t *testing.T, inputCount int, changeAmount int64) []byte {
 		"Inputs": inputs,
 		"Change": map[string]any{
 			"Enabled": assignment.ChangeEnabled,
-			"Amount": decimalStringV2(assignment.ChangeAmount),
-			"Owner": decimalStringV2(assignment.ChangeOwner),
-			"Nonce": decimalStringV2(assignment.ChangeNonce),
-			"Path": pathStringsV2(assignment.ChangePath),
-			"Index": bitValuesV2(assignment.ChangeIndex),
+			"Amount":  decimalStringV2(assignment.ChangeAmount),
+			"Owner":   decimalStringV2(assignment.ChangeOwner),
+			"Nonce":   decimalStringV2(assignment.ChangeNonce),
+			"Path":    pathStringsV2(assignment.ChangePath),
+			"Index":   bitValuesV2(assignment.ChangeIndex),
 		},
-		"InputCount": decimalStringV2(assignment.InputCount),
+		"InputCount":       decimalStringV2(assignment.InputCount),
 		"ChangeCommitment": decimalStringV2(assignment.ChangeCommitment),
-		"PublicAmount": decimalStringV2(assignment.PublicAmount),
-		"ProtocolFee": decimalStringV2(assignment.ProtocolFee),
-		"RelayerFee": decimalStringV2(assignment.RelayerFee),
+		"PublicAmount":     decimalStringV2(assignment.PublicAmount),
+		"ProtocolFee":      decimalStringV2(assignment.ProtocolFee),
+		"RelayerFee":       decimalStringV2(assignment.RelayerFee),
 		"RecipientBinding": decimalStringV2(assignment.RecipientBinding),
-		"AssetID": decimalStringV2(assignment.AssetID),
-		"ContextBinding": decimalStringV2(assignment.ContextBinding),
-		"CurrentRoot": decimalStringV2(assignment.CurrentRoot),
-		"NewMerkleRoot": decimalStringV2(assignment.NewMerkleRoot),
-		"ChangeLeafIndex": decimalStringV2(assignment.ChangeLeafIndex),
+		"AssetID":          decimalStringV2(assignment.AssetID),
+		"ContextBinding":   decimalStringV2(assignment.ContextBinding),
+		"CurrentRoot":      decimalStringV2(assignment.CurrentRoot),
+		"NewMerkleRoot":    decimalStringV2(assignment.NewMerkleRoot),
+		"ChangeLeafIndex":  decimalStringV2(assignment.ChangeLeafIndex),
 	}
 	data, err := json.Marshal(encoded)
 	if err != nil {
