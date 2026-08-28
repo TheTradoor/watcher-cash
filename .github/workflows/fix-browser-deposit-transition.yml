@@ -1,0 +1,131 @@
+name: Fix Browser Deposit Transition
+
+on:
+  push:
+    branches: [watcher-protocol]
+    paths:
+      - '.github/workflows/fix-browser-deposit-transition.yml'
+      - 'scripts/fix-browser-deposit-transition.py'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  repair-test-publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: watcher-protocol
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+          cache-dependency-path: circuits/withdraw/go.sum
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Apply the browser deposit transition repair
+        shell: bash
+        run: |
+          set -o pipefail
+          python scripts/fix-browser-deposit-transition.py 2>&1 | tee /tmp/watcher-browser-repair.log
+
+      - name: Install web dependencies
+        shell: bash
+        run: npm install --no-audit --no-fund 2>&1 | tee /tmp/watcher-browser-npm-install.log
+
+      - name: Test browser and client modules
+        shell: bash
+        run: |
+          set -o pipefail
+          node --test client/watcher/*.test.mjs 2>&1 | tee /tmp/watcher-browser-client-tests.log
+          node --check public/watcher-prover-worker.js 2>&1 | tee /tmp/watcher-browser-worker-check.log
+
+      - name: Build the static Watcher UI
+        shell: bash
+        env:
+          NEXT_PUBLIC_WATCHER_BASE_PATH: /watcher-cash
+          NEXT_PUBLIC_WATCHER_RPC_URL: https://api.devnet.solana.com
+        run: |
+          set -o pipefail
+          npm run build 2>&1 | tee /tmp/watcher-browser-next-build.log
+
+      - name: Test native and WebAssembly provers
+        working-directory: circuits/withdraw
+        shell: bash
+        run: |
+          set -o pipefail
+          go test ./... 2>&1 | tee /tmp/watcher-browser-go-tests.log
+          GOOS=js GOARCH=wasm go build -trimpath \
+            -o /tmp/watcher-browser-prover.wasm ./cmd/watcher-prover-wasm \
+            2>&1 | tee /tmp/watcher-browser-wasm-build.log
+          test -s /tmp/watcher-browser-prover.wasm
+
+      - name: Test the Solana program
+        working-directory: programs/watcher-protocol
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --all-targets 2>&1 | tee /tmp/watcher-browser-rust-tests.log
+
+      - name: Validate the repaired source shape
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          flow = Path('client/watcher/ui-flows.mjs').read_text()
+          tests = Path('client/watcher/ui-flows.test.mjs').read_text()
+          instructions = Path('client/watcher/instructions.mjs').read_text()
+
+          for field in ('OldRoot', 'NewRoot', 'LeafIndex', 'Path', 'Index'):
+              assert field in flow, field
+          assert 'connection.getAccountInfo' in flow
+          assert 'result.publicInputs.length, 192' in tests
+          assert 'DEPOSIT_INSTRUCTION_PUBLIC_INPUT_BYTES_V1 = 192' in instructions
+          assert 'fieldToLe32(transition.oldRoot)' in flow
+          assert 'fieldToLe32(transition.newRoot)' in flow
+          assert 'fieldToLe32(leafIndexField)' in flow
+          print('browser deposit flow carries the complete six-field append transition')
+          PY
+          git diff --check
+          git status --short
+
+      - name: Publish the tested source repair
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add client/watcher/ui-flows.mjs client/watcher/ui-flows.test.mjs app components 2>/dev/null || true
+          if git diff --cached --quiet; then
+            echo 'No source changes to publish.'
+            exit 0
+          fi
+          git commit -m 'Bind browser deposits to proof-carried Merkle transitions'
+          git pull --rebase origin watcher-protocol
+          git push origin HEAD:watcher-protocol
+
+      - name: Upload repair diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: watcher-browser-deposit-repair-logs
+          path: |
+            /tmp/watcher-browser-repair.log
+            /tmp/watcher-browser-npm-install.log
+            /tmp/watcher-browser-client-tests.log
+            /tmp/watcher-browser-worker-check.log
+            /tmp/watcher-browser-next-build.log
+            /tmp/watcher-browser-go-tests.log
+            /tmp/watcher-browser-wasm-build.log
+            /tmp/watcher-browser-rust-tests.log
+          if-no-files-found: warn
+          retention-days: 3
