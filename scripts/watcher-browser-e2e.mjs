@@ -108,6 +108,15 @@ async function main() {
     await primary.click();
     await waitForText(page.locator('.feedback-success'), 'Withdrew 0.01 SOL. 0.01 SOL returned as private change.', 'withdrawal');
 
+    const lookupTableAddress = await page.evaluate(() => {
+      const key = Object.keys(window.localStorage)
+        .find((name) => name.startsWith('watcher-withdraw-alt:'));
+      return key ? String(window.localStorage.getItem(key) || '') : '';
+    });
+    if (!lookupTableAddress) {
+      fail('v0 withdrawal regression: oversized withdrawal did not create/cache an address lookup table');
+    }
+
     const refresh = page.getByRole('button', { name: 'Refresh balance', exact: true });
     await refresh.click();
     await waitForText(page.locator('.feedback-success'), 'Private balance synced from devnet state.', 'final private sync');
@@ -138,7 +147,8 @@ async function main() {
 
     console.log(JSON.stringify({
       status: 'pass',
-      flow: ['connect', 'unlock', 'deposit', 'deposit', 'withdraw', 'sync'],
+      flow: ['connect', 'unlock', 'deposit', 'deposit', 'withdraw-v0-alt', 'sync'],
+      lookupTableAddress,
       final: {
         privateBalanceSol: '0.01',
         confirmedNotes: 1,
