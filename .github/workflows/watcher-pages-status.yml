@@ -2,7 +2,7 @@ name: Record Watcher Pages Deployment
 
 on:
   workflow_run:
-    workflows: ['Deploy Watcher Cash to GitHub Pages']
+    workflows: ['Deploy Watcher Protocol to GitHub Pages']
     types: [completed]
 
 permissions:
