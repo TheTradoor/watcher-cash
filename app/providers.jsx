@@ -16,14 +16,36 @@ import {
   VersionedTransaction,
   clusterApiUrl,
 } from '@solana/web3.js';
-import { createWatcherE2EWallet, watcherE2EEnabled } from './e2e-wallet';
+import { createWatcherE2EWallets, watcherE2EEnabled } from './e2e-wallet';
 
 const WATCHER_RELIABLE_SEND_PATCH = '__watcherReliableDevnetSendV1';
 const WATCHER_WALLET_SEND_PATCH = '__watcherWalletOversizedSendV3';
+const WATCHER_WALLET_STORAGE_KEY = 'watcher-cash:walletName:v1';
+const LEGACY_WALLET_STORAGE_KEY = 'walletName';
 const MAX_TRANSACTION_BYTES = 1232;
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function migrateWalletSelectionStorage() {
+  try {
+    const storage = globalThis.localStorage;
+    if (!storage) return;
+    const current = storage.getItem(WATCHER_WALLET_STORAGE_KEY);
+    const legacy = storage.getItem(LEGACY_WALLET_STORAGE_KEY);
+    if (!current && legacy) storage.setItem(WATCHER_WALLET_STORAGE_KEY, legacy);
+    if (legacy) storage.removeItem(LEGACY_WALLET_STORAGE_KEY);
+  } catch {
+    // Wallet selection persistence is an optimization. Restricted storage should
+    // never prevent the interface from rendering or a wallet from connecting.
+  }
+}
+
+function handleWalletError(error, adapter) {
+  const walletName = adapter?.name ? ` (${adapter.name})` : '';
+  const message = error?.message || String(error || 'Unknown wallet error');
+  console.warn(`[Watcher Cash wallet${walletName}] ${message}`);
 }
 
 function installReliableDevnetSend() {
@@ -336,12 +358,10 @@ export default function Providers({ children }) {
     () => process.env.NEXT_PUBLIC_RPC_URL || clusterApiUrl('devnet'),
     [],
   );
-  const wallets = useMemo(() => {
-    const e2eWallet = createWatcherE2EWallet();
-    return e2eWallet ? [e2eWallet] : [];
-  }, []);
+  const wallets = useMemo(() => createWatcherE2EWallets(), []);
 
   useEffect(() => {
+    migrateWalletSelectionStorage();
     installReliableDevnetSend();
     setHydrated(true);
   }, []);
@@ -350,12 +370,17 @@ export default function Providers({ children }) {
   // initializer. Mounting it during SSR would let the server render `null` while
   // the first browser render sees a stored wallet, which causes React hydration
   // mismatch on reload. Keep the server and first client render deterministic,
-  // then mount all wallet-dependent UI after hydration.
+  // migrate legacy wallet selection state, then mount all wallet-dependent UI.
   if (!hydrated) return <WalletHydrationShell />;
 
   return (
     <ConnectionProvider endpoint={endpoint} config={{ commitment: 'confirmed' }}>
-      <WalletProvider wallets={wallets} autoConnect>
+      <WalletProvider
+        wallets={wallets}
+        autoConnect
+        localStorageKey={WATCHER_WALLET_STORAGE_KEY}
+        onError={handleWalletError}
+      >
         <ReliableWalletTransport>
           <WalletModalProvider>{children}</WalletModalProvider>
         </ReliableWalletTransport>
