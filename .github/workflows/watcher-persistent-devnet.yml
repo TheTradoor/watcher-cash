@@ -1,0 +1,353 @@
+name: Deploy Persistent Watcher Devnet
+
+on:
+  workflow_dispatch:
+    inputs:
+      force_bootstrap:
+        description: Replace the published protocol state accounts with a fresh empty pool
+        required: true
+        default: false
+        type: boolean
+      run_e2e:
+        description: Run a separate proof-bound deposit/deposit/withdraw smoke test
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: watcher-persistent-devnet
+  cancel-in-progress: false
+
+env:
+  SOLANA_VERSION: v4.0.0
+  WATCHER_RPC_URL: https://api.devnet.solana.com
+  WATCHER_PUBLIC_BASE_PATH: /watcher-cash
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout Watcher protocol branch
+        uses: actions/checkout@v4
+        with:
+          ref: watcher-protocol
+          fetch-depth: 0
+
+      - name: Require persistent deployment secrets
+        env:
+          PAYER_KEYPAIR_B64: ${{ secrets.WATCHER_DEVNET_DEPLOYER_KEYPAIR_B64 }}
+          PROGRAM_KEYPAIR_B64: ${{ secrets.WATCHER_DEVNET_PROGRAM_KEYPAIR_B64 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "$PAYER_KEYPAIR_B64" ] || [ -z "$PROGRAM_KEYPAIR_B64" ]; then
+            echo 'Required repository secrets are missing.' >&2
+            echo 'Set WATCHER_DEVNET_DEPLOYER_KEYPAIR_B64 and WATCHER_DEVNET_PROGRAM_KEYPAIR_B64.' >&2
+            exit 1
+          fi
+          printf '%s' "$PAYER_KEYPAIR_B64" | base64 --decode > /tmp/watcher-devnet-payer.json
+          printf '%s' "$PROGRAM_KEYPAIR_B64" | base64 --decode > /tmp/watcher-devnet-program.json
+          chmod 600 /tmp/watcher-devnet-payer.json /tmp/watcher-devnet-program.json
+          python - <<'PY'
+          import json
+          for path in ('/tmp/watcher-devnet-payer.json', '/tmp/watcher-devnet-program.json'):
+              value = json.load(open(path))
+              if not isinstance(value, list) or len(value) != 64:
+                  raise SystemExit(f'{path} must decode to a Solana 64-byte keypair JSON array')
+              if any(not isinstance(item, int) or item < 0 or item > 255 for item in value):
+                  raise SystemExit(f'{path} contains invalid keypair bytes')
+          PY
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+          cache-dependency-path: circuits/withdraw/go.sum
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Agave SBF toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 \
+            "https://github.com/anza-xyz/agave/releases/download/${SOLANA_VERSION}/solana-release-x86_64-unknown-linux-gnu.tar.bz2" \
+            --output /tmp/solana-release.tar.bz2
+          mkdir -p /tmp/solana-release
+          tar -xjf /tmp/solana-release.tar.bz2 -C /tmp/solana-release --strip-components=1
+          echo "/tmp/solana-release/bin" >> "$GITHUB_PATH"
+          /tmp/solana-release/bin/solana --version
+          /tmp/solana-release/bin/cargo-build-sbf --version
+
+      - name: Install web dependencies
+        run: npm install --ignore-scripts --no-audit --no-fund
+
+      - name: Download synchronized matched prover bundle
+        id: bundle
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORCE_BOOTSTRAP: ${{ inputs.force_bootstrap }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/watcher-sync-release /tmp/watcher-sync-extract circuits/withdraw/fixture-out/local-prover
+          mkdir -p /tmp/watcher-sync-release /tmp/watcher-sync-extract circuits/withdraw/fixture-out/local-prover
+          if ! gh release view watcher-dev-prover --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo 'The synchronized development prover release does not exist.' >&2
+            echo 'Run the Watcher Local Prover Sync workflow first.' >&2
+            exit 1
+          fi
+          gh release download watcher-dev-prover \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern 'watcher-development-prover-bundle.tar.gz' \
+            --pattern 'watcher-development-prover-bundle.tar.gz.sha256' \
+            --dir /tmp/watcher-sync-release
+          (
+            cd /tmp/watcher-sync-release
+            sha256sum --check watcher-development-prover-bundle.tar.gz.sha256
+          )
+          ARCHIVE_SHA=$(sha256sum /tmp/watcher-sync-release/watcher-development-prover-bundle.tar.gz | awk '{print $1}')
+
+          RUNTIME=public/watcher-protocol/devnet.json
+          if [ -s "$RUNTIME" ] && jq -e '.status == "ready"' "$RUNTIME" >/dev/null; then
+            PUBLISHED_SHA=$(jq -r '.proverBundleSha256 // empty' "$RUNTIME")
+            if [ -n "$PUBLISHED_SHA" ] && [ "$PUBLISHED_SHA" != "$ARCHIVE_SHA" ] && [ "$FORCE_BOOTSTRAP" != true ]; then
+              echo 'The synchronized prover bundle differs from the published runtime.' >&2
+              echo 'Rerun with force_bootstrap=true because old notes use the previous verifying key.' >&2
+              exit 1
+            fi
+          fi
+
+          tar -xzf /tmp/watcher-sync-release/watcher-development-prover-bundle.tar.gz \
+            -C /tmp/watcher-sync-extract
+          BUNDLE_DIR=$(dirname "$(find /tmp/watcher-sync-extract -type f -name deposit.r1cs -print -quit)")
+          test -n "$BUNDLE_DIR"
+          cp -a "$BUNDLE_DIR/." circuits/withdraw/fixture-out/local-prover/
+          for name in deposit.r1cs deposit.pk deposit.vk withdraw.r1cs withdraw.pk withdraw.vk manifest.json; do
+            test -s "circuits/withdraw/fixture-out/local-prover/$name"
+          done
+          echo "archive_sha=$ARCHIVE_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Validate synchronized source and verifier fixtures
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run test:watcher-client
+          go -C circuits/withdraw test ./...
+          cargo test --manifest-path programs/watcher-protocol/Cargo.toml --all-targets
+
+      - name: Build exact SBF program and local prover
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo generate-lockfile --manifest-path programs/watcher-protocol/Cargo.toml
+          rm -rf target/deploy
+          mkdir -p target/deploy
+          cargo build-sbf \
+            --arch v3 \
+            --manifest-path programs/watcher-protocol/Cargo.toml \
+            --sbf-out-dir target/deploy
+          test -s target/deploy/watcher_protocol_program.so
+          readelf --header target/deploy/watcher_protocol_program.so | grep 'Flags:.*0x3'
+          sha256sum target/deploy/watcher_protocol_program.so | tee /tmp/watcher-program-sha256.txt
+          go -C circuits/withdraw build -trimpath -o /tmp/watcher-prover ./cmd/watcher-prover
+
+      - name: Deploy or upgrade fixed program id
+        id: deployment
+        shell: bash
+        run: |
+          set -euo pipefail
+          PAYER=/tmp/watcher-devnet-payer.json
+          PROGRAM=/tmp/watcher-devnet-program.json
+          PAYER_ADDRESS=$(solana address --keypair "$PAYER")
+          PROGRAM_ID=$(solana address --keypair "$PROGRAM")
+          BALANCE=$(solana balance "$PAYER_ADDRESS" --url "$WATCHER_RPC_URL" --lamports | awk '{print $1}')
+          echo "Persistent payer: $PAYER_ADDRESS"
+          echo "Persistent program id: $PROGRAM_ID"
+          echo "Payer balance: $BALANCE lamports"
+          if [ "${BALANCE:-0}" -lt 5000000000 ]; then
+            echo 'Persistent devnet payer needs at least 5 SOL before deployment.' >&2
+            exit 1
+          fi
+          solana program deploy \
+            --url "$WATCHER_RPC_URL" \
+            --keypair "$PAYER" \
+            --program-id "$PROGRAM" \
+            target/deploy/watcher_protocol_program.so \
+            | tee /tmp/watcher-persistent-deploy.log
+          echo "program_id=$PROGRAM_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Start matched local prover
+        shell: bash
+        run: |
+          set -euo pipefail
+          nohup /tmp/watcher-prover \
+            -assets circuits/withdraw/fixture-out/local-prover \
+            -listen 127.0.0.1:8090 \
+            -origins http://localhost:3000,http://127.0.0.1:3000 \
+            >/tmp/watcher-prover.log 2>&1 &
+          echo $! >/tmp/watcher-prover.pid
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent http://127.0.0.1:8090/healthz | tee /tmp/watcher-prover-health.json; then
+              exit 0
+            fi
+            sleep 1
+          done
+          cat /tmp/watcher-prover.log
+          exit 1
+
+      - name: Bootstrap or verify persistent protocol state
+        env:
+          PROGRAM_ID: ${{ steps.deployment.outputs.program_id }}
+          FORCE_BOOTSTRAP: ${{ inputs.force_bootstrap }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          RUNTIME=public/watcher-protocol/devnet.json
+          REUSE=0
+          if [ "$FORCE_BOOTSTRAP" != true ] && [ -s "$RUNTIME" ]; then
+            if [ "$(jq -r '.status // empty' "$RUNTIME")" = ready ] \
+              && [ "$(jq -r '.programId // empty' "$RUNTIME")" = "$PROGRAM_ID" ]; then
+              if node scripts/watcher-runtime-verify.mjs --runtime "$RUNTIME" --rpc "$WATCHER_RPC_URL"; then
+                REUSE=1
+              fi
+            fi
+          fi
+
+          if [ "$REUSE" -eq 0 ]; then
+            WATCHER_PROGRAM_ID="$PROGRAM_ID" \
+            WATCHER_PAYER_KEYPAIR=/tmp/watcher-devnet-payer.json \
+            WATCHER_RPC_URL="$WATCHER_RPC_URL" \
+            WATCHER_PUBLIC_RPC_URL="$WATCHER_RPC_URL" \
+            WATCHER_PUBLIC_BASE_PATH="$WATCHER_PUBLIC_BASE_PATH" \
+            WATCHER_RUNTIME_OUT="$RUNTIME" \
+            node scripts/watcher-devnet-bootstrap.mjs \
+            | tee /tmp/watcher-persistent-bootstrap.log
+          fi
+
+          runtime_tmp=$(mktemp)
+          jq '. + {status: "ready"}' "$RUNTIME" > "$runtime_tmp"
+          mv "$runtime_tmp" "$RUNTIME"
+          node scripts/watcher-runtime-verify.mjs \
+            --runtime "$RUNTIME" \
+            --rpc "$WATCHER_RPC_URL" \
+            | tee /tmp/watcher-persistent-runtime-verification.json
+
+      - name: Run separate real devnet custody smoke test
+        if: ${{ inputs.run_e2e }}
+        env:
+          PROGRAM_ID: ${{ steps.deployment.outputs.program_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          WATCHER_PROGRAM_ID="$PROGRAM_ID" \
+          WATCHER_PAYER_KEYPAIR=/tmp/watcher-devnet-payer.json \
+          WATCHER_PROVER_URL=http://127.0.0.1:8090 \
+          WATCHER_DEVNET_RPC="$WATCHER_RPC_URL" \
+          WATCHER_RECOVERY_FILE=/tmp/watcher-persistent-e2e-recovery.json \
+          npm run e2e:watcher-devnet \
+          | tee /tmp/watcher-persistent-e2e.log
+          rm -f /tmp/watcher-persistent-e2e-recovery.json
+
+      - name: Publish immutable prover copy
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARCHIVE_SHA: ${{ steps.bundle.outputs.archive_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="watcher-devnet-prover-${ARCHIVE_SHA:0:16}"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            mkdir -p /tmp/watcher-release-check
+            gh release download "$TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --pattern 'watcher-development-prover-bundle.tar.gz' \
+              --dir /tmp/watcher-release-check
+            PUBLISHED_SHA=$(sha256sum /tmp/watcher-release-check/watcher-development-prover-bundle.tar.gz | awk '{print $1}')
+            if [ "$PUBLISHED_SHA" != "$ARCHIVE_SHA" ]; then
+              echo 'Immutable prover release tag already exists with different bytes.' >&2
+              exit 1
+            fi
+          else
+            gh release create "$TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --prerelease \
+              --title "Watcher persistent devnet prover ${ARCHIVE_SHA:0:16}" \
+              --notes "Immutable copy of the synchronized development Groth16 bundle for the persistent Watcher Solana devnet program. Never use with production funds." \
+              /tmp/watcher-sync-release/watcher-development-prover-bundle.tar.gz \
+              /tmp/watcher-sync-release/watcher-development-prover-bundle.tar.gz.sha256
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Seal runtime metadata and commit public deployment
+        env:
+          PROGRAM_ID: ${{ steps.deployment.outputs.program_id }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          ARCHIVE_SHA: ${{ steps.bundle.outputs.archive_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          RUNTIME=public/watcher-protocol/devnet.json
+          PROGRAM_SHA=$(awk '{print $1}' /tmp/watcher-program-sha256.txt)
+          UPDATED_AT=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+          TMP=$(mktemp)
+          jq \
+            --arg status ready \
+            --arg programId "$PROGRAM_ID" \
+            --arg proverReleaseTag "$RELEASE_TAG" \
+            --arg proverBundleSha256 "$ARCHIVE_SHA" \
+            --arg programSha256 "$PROGRAM_SHA" \
+            --arg sourceCommit "$GITHUB_SHA" \
+            --arg updatedAt "$UPDATED_AT" \
+            '. + {
+              status: $status,
+              programId: $programId,
+              proverReleaseTag: $proverReleaseTag,
+              proverBundleSha256: $proverBundleSha256,
+              programSha256: $programSha256,
+              sourceCommit: $sourceCommit,
+              updatedAt: $updatedAt
+            }' "$RUNTIME" > "$TMP"
+          mv "$TMP" "$RUNTIME"
+          node scripts/watcher-runtime-verify.mjs --runtime "$RUNTIME" --rpc "$WATCHER_RPC_URL"
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add public/watcher-protocol/devnet.json
+          if git diff --cached --quiet; then
+            echo 'Persistent runtime metadata is unchanged.'
+          else
+            git commit -m 'Publish persistent Watcher devnet runtime'
+            git push origin HEAD:watcher-protocol
+          fi
+
+      - name: Upload sanitized persistent deployment evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: watcher-persistent-devnet-evidence
+          path: |
+            /tmp/watcher-program-sha256.txt
+            /tmp/watcher-persistent-deploy.log
+            /tmp/watcher-persistent-bootstrap.log
+            /tmp/watcher-persistent-runtime-verification.json
+            /tmp/watcher-prover-health.json
+            /tmp/watcher-persistent-e2e.log
+            public/watcher-protocol/devnet.json
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Remove deployment keypairs
+        if: always()
+        run: rm -f /tmp/watcher-devnet-payer.json /tmp/watcher-devnet-program.json
