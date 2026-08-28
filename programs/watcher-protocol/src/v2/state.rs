@@ -112,7 +112,7 @@ impl ActiveTreeV2 {
         let cursor = self.recent_root_cursor as usize;
         self.recent_roots[cursor] = root;
         self.recent_root_cursor = ((cursor + 1) % RECENT_ROOT_CAPACITY_V2) as u8;
-        if self.recent_root_count as usize < RECENT_ROOT_CAPACITY_V2 {
+        if (self.recent_root_count as usize) < RECENT_ROOT_CAPACITY_V2 {
             self.recent_root_count += 1;
         }
     }
