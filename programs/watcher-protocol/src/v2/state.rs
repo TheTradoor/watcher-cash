@@ -99,9 +99,13 @@ impl ActiveTreeV2 {
     }
 
     fn retain_old_root(&mut self, root: [u8; 32]) {
-        if root == [0u8; 32]
-            || self.current_root == root
-            || self.accepts_recent_root(&root)
+        if root == [0u8; 32] {
+            return;
+        }
+        let count = self.recent_root_count as usize;
+        if self.recent_roots[..count.min(RECENT_ROOT_CAPACITY_V2)]
+            .iter()
+            .any(|candidate| *candidate == root)
         {
             return;
         }
