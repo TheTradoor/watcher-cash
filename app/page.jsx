@@ -224,12 +224,12 @@ export default function Home() {
   const protocolFee = BigInt(runtime?.protocolFeeLamports || '0');
   const relayerFee = BigInt(runtime?.relayerFeeLamports || '0');
   const withdrawPreview = useMemo(() => {
-    if (mode !== 'withdraw' || amountLamports === null) return null;
+    if (mode !== 'withdraw' || !unlocked || amountLamports === null) return null;
     if (!withdrawInputReady) {
       const noteWord = missingWithdrawNotes === 1 ? 'note' : 'notes';
       return {
         selection: null,
-        error: `Another withdrawal needs 2 confirmed notes. Deposit ${missingWithdrawNotes} more private ${noteWord} to continue.`,
+        error: `Withdrawal requires 2 confirmed notes. You have ${confirmedNotes.length}. Deposit ${missingWithdrawNotes} more ${noteWord} to continue.`,
         hint: true,
       };
     }
@@ -244,10 +244,12 @@ export default function Home() {
     }
   }, [
     mode,
+    unlocked,
     amountLamports,
     records,
     protocolFee,
     relayerFee,
+    confirmedNotes.length,
     missingWithdrawNotes,
     withdrawInputReady,
   ]);
@@ -748,8 +750,20 @@ export default function Home() {
         await unlockVault();
         return;
       }
-      if (mode === 'deposit') await executeDeposit();
-      else await executeWithdraw();
+      if (mode === 'deposit') {
+        await executeDeposit();
+        return;
+      }
+      if (!withdrawInputReady) {
+        const noteWord = missingWithdrawNotes === 1 ? 'note' : 'notes';
+        setMode('deposit');
+        setFeedback({
+          tone: 'info',
+          text: `Deposit ${missingWithdrawNotes} more private ${noteWord}, then return to Withdraw.`,
+        });
+        return;
+      }
+      await executeWithdraw();
     } catch (error) {
       if (!feedback || feedback.tone !== 'error') {
         setFeedback({ tone: 'error', text: friendlyError(error) });
@@ -760,6 +774,7 @@ export default function Home() {
     executeDeposit,
     executeWithdraw,
     feedback,
+    missingWithdrawNotes,
     mode,
     publicKey,
     runtimeMessage,
@@ -767,6 +782,7 @@ export default function Home() {
     setVisible,
     unlockVault,
     unlocked,
+    withdrawInputReady,
   ]);
 
   const discardPending = useCallback(async (record) => {
@@ -780,7 +796,6 @@ export default function Home() {
     }
   }, [busy, persistRecords, records]);
 
-  const withdrawBlocked = connected && unlocked && mode === 'withdraw' && !withdrawInputReady;
   const primaryLabel = busy
     ? actionStage || 'Working…'
     : !connected
@@ -792,8 +807,8 @@ export default function Home() {
           : withdrawInputReady
             ? 'Generate proof & withdraw'
             : missingWithdrawNotes === 1
-              ? 'Deposit 1 more note to withdraw again'
-              : 'Deposit 2 notes to enable withdrawal';
+              ? 'Deposit 1 more note'
+              : 'Deposit 2 notes';
 
   const capacity = runtime?.commitmentCapacity || 16;
   const capacityRemaining = Math.max(0, capacity - treeCount);
@@ -902,24 +917,30 @@ export default function Home() {
             </div>
           ) : null}
 
-          {mode === 'withdraw' && withdrawPreview ? (
-            <div className={`preview-card ${withdrawPreview.error && !withdrawPreview.hint ? 'preview-warning' : ''}`}>
-              {withdrawPreview.error ? (
+          {mode === 'withdraw' && unlocked && withdrawPreview ? (
+            withdrawPreview.hint ? (
+              <div className="feedback feedback-info withdraw-readiness">
                 <p>{withdrawPreview.error}</p>
-              ) : (
-                <>
-                  <div><span>Notes consumed</span><strong>2</strong></div>
-                  <div><span>Private change</span><strong>{formatSol(withdrawPreview.selection.changeAmount, 6)} SOL</strong></div>
-                  <div><span>Protocol fee</span><strong>{formatSol(protocolFee)} SOL</strong></div>
-                </>
-              )}
-            </div>
+              </div>
+            ) : (
+              <div className={`preview-card ${withdrawPreview.error ? 'preview-warning' : ''}`}>
+                {withdrawPreview.error ? (
+                  <p>{withdrawPreview.error}</p>
+                ) : (
+                  <>
+                    <div><span>Notes consumed</span><strong>2</strong></div>
+                    <div><span>Private change</span><strong>{formatSol(withdrawPreview.selection.changeAmount, 6)} SOL</strong></div>
+                    <div><span>Protocol fee</span><strong>{formatSol(protocolFee)} SOL</strong></div>
+                  </>
+                )}
+              </div>
+            )
           ) : null}
 
           <button
             type="button"
             className="primary-action"
-            disabled={Boolean(busy) || withdrawBlocked}
+            disabled={Boolean(busy)}
             onClick={handlePrimaryAction}
           >
             <span>{primaryLabel}</span>
@@ -962,7 +983,7 @@ export default function Home() {
             <div className="capacity-number"><strong>{treeCount}</strong><span>/ {capacity}</span></div>
             <div className="capacity-track"><span style={{ width: `${Math.min(100, (treeCount / capacity) * 100)}%` }} /></div>
             <p>Every deposit and withdrawal change appends one commitment. This V1 tree is intentionally small.</p>
-            <div className="side-data-row"><span>Spent nullifiers</span><strong>{nullifierCount}</strong></div>
+            <div className="side-data-row"><span>Spent nullifiers</span><strong>{unlocked ? nullifierCount : '—'}</strong></div>
           </div>
 
           <div className="side-card security-card">
