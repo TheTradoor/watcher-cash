@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Buffer } from 'buffer';
 import { useConnection, useWallet } from '@solana/wallet-adapter-react';
 import { useWalletModal, WalletMultiButton } from '@solana/wallet-adapter-react-ui';
@@ -36,6 +36,8 @@ const RUNTIME_URL = process.env.NEXT_PUBLIC_WATCHER_RUNTIME_URL || '/watcher-pro
 const DEFAULT_PROVER_BASE = process.env.NEXT_PUBLIC_WATCHER_PROVER_BASE || '/watcher-prover';
 const GROTH16_COMPUTE_UNITS = 1_400_000;
 const COMPUTE_UNIT_PRICE = 1_000;
+const BACKUP_FORMAT = 'watcher-cash-encrypted-vault-backup';
+const BACKUP_VERSION = 1;
 
 function parseSol(value) {
   const normalized = String(value || '').trim();
@@ -87,6 +89,32 @@ function explorerTransaction(signature) {
 
 function explorerAddress(address) {
   return `https://explorer.solana.com/address/${address}?cluster=devnet`;
+}
+
+function publicKeyHex(publicKey) {
+  if (!publicKey || typeof publicKey.toBytes !== 'function') return '';
+  return Array.from(publicKey.toBytes(), (value) => value.toString(16).padStart(2, '0')).join('');
+}
+
+function noteVaultStorageKey(publicKey, scope) {
+  const normalizedScope = String(scope || '').trim();
+  const keyHex = publicKeyHex(publicKey);
+  if (!normalizedScope || !keyHex) return '';
+  return `watcher-note-vault:v1:${normalizedScope}:${keyHex}`;
+}
+
+function validateBackupEnvelope(envelope) {
+  if (!envelope || typeof envelope !== 'object') {
+    throw new Error('Encrypted vault backup envelope is missing');
+  }
+  if (envelope.version !== 1) throw new Error('Unsupported encrypted vault backup version');
+  if (typeof envelope.iv !== 'string' || !envelope.iv) {
+    throw new Error('Encrypted vault backup IV is missing');
+  }
+  if (typeof envelope.ciphertext !== 'string' || !envelope.ciphertext) {
+    throw new Error('Encrypted vault backup ciphertext is missing');
+  }
+  return envelope;
 }
 
 function validateRuntime(value) {
@@ -162,6 +190,7 @@ export default function Home() {
     signTransaction,
   } = useWallet();
   const { setVisible } = useWalletModal();
+  const backupInputRef = useRef(null);
 
   const [runtime, setRuntime] = useState(null);
   const [runtimeStatus, setRuntimeStatus] = useState('loading');
@@ -191,6 +220,10 @@ export default function Home() {
 
   const walletAddress = publicKey?.toBase58() || '';
   const runtimeScope = runtime ? `${runtime.programId}:${runtime.config}` : '';
+  const localVaultStorageKey = useMemo(
+    () => noteVaultStorageKey(publicKey, runtimeScope),
+    [publicKey, runtimeScope],
+  );
   const runtimeKeys = useMemo(() => {
     if (!runtime) return null;
     try {
@@ -486,6 +519,108 @@ export default function Home() {
     setVisible,
     signMessage,
     syncPrivateState,
+  ]);
+
+  const exportEncryptedBackup = useCallback(() => {
+    try {
+      if (!unlocked || !publicKey || !runtimeScope || !localVaultStorageKey) {
+        throw new Error('Unlock the private vault before exporting a backup');
+      }
+      if (typeof window === 'undefined') throw new Error('Encrypted vault backup is unavailable');
+      const raw = window.localStorage.getItem(localVaultStorageKey);
+      if (!raw) throw new Error('No encrypted private vault exists on this device yet');
+      const envelope = validateBackupEnvelope(JSON.parse(raw));
+      const backup = {
+        format: BACKUP_FORMAT,
+        version: BACKUP_VERSION,
+        network: 'solana-devnet',
+        wallet: walletAddress,
+        scope: runtimeScope,
+        exportedAt: new Date().toISOString(),
+        ciphertextOnly: true,
+        envelope,
+      };
+      const blob = new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' });
+      const href = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      const date = new Date().toISOString().slice(0, 10);
+      anchor.href = href;
+      anchor.download = `watcher-cash-vault-${walletAddress.slice(0, 6)}-${date}.json`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      window.setTimeout(() => URL.revokeObjectURL(href), 0);
+      setFeedback({
+        tone: 'success',
+        text: 'Encrypted vault backup downloaded. The file contains ciphertext only; keep it private and store it safely.',
+      });
+    } catch (error) {
+      setFeedback({ tone: 'error', text: friendlyError(error) });
+    }
+  }, [localVaultStorageKey, publicKey, runtimeScope, unlocked, walletAddress]);
+
+  const restoreEncryptedBackup = useCallback(async (event) => {
+    const input = event.currentTarget;
+    const file = input.files?.[0];
+    input.value = '';
+    if (!file) return;
+    setFeedback(null);
+    try {
+      if (!unlocked || !vaultKey || !publicKey || !runtimeScope || !localVaultStorageKey) {
+        throw new Error('Unlock the private vault before restoring a backup');
+      }
+      setBusy('restore');
+      setActionStage('Validating encrypted vault backup…');
+      const backup = JSON.parse(await file.text());
+      if (backup?.format !== BACKUP_FORMAT || backup?.version !== BACKUP_VERSION) {
+        throw new Error('This file is not a supported Watcher Cash encrypted vault backup');
+      }
+      if (backup.network !== 'solana-devnet') {
+        throw new Error('Encrypted vault backup belongs to another network');
+      }
+      if (backup.wallet !== walletAddress) {
+        throw new Error('Encrypted vault backup belongs to another wallet');
+      }
+      if (backup.scope !== runtimeScope) {
+        throw new Error('Encrypted vault backup belongs to another protocol deployment');
+      }
+      const envelope = validateBackupEnvelope(backup.envelope);
+      const backupStorage = {
+        getItem(name) {
+          return name === localVaultStorageKey ? JSON.stringify(envelope) : null;
+        },
+      };
+      const imported = await loadNoteVaultV1({
+        storage: backupStorage,
+        key: vaultKey,
+        publicKey,
+        scope: runtimeScope,
+      });
+      let merged = imported;
+      for (const record of records) merged = upsertNoteRecordV1(merged, record);
+      setActionStage('Merging backup and syncing devnet state…');
+      const saved = await persistRecords(merged);
+      const synced = await syncPrivateState({ recordsOverride: saved, silent: true });
+      setFeedback({
+        tone: 'success',
+        text: `Encrypted vault backup restored and synced. ${synced.length} note record${synced.length === 1 ? '' : 's'} available.`,
+      });
+    } catch (error) {
+      setFeedback({ tone: 'error', text: friendlyError(error) });
+    } finally {
+      setBusy('');
+      setActionStage('');
+    }
+  }, [
+    localVaultStorageKey,
+    persistRecords,
+    publicKey,
+    records,
+    runtimeScope,
+    syncPrivateState,
+    unlocked,
+    vaultKey,
+    walletAddress,
   ]);
 
   const sendWatcherInstruction = useCallback(async (descriptor) => {
@@ -801,7 +936,7 @@ export default function Home() {
     : !connected
       ? 'Connect wallet'
       : !unlocked
-        ? 'Unlock private notes'
+        ? 'Unlock private vault'
         : mode === 'deposit'
           ? 'Generate proof & deposit'
           : withdrawInputReady
@@ -874,78 +1009,101 @@ export default function Home() {
             </button>
           </header>
 
-          <div className="mode-tabs" role="tablist">
-            <button type="button" className={mode === 'deposit' ? 'active' : ''} onClick={() => { setMode('deposit'); setFeedback(null); }}>
-              Deposit privately
-            </button>
-            <button type="button" className={mode === 'withdraw' ? 'active' : ''} onClick={() => { setMode('withdraw'); setFeedback(null); }}>
-              Withdraw
-            </button>
-          </div>
-
-          <div className="amount-card">
-            <label htmlFor="amount">{mode === 'deposit' ? 'Amount to privatize' : 'Amount recipient receives'}</label>
-            <div className="amount-input-row">
-              <input
-                id="amount"
-                inputMode="decimal"
-                autoComplete="off"
-                value={amount}
-                onChange={(event) => setAmount(event.target.value)}
-                placeholder="0.00"
-              />
-              <span>SOL</span>
+          {!unlocked ? (
+            <div className="locked-vault-state">
+              <span className="panel-kicker">PRIVATE ACTIONS LOCKED</span>
+              <h3>{connected ? 'Unlock your private vault' : 'Connect a wallet to continue'}</h3>
+              <p>
+                {connected
+                  ? 'One message signature decrypts the note inventory stored on this device. It does not create a transaction or move funds.'
+                  : 'Watcher Cash keeps note openings encrypted locally. Connect the wallet that owns this vault before any private action is shown.'}
+              </p>
+              <button
+                type="button"
+                className="primary-action"
+                disabled={Boolean(busy)}
+                onClick={handlePrimaryAction}
+              >
+                <span>{primaryLabel}</span>
+                <b>→</b>
+              </button>
             </div>
-            <div className="quick-values">
-              {['0.001', '0.01', '0.05', '0.1'].map((value) => (
-                <button type="button" key={value} onClick={() => setAmount(value)}>{value}</button>
-              ))}
-            </div>
-          </div>
-
-          {mode === 'withdraw' ? (
-            <div className="recipient-card">
-              <label htmlFor="recipient">Recipient</label>
-              <input
-                id="recipient"
-                value={recipient}
-                onChange={(event) => setRecipient(event.target.value)}
-                placeholder="Solana address"
-                autoComplete="off"
-              />
-              <button type="button" onClick={() => walletAddress && setRecipient(walletAddress)}>Use connected wallet</button>
-            </div>
-          ) : null}
-
-          {mode === 'withdraw' && unlocked && withdrawPreview ? (
-            withdrawPreview.hint ? (
-              <div className="feedback feedback-info withdraw-readiness">
-                <p>{withdrawPreview.error}</p>
+          ) : (
+            <>
+              <div className="mode-tabs" role="tablist">
+                <button type="button" className={mode === 'deposit' ? 'active' : ''} onClick={() => { setMode('deposit'); setFeedback(null); }}>
+                  Deposit privately
+                </button>
+                <button type="button" className={mode === 'withdraw' ? 'active' : ''} onClick={() => { setMode('withdraw'); setFeedback(null); }}>
+                  Withdraw
+                </button>
               </div>
-            ) : (
-              <div className={`preview-card ${withdrawPreview.error ? 'preview-warning' : ''}`}>
-                {withdrawPreview.error ? (
-                  <p>{withdrawPreview.error}</p>
+
+              <div className="amount-card">
+                <label htmlFor="amount">{mode === 'deposit' ? 'Amount to privatize' : 'Amount recipient receives'}</label>
+                <div className="amount-input-row">
+                  <input
+                    id="amount"
+                    inputMode="decimal"
+                    autoComplete="off"
+                    value={amount}
+                    onChange={(event) => setAmount(event.target.value)}
+                    placeholder="0.00"
+                  />
+                  <span>SOL</span>
+                </div>
+                <div className="quick-values">
+                  {['0.001', '0.01', '0.05', '0.1'].map((value) => (
+                    <button type="button" key={value} onClick={() => setAmount(value)}>{value}</button>
+                  ))}
+                </div>
+              </div>
+
+              {mode === 'withdraw' ? (
+                <div className="recipient-card">
+                  <label htmlFor="recipient">Recipient</label>
+                  <input
+                    id="recipient"
+                    value={recipient}
+                    onChange={(event) => setRecipient(event.target.value)}
+                    placeholder="Solana address"
+                    autoComplete="off"
+                  />
+                  <button type="button" onClick={() => walletAddress && setRecipient(walletAddress)}>Use connected wallet</button>
+                </div>
+              ) : null}
+
+              {mode === 'withdraw' && withdrawPreview ? (
+                withdrawPreview.hint ? (
+                  <div className="feedback feedback-info withdraw-readiness">
+                    <p>{withdrawPreview.error}</p>
+                  </div>
                 ) : (
-                  <>
-                    <div><span>Notes consumed</span><strong>2</strong></div>
-                    <div><span>Private change</span><strong>{formatSol(withdrawPreview.selection.changeAmount, 6)} SOL</strong></div>
-                    <div><span>Protocol fee</span><strong>{formatSol(protocolFee)} SOL</strong></div>
-                  </>
-                )}
-              </div>
-            )
-          ) : null}
+                  <div className={`preview-card ${withdrawPreview.error ? 'preview-warning' : ''}`}>
+                    {withdrawPreview.error ? (
+                      <p>{withdrawPreview.error}</p>
+                    ) : (
+                      <>
+                        <div><span>Notes consumed</span><strong>2</strong></div>
+                        <div><span>Private change</span><strong>{formatSol(withdrawPreview.selection.changeAmount, 6)} SOL</strong></div>
+                        <div><span>Protocol fee</span><strong>{formatSol(protocolFee)} SOL</strong></div>
+                      </>
+                    )}
+                  </div>
+                )
+              ) : null}
 
-          <button
-            type="button"
-            className="primary-action"
-            disabled={Boolean(busy)}
-            onClick={handlePrimaryAction}
-          >
-            <span>{primaryLabel}</span>
-            <b>→</b>
-          </button>
+              <button
+                type="button"
+                className="primary-action"
+                disabled={Boolean(busy)}
+                onClick={handlePrimaryAction}
+              >
+                <span>{primaryLabel}</span>
+                <b>→</b>
+              </button>
+            </>
+          )}
 
           {actionStage ? <div className="action-stage"><span className="spinner" />{actionStage}</div> : null}
           {feedback ? (
@@ -999,12 +1157,32 @@ export default function Home() {
       </section>
 
       <section className="records-section">
-        <div className="section-heading">
+        <div className="section-heading records-heading">
           <div>
             <span className="panel-kicker">LOCAL NOTE INVENTORY</span>
             <h2>Encrypted records</h2>
           </div>
-          <p>Clearing browser storage without a backup can make private notes unrecoverable.</p>
+          <div className="records-heading-actions">
+            <p>Clearing browser storage without a backup can make private notes unrecoverable.</p>
+            {unlocked ? (
+              <div className="backup-actions">
+                <button type="button" className="secondary-action" disabled={Boolean(busy)} onClick={exportEncryptedBackup}>
+                  Export encrypted backup
+                </button>
+                <button type="button" className="secondary-action" disabled={Boolean(busy)} onClick={() => backupInputRef.current?.click()}>
+                  Restore backup
+                </button>
+                <input
+                  id="vault-backup-input"
+                  ref={backupInputRef}
+                  className="backup-file-input"
+                  type="file"
+                  accept="application/json,.json"
+                  onChange={restoreEncryptedBackup}
+                />
+              </div>
+            ) : null}
+          </div>
         </div>
         {!unlocked ? (
           <button type="button" className="empty-state" onClick={handlePrimaryAction}>
