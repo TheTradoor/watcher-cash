@@ -2,166 +2,223 @@
 
 Status: **isolated development branch**. V1 remains the live devnet implementation.
 
-V2 exists to remove two prototype constraints without pretending that increasing a constant alone is scalability:
+V2 removes two prototype limits without pretending that changing one constant is scalability:
 
-1. V1 has a fixed 16-leaf Merkle tree and a flat commitment registry.
-2. V1 withdrawals require exactly two confirmed input notes and always create private change.
+1. V1 has a fixed 16-leaf Merkle tree plus flat commitment/nullifier registries.
+2. V1 withdrawals require exactly two confirmed notes and always create private change.
 
 ## Circuit baseline
 
 V2 currently targets:
 
 - BN254 / Groth16
-- MiMC note, nullifier and Merkle hashing compatible with V1 note openings
-- Merkle depth: `16`
-- commitments per tree epoch: `65,536`
-- withdrawal input slots: `1..4`
+- V1-compatible MiMC note/nullifier/Merkle primitives
+- Merkle depth `16`
+- `65,536` commitments per tree epoch
+- `1..4` withdrawal inputs
 - one accepted membership root per active input
 - optional private change
 
-Keeping the V1 note commitment/nullifier primitive is intentional. A V1 private opening can be inserted into a V2 migration tree without changing the user's owner/nonce secrets. V2 changes the spend statement and tree architecture, not the existing note primitive.
+Keeping the V1 note primitive is intentional. A V1 note opening can be inserted into a V2 migration tree without changing the user's owner/nonce secrets. V2 changes the spend statement and state architecture, not the private note opening itself.
 
-## Why epochs instead of one giant registry
+## Epochs instead of one giant registry
 
-A 65,536-leaf tree must **not** be represented by a Solana account containing 65,536 raw commitments. That would simply replace the old capacity limit with an account-size/rent problem.
+A 65,536-leaf tree must **not** mean a Solana account containing 65,536 raw commitments. That would only move the prototype limit into account size and rent.
 
-V2 is designed around bounded tree epochs:
+V2 uses bounded epochs:
 
 - one active depth-16 tree accepts new commitments;
-- when it reaches 65,536 leaves, its final root is sealed;
-- a new active epoch begins at leaf `0`;
-- sealed roots remain valid spend roots;
-- a withdrawal may consume notes from different accepted roots/epochs.
+- after 65,536 leaves, its final root is sealed;
+- the next active epoch starts again at leaf `0`;
+- sealed roots remain spendable;
+- one withdrawal may consume notes from different accepted roots/epochs.
 
-The circuit therefore exposes four independent `InputRoots` rather than one shared spend root.
+The circuit exposes four independent `InputRoots` instead of one shared spend root.
 
-### Active-tree state
+## Compact active-tree state
 
-The intended on-chain active-tree account is compact:
+The current Rust V2 state model stores:
 
 - state version
-- epoch number
+- config pubkey
+- epoch
 - next leaf index
 - current root
-- depth
-- incremental Merkle frontier / zero-node metadata
+- a 16-entry recent-root ring
 
-It does **not** need the full leaf set in one account.
+Total serialized size: **591 bytes**.
 
-Clients or indexers reconstruct membership paths from the public commitment stream. The browser implementation already has a sparse V2 tree that stores populated nodes only, so memory scales with observed commitments instead of the theoretical 65,536-leaf capacity.
+There is no 65,536-element commitment array and no on-chain Merkle frontier. The Groth16 append proof already binds old root, new root and leaf index. The program only needs to check that the proof's old root/index equal the exact active state before accepting the new root.
 
-## Root acceptance
+Clients/indexers reconstruct membership paths from the public commitment stream. The browser/client V2 implementation uses a sparse tree, so memory grows with observed commitments rather than theoretical capacity.
 
-V2 needs two root classes:
+## Root lifetime
 
-### Active roots
+V2 has two root classes.
 
-A small bounded ring of recent active-tree roots remains useful for race tolerance. A proof generated immediately before another deposit should not become invalid just because one new leaf landed first.
+### Recent active roots
+
+The active account retains a bounded ring of recent roots. This gives normal proof-generation race tolerance when another append lands just before a spend proof.
 
 ### Sealed roots
 
-The final root of a completed epoch must remain spendable beyond the active-root ring. A sealed-root account or directory entry is therefore permanent protocol state until an explicit migration mechanism exists.
+A completed epoch gets a permanent compact sealed-root record. The current serialized record is **77 bytes** and contains config, epoch, final root and leaf count.
 
-This prevents old private notes from becoming stranded when the active root history rotates.
+A spend root is accepted when it is either:
 
-## Variable input withdrawals
+- the current/recent active root; or
+- present in a valid sealed-root record for the same protocol config.
 
-`CircuitV2` has four bounded input slots. Each slot has a private `enabled` bit.
+This prevents old notes from becoming stranded when the recent-root ring rotates.
+
+## Variable-input withdrawals
+
+`CircuitV2` has four bounded input slots with private `enabled` bits.
 
 Rules:
 
-- enabled slots form a compact prefix;
-- `InputCount` is public and equals the number of enabled slots;
-- inactive slots expose zero public roots/nullifiers and carry zero value;
-- each active note proves membership in its own public root;
-- each active note produces one public nullifier;
-- active nullifiers must be unique inside the proof;
+- enabled inputs form a compact prefix;
+- `InputCount` is public and equals the enabled count;
+- inactive roots/nullifiers are canonical zero sentinels;
+- every active note proves membership in its own public root;
+- every active note exposes one public nullifier;
+- active nullifiers must be unique inside one proof;
 - value conservation covers public amount, protocol fee, relayer fee and optional private change.
 
-This supports:
+This supports one-note exact withdrawals, the existing two-note case, three/four-note aggregation and notes from different sealed epochs.
 
-- one-note withdrawals;
-- the existing two-note pattern;
-- three/four-note aggregation;
-- notes originating in different sealed epochs.
+Four is intentionally bounded so browser proving, verifier public-input size and transaction accounts remain predictable.
 
-The maximum remains bounded at four so proving time, public-input size and Solana transaction size remain predictable.
+## Exact withdrawal vs change withdrawal
 
-## Optional change
+V1 forces positive change. V2 does not.
 
-V1 always requires positive private change, which creates awkward cases where an exact-value note cannot be withdrawn by itself.
+### Exact / no-change
 
-V2 adds a private `ChangeEnabled` bit:
+When `ChangeCommitment == 0`:
 
-- enabled: `ChangeCommitment != 0`, value must be positive, and the proof binds an append transition into the exact current active root;
-- disabled: `ChangeCommitment == 0`, change amount is zero, `NewMerkleRoot == CurrentRoot`, and no new leaf is consumed.
+- change amount is zero;
+- `CurrentRoot == 0`;
+- `NewMerkleRoot == 0`;
+- `ChangeLeafIndex == 0`;
+- no active-tree state is mutated.
 
-The client selector prefers an exact combination by default because it avoids another commitment and saves tree capacity. A caller can instead prefer fewer inputs and accept a change note.
+The zero append-state is deliberate. An exact withdrawal is therefore **not invalidated by a concurrent deposit**, because it has no dependency on the active append root.
+
+### Change-producing withdrawal
+
+When private change exists:
+
+- change amount/owner/nonce are positive;
+- `ChangeCommitment != 0`;
+- the proof binds the exact current active root;
+- the change leaf index equals the current `next_index`;
+- the proof binds the resulting new root;
+- successful verification advances the active tree by one leaf.
+
+The client selector prefers an exact note combination by default to avoid another commitment and avoid append contention. Callers can instead prefer fewer inputs and accept a change note.
 
 ## Deposit V2
 
-`DepositCircuitV2` uses the same depth-16 append transition and adds public:
+`DepositCircuitV2` uses the same depth-16 append transition and publicly binds:
 
-- `Epoch`
-- `ContextBinding`
+- commitment
+- amount
+- asset
+- epoch
+- context
+- old root
+- new root
+- leaf index
 
-The program will compute the expected active epoch/context and reject a proof whose public statement does not match current protocol state.
+The first append of a fresh epoch keeps the V1 zero-root sentinel and is bound to the deterministic empty-tree sibling path.
 
-The zero-root sentinel is retained for the first append of a fresh epoch. The circuit binds that first append to the deterministic empty-tree path.
+## Compact Solana instruction wire
+
+V2 does **not** send a second raw public-input blob in the transaction.
+
+A V2 withdrawal has 19 Groth16 public fields, which would be `608` bytes by itself. Sending those bytes in addition to statement data and a 256-byte proof would waste packet budget; Address Lookup Tables only compress account keys, not instruction data.
+
+Instead, the instruction sends the compact statement once and the program reconstructs the exact public-input array from trusted state.
+
+Current fixed sizes:
+
+- V2 deposit instruction: **329 bytes**
+- V2 four-input withdrawal instruction: **634 bytes**
+- reconstructed deposit public inputs: `8 × 32 = 256` bytes internally
+- reconstructed withdrawal public inputs: `19 × 32 = 608` bytes internally
+
+The reconstructed values include active epoch/root/index, V2 context binding, recipient binding and asset ID, so those values cannot be client-substituted without invalidating verification.
 
 ## Nullifier scalability
 
-The V1 flat nullifier registry also cannot grow indefinitely.
+V1 keeps spent nullifiers in one flat bounded registry. V2 cannot retain that design.
 
-The V2 program should not ship until nullifier persistence is moved out of one flat account. The current preferred design is a bounded bucket/page layout derived from nullifier prefix bits:
+The current phase-1 V2 Rust model uses a deterministic **zero-data PDA marker per spent nullifier**:
 
-- deterministic bucket PDA from a nullifier prefix;
-- bounded entries per page;
-- chained overflow pages only when required;
-- permanent membership once a nullifier is spent;
-- at most four nullifier lookups/inserts per V2 withdrawal.
+- PDA seeds include protocol config + full nullifier;
+- a zero nullifier has no valid marker;
+- existence of the program-created PDA means spent;
+- lookup is O(1);
+- there is no fixed global registry capacity;
+- one withdrawal needs at most four markers.
 
-A one-PDA-per-nullifier design is simpler but has poor rent overhead, so it is not the default production direction.
+This is correctness-first and removes the V1 capacity ceiling immediately. The tradeoff is rent/account overhead per spent nullifier. A compressed nullifier-set design can replace marker persistence later without changing the circuit statement.
 
 ## Concurrency boundary
 
-Epochs solve capacity, not global append contention. Deposits and change-producing withdrawals still transition one active root and can race with each other.
+Epochs solve capacity; they do not magically parallelize append state.
 
-V2 phase 1 intentionally keeps this serial append model because it is easier to reason about and audit. Parallel tree shards are a later protocol change and should not be mixed into the first migration.
+- deposits serialize on the active tree;
+- change-producing withdrawals serialize on the active tree;
+- exact withdrawals do **not** touch the active tree and can proceed independently.
+
+Parallel tree shards are a later protocol change and are intentionally not mixed into the first V2 migration.
 
 ## Migration strategy
 
 V1 stays untouched while V2 is developed.
 
-Proposed migration sequence:
+Proposed devnet migration sequence:
 
-1. Freeze the V1 commitment snapshot at an announced devnet migration point.
-2. Insert the same V1 commitment values into a V2 migration epoch in the same order.
-3. Publish the resulting V2 root and reproducible migration manifest.
-4. Wallets retain their existing owner/nonce note openings.
-5. V2 clients resolve the migrated commitment index and build a depth-16 membership path.
-6. Only after circuit, program, browser prover and real-wallet devnet tests pass should the V1 interface be pointed at V2.
+1. Freeze a reproducible V1 commitment snapshot.
+2. Insert the same commitment values into a V2 migration epoch in the same order.
+3. Publish its V2 root, leaf mapping and migration manifest.
+4. Wallets keep existing owner/nonce note openings.
+5. V2 clients resolve the migrated commitment index and build a depth-16 path.
+6. Deploy V2 to separate devnet accounts/program state.
+7. Run local-validator E2E and then real Phantom/public-devnet acceptance tests.
+8. Only then point the user-facing interface at V2.
 
-No V1 deployment/account is overwritten during development.
+No V1 deployment/account is overwritten during V2 development.
 
 ## Current implementation boundary
 
 Implemented on `watcher-protocol-v2`:
 
 - depth-16 deposit circuit;
-- 1..4 input withdrawal circuit;
+- 1..4-input withdrawal circuit;
 - per-input roots;
-- optional change;
+- exact withdrawals without private change;
+- exact withdrawals decoupled from active append races;
 - sparse browser/client Merkle tree;
-- bounded deterministic note selection.
+- bounded deterministic note selection;
+- compact V2 Rust instruction codec;
+- program-side public-input reconstruction;
+- 591-byte active-tree state + recent-root ring;
+- 77-byte sealed-root records;
+- scalable phase-1 nullifier marker addressing;
+- isolated V2 CI.
 
-Not yet wired into the live program:
+Not yet wired into a V2 processor/deployment:
 
-- V2 instruction codec/public-input decoder;
-- compact active-tree account/frontier;
-- sealed epoch root accounts;
-- scalable nullifier buckets;
-- V2 setup/proving bundle and browser WASM;
+- V2 Groth16 setup/verifier key bundle;
+- V2 verifier functions;
+- V2 account initialization / processor instructions;
+- nullifier-marker creation CPI;
+- epoch sealing/rotation instruction;
+- browser prover/WASM V2 bundle;
+- isolated V2 local-validator E2E;
 - V2 devnet deployment/migration.
 
 V1 remains the current working devnet implementation until those boundaries are complete and independently regression-tested.
