@@ -2,8 +2,8 @@
 
 Status: LIVE
 Branch: watcher-protocol
-Commit: 13fff432603b63fe31fff0c9d96767985f830123
-Pages workflow run: 33199120578
+Commit: 5832ed3e1a142b75bbd284f0ddc327801bee1108
+Pages workflow run: 33200058234
 URL: https://thetradoor.github.io/watcher-cash/
 
 Deployment includes:
