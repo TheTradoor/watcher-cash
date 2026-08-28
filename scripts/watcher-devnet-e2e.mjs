@@ -3,6 +3,7 @@
 import { readFile, writeFile, chmod } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
 import {
+  AddressLookupTableProgram,
   ComputeBudgetProgram,
   Connection,
   Keypair,
@@ -10,6 +11,8 @@ import {
   SystemProgram,
   Transaction,
   TransactionInstruction,
+  TransactionMessage,
+  VersionedTransaction,
   sendAndConfirmTransaction,
 } from '@solana/web3.js';
 import {
@@ -27,6 +30,7 @@ import {
 
 const MAINNET_GENESIS = '5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d';
 const GROTH16_COMPUTE_UNITS_V1 = 1_400_000;
+const MAX_TRANSACTION_BYTES = 1232;
 const rpcURL = process.env.WATCHER_DEVNET_RPC || 'https://api.devnet.solana.com';
 const proverEndpoint = process.env.WATCHER_PROVER_URL || 'http://127.0.0.1:8090';
 const recoveryPath = process.env.WATCHER_RECOVERY_FILE || '.watcher-devnet-recovery.json';
@@ -66,6 +70,10 @@ function groth16ComputeBudgetInstruction() {
   return ComputeBudgetProgram.setComputeUnitLimit({ units: GROTH16_COMPUTE_UNITS_V1 });
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function send(connection, payer, instructions, extraSigners = []) {
   const transaction = new Transaction().add(...instructions);
   return sendAndConfirmTransaction(
@@ -74,6 +82,63 @@ async function send(connection, payer, instructions, extraSigners = []) {
     [payer, ...extraSigners],
     { commitment: 'confirmed', preflightCommitment: 'confirmed' },
   );
+}
+
+async function createLookupTable(connection, payer, addresses) {
+  const recentSlot = await connection.getSlot('confirmed');
+  const [createInstruction, lookupTableAddress] = AddressLookupTableProgram.createLookupTable({
+    authority: payer.publicKey,
+    payer: payer.publicKey,
+    recentSlot,
+  });
+  const extendInstruction = AddressLookupTableProgram.extendLookupTable({
+    authority: payer.publicKey,
+    payer: payer.publicKey,
+    lookupTable: lookupTableAddress,
+    addresses,
+  });
+  const signature = await send(connection, payer, [createInstruction, extendInstruction]);
+
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    const [{ value: table }, currentSlot] = await Promise.all([
+      connection.getAddressLookupTable(lookupTableAddress, { commitment: 'confirmed' }),
+      connection.getSlot('confirmed'),
+    ]);
+    if (
+      table
+      && table.state.addresses.length >= addresses.length
+      && currentSlot > Number(table.state.lastExtendedSlot)
+    ) {
+      return { table, address: lookupTableAddress, signature };
+    }
+    await sleep(500);
+  }
+  throw new Error(`lookup table ${lookupTableAddress.toBase58()} did not become active`);
+}
+
+async function sendVersioned(connection, payer, instructions, lookupTable) {
+  const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
+  const message = new TransactionMessage({
+    payerKey: payer.publicKey,
+    recentBlockhash: blockhash,
+    instructions,
+  }).compileToV0Message([lookupTable]);
+  const transaction = new VersionedTransaction(message);
+  transaction.sign([payer]);
+  const serializedLength = transaction.serialize().length;
+  if (serializedLength > MAX_TRANSACTION_BYTES) {
+    throw new Error(`v0 withdrawal transaction too large: ${serializedLength} > ${MAX_TRANSACTION_BYTES}`);
+  }
+  console.log(`v0 withdrawal transaction size: ${serializedLength}/${MAX_TRANSACTION_BYTES} bytes`);
+  const signature = await connection.sendTransaction(transaction, {
+    maxRetries: 5,
+    preflightCommitment: 'confirmed',
+  });
+  await connection.confirmTransaction(
+    { signature, blockhash, lastValidBlockHeight },
+    'confirmed',
+  );
+  return signature;
 }
 
 function accountSnapshot(accounts) {
@@ -275,10 +340,30 @@ async function main() {
   if (withdrawal.bundleDigest !== recovery.bundleDigest) {
     throw new Error('local prover bundle changed before withdrawal');
   }
-  const withdrawalTx = await send(
+
+  const lookupAddresses = [
+    config.publicKey,
+    commitments.publicKey,
+    nullifiers.publicKey,
+    rootHistory.publicKey,
+    vault,
+    recipient.publicKey,
+    relayer.publicKey,
+    treasury.publicKey,
+  ];
+  const lookupTable = await createLookupTable(connection, payer, lookupAddresses);
+  recovery.lookupTable = {
+    address: lookupTable.address.toBase58(),
+    createAndExtendTransaction: lookupTable.signature,
+  };
+  await writeRecovery(recovery);
+  console.log(`Withdrawal lookup table: ${lookupTable.address.toBase58()}`);
+
+  const withdrawalTx = await sendVersioned(
     connection,
     payer,
     [groth16ComputeBudgetInstruction(), transactionInstruction(withdrawal.instruction)],
+    lookupTable.table,
   );
   recovery.status = 'withdraw-confirmed';
   recovery.transactions.withdraw = withdrawalTx;
@@ -319,6 +404,7 @@ async function main() {
     clusterGenesis: genesis,
     accounts: recovery.accounts,
     transactions: recovery.transactions,
+    lookupTable: recovery.lookupTable,
     result: recovery.result,
     recoveryFile: recoveryPath,
   }, null, 2));
