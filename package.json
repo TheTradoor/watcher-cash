@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "description": "Watcher Protocol privacy interface for Solana.",
   "private": true,
+  "packageManager": "npm@11.17.0",
   "engines": {
     "node": "24.x"
   },
