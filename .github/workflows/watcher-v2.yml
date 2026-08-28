@@ -11,6 +11,8 @@ on:
       - 'client/watcher/merkle-v2.mjs'
       - 'client/watcher/selection-v2.mjs'
       - 'client/watcher/v2.test.mjs'
+      - 'programs/watcher-protocol/src/v2/**'
+      - 'programs/watcher-protocol/src/lib.rs'
       - 'WATCHER_PROTOCOL_V2.md'
       - '.github/workflows/watcher-v2.yml'
   workflow_dispatch:
@@ -44,3 +46,12 @@ jobs:
           node-version: '24.x'
       - name: Test sparse Merkle tree and bounded note selection
         run: node --test client/watcher/v2.test.mjs
+
+  v2-program:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Test compact V2 codec, public-input reconstruction, roots and nullifier markers
+        run: cargo test --manifest-path programs/watcher-protocol/Cargo.toml --lib --locked 'v2::'
