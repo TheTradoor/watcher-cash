@@ -2,7 +2,8 @@ package withdraw
 
 import (
 	"fmt"
-	"math/big"
+	"os"
+	"path/filepath"
 	"sync"
 
 	"github.com/consensys/gnark/backend/groth16"
@@ -163,8 +164,6 @@ type withdrawWitnessJSONV2 struct {
 	NewMerkleRoot    decimalV1 `json:"NewMerkleRoot"`
 	ChangeLeafIndex  decimalV1 `json:"ChangeLeafIndex"`
 }
-
-func zeroBig() *big.Int { return new(big.Int) }
 
 func withdrawAssignmentFromJSONV2(data []byte) (CircuitV2, error) {
 	var encoded withdrawWitnessJSONV2
@@ -403,7 +402,3 @@ func (bundle *ProverBundleV2) ProveWithdrawJSON(data []byte) (ProofResponseV1, e
 	}
 	return response, nil
 }
-
-// Silence staticcheck false-positive in js/wasm builds when only zero values are
-// needed while parsing disabled proof slots.
-var _ = zeroBig
