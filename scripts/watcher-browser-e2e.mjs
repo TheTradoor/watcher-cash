@@ -125,6 +125,15 @@ async function main() {
     await waitForText(page.locator('.vault-panel'), '1 confirmed notes · 0 pending', 'final note inventory');
     await waitForExactText(page.locator('.capacity-card .capacity-number strong'), '3', 'final commitment count');
     await waitForExactText(page.locator('.capacity-card .side-data-row strong'), '2', 'final nullifier count');
+    await waitForText(
+      page.locator('.preview-card'),
+      'Another withdrawal needs 2 confirmed notes. Deposit 1 more private note to continue.',
+      'post-withdraw guidance',
+    );
+    await waitForText(primary, 'Deposit 1 more note to withdraw again', 'post-withdraw button label');
+    if (!(await primary.isDisabled())) {
+      fail('post-withdraw UX regression: withdrawal button should be disabled with only one confirmed note');
+    }
 
     // The encrypted inventory intentionally retains spent notes as local history.
     // After two deposits and one two-input withdrawal it should contain two spent
@@ -147,7 +156,7 @@ async function main() {
 
     console.log(JSON.stringify({
       status: 'pass',
-      flow: ['connect', 'unlock', 'deposit', 'deposit', 'withdraw-v0-alt', 'sync'],
+      flow: ['connect', 'unlock', 'deposit', 'deposit', 'withdraw-v0-alt', 'sync', 'post-withdraw-guidance'],
       lookupTableAddress,
       final: {
         privateBalanceSol: '0.01',
@@ -156,6 +165,7 @@ async function main() {
         pendingNotes: 0,
         commitmentCount: 3,
         spentNullifiers: 2,
+        withdrawalBlockedUntilSecondNote: true,
       },
     }, null, 2));
   } catch (error) {
