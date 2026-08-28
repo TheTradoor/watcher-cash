@@ -1,0 +1,85 @@
+name: Inspect Confirmed Watcher Transaction
+
+on:
+  push:
+    branches: [watcher-protocol]
+    paths:
+      - '.github/workflows/inspect-confirmed-watcher-transaction.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Query the confirmed transaction on Solana clusters
+        shell: bash
+        env:
+          TX_SIGNATURE: sYn5CnUrR8o1RdkBGFeE1bKiv1Kc6kc7LM5m6pt9zoTZSrofX1AjZEH42YXrEqvLoKdA1z6FyP2rgKAEaTE79mw
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+
+          query_cluster() {
+            local cluster="$1"
+            local rpc="$2"
+            local output="evidence/${cluster}.json"
+
+            payload=$(jq -n \
+              --arg signature "$TX_SIGNATURE" \
+              '{
+                jsonrpc: "2.0",
+                id: 1,
+                method: "getTransaction",
+                params: [
+                  $signature,
+                  {
+                    encoding: "jsonParsed",
+                    commitment: "finalized",
+                    maxSupportedTransactionVersion: 0
+                  }
+                ]
+              }')
+
+            curl --fail --silent --show-error \
+              --retry 5 \
+              --retry-delay 2 \
+              --header 'content-type: application/json' \
+              --data "$payload" \
+              "$rpc" > "$output"
+
+            jq '{
+              cluster: $cluster,
+              rpcError: .error,
+              found: (.result != null),
+              slot: .result.slot,
+              blockTime: .result.blockTime,
+              fee: .result.meta.fee,
+              err: .result.meta.err,
+              signatures: .result.transaction.signatures,
+              accountKeys: .result.transaction.message.accountKeys,
+              instructions: .result.transaction.message.instructions,
+              innerInstructions: .result.meta.innerInstructions,
+              logMessages: .result.meta.logMessages,
+              preBalances: .result.meta.preBalances,
+              postBalances: .result.meta.postBalances
+            }' --arg cluster "$cluster" "$output" > "evidence/${cluster}-summary.json"
+          }
+
+          query_cluster devnet https://api.devnet.solana.com
+          query_cluster mainnet-beta https://api.mainnet-beta.solana.com
+
+          jq -s '.' evidence/devnet-summary.json evidence/mainnet-beta-summary.json \
+            > evidence/cluster-summary.json
+          cat evidence/cluster-summary.json
+
+      - name: Upload transaction evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: confirmed-watcher-transaction-evidence
+          path: evidence/
+          if-no-files-found: error
+          retention-days: 14
