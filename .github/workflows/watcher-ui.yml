@@ -4,26 +4,25 @@ on:
   push:
     branches: [watcher-protocol]
     paths:
-      - 'app/watcher-protocol-page.jsx'
-      - 'app/page.module.css'
-      - 'app/page.jsx'
+      - 'app/**'
       - 'client/watcher/**'
-      - 'public/watcher-prover-worker.js'
-      - 'circuits/withdraw/prover_bundle_bytes.go'
-      - 'circuits/withdraw/cmd/watcher-prover-wasm/**'
+      - 'circuits/withdraw/**'
       - 'scripts/prepare-browser-prover.sh'
+      - 'scripts/test-browser-prover-wasm.mjs'
       - '.github/workflows/watcher-ui.yml'
       - '.github/workflows/pages.yml'
       - 'package.json'
+      - 'next.config.mjs'
   pull_request:
     paths:
       - 'app/**'
       - 'client/watcher/**'
-      - 'public/watcher-prover-worker.js'
       - 'circuits/withdraw/**'
       - 'scripts/prepare-browser-prover.sh'
+      - 'scripts/test-browser-prover-wasm.mjs'
       - '.github/workflows/watcher-ui.yml'
       - 'package.json'
+      - 'next.config.mjs'
 
 permissions:
   contents: read
@@ -31,6 +30,7 @@ permissions:
 jobs:
   browser-ui:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -50,8 +50,11 @@ jobs:
       - name: Test Watcher browser modules
         run: node --test client/watcher/*.test.mjs
 
-      - name: Validate worker syntax
-        run: node --check public/watcher-prover-worker.js
+      - name: Validate permanent worker and controller syntax
+        run: |
+          node --check client/watcher/browser-prover.worker.js
+          node --check client/watcher/browser-prover.mjs
+          node --check client/watcher/ui-flows.mjs
 
       - name: Test Go prover packages
         working-directory: circuits/withdraw
@@ -59,7 +62,9 @@ jobs:
 
       - name: Build Watcher prover WebAssembly
         working-directory: circuits/withdraw
-        run: GOOS=js GOARCH=wasm go build -trimpath -o /tmp/watcher-prover.wasm ./cmd/watcher-prover-wasm
+        run: |
+          GOOS=js GOARCH=wasm go build -trimpath -o /tmp/watcher-prover.wasm ./cmd/watcher-prover-wasm
+          test -s /tmp/watcher-prover.wasm
 
       - name: Build static browser UI
         env:
