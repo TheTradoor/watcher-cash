@@ -1,0 +1,46 @@
+name: Watcher Protocol V2 CI
+
+on:
+  push:
+    branches: [watcher-protocol-v2]
+    paths:
+      - 'circuits/withdraw/circuit_v2.go'
+      - 'circuits/withdraw/circuit_v2_test.go'
+      - 'circuits/withdraw/deposit_v2.go'
+      - 'circuits/withdraw/deposit_v2_test.go'
+      - 'client/watcher/merkle-v2.mjs'
+      - 'client/watcher/selection-v2.mjs'
+      - 'client/watcher/v2.test.mjs'
+      - 'WATCHER_PROTOCOL_V2.md'
+      - '.github/workflows/watcher-v2.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  v2-circuit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: circuits/withdraw
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+          cache-dependency-path: circuits/withdraw/go.sum
+      - name: Test V2 deposit and variable-input withdrawal circuits
+        run: go test -v -run '^(TestCircuitV2|TestDepositCircuitV2)' .
+
+  v2-client:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.x'
+      - name: Test sparse Merkle tree and bounded note selection
+        run: node --test client/watcher/v2.test.mjs
