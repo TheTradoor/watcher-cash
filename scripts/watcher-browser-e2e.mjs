@@ -5,6 +5,9 @@ import { chromium } from 'playwright';
 
 const url = String(process.env.WATCHER_E2E_URL || 'http://127.0.0.1:3000/').trim();
 const timeout = Number(process.env.WATCHER_E2E_TIMEOUT_MS || 300_000);
+const WALLET_STORAGE_KEY = 'watcher-cash:walletName:v1';
+const LEGACY_WALLET_STORAGE_KEY = 'walletName';
+const E2E_WALLET_NAME = 'Watcher E2E Wallet';
 
 function fail(message) {
   throw new Error(message);
@@ -53,9 +56,19 @@ async function waitForCount(locator, expected, label) {
 async function connectE2eWallet(page) {
   const walletButton = page.locator('nav.topbar .wallet-adapter-button').first();
   await walletButton.click({ timeout });
-  const e2eWalletButton = page.getByRole('button', { name: /Watcher E2E Wallet/i }).last();
-  await e2eWalletButton.waitFor({ state: 'visible', timeout });
-  await e2eWalletButton.click();
+  const primaryWallet = page.getByRole('button', { name: E2E_WALLET_NAME, exact: true }).last();
+  const alternateWallet = page.getByRole('button', { name: 'Watcher E2E Alternate Wallet', exact: true }).last();
+  await primaryWallet.waitFor({ state: 'visible', timeout });
+  await alternateWallet.waitFor({ state: 'visible', timeout });
+  await primaryWallet.click();
+  await page.waitForFunction(
+    ({ key, legacy, wallet }) => (
+      window.localStorage.getItem(key) === JSON.stringify(wallet)
+      && window.localStorage.getItem(legacy) === null
+    ),
+    { key: WALLET_STORAGE_KEY, legacy: LEGACY_WALLET_STORAGE_KEY, wallet: E2E_WALLET_NAME },
+    { timeout },
+  );
 }
 
 async function main() {
@@ -77,9 +90,10 @@ async function main() {
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout });
 
     await waitForText(page.locator('.nav-statuses'), 'DEVNET VERIFIED', 'runtime verification');
+    const primary = page.locator('.primary-action');
+    await waitForText(primary, 'Connect wallet', 'no selected wallet state');
     await connectE2eWallet(page);
 
-    const primary = page.locator('.primary-action');
     await waitForText(primary, 'Unlock private vault', 'wallet connection');
 
     console.log('Locked vault UX');
@@ -143,11 +157,7 @@ async function main() {
     await page.reload({ waitUntil: 'domcontentloaded', timeout });
     await waitForText(page.locator('.nav-statuses'), 'DEVNET VERIFIED', 'runtime verification after reload');
     const primaryAfterReload = page.locator('.primary-action');
-    const primaryText = String(await primaryAfterReload.textContent().catch(() => '')).trim();
-    if (primaryText.includes('Connect wallet')) {
-      await connectE2eWallet(page);
-    }
-    await waitForText(primaryAfterReload, 'Unlock private vault', 'recovery wallet ready');
+    await waitForText(primaryAfterReload, 'Unlock private vault', 'remembered wallet auto-connect');
     await primaryAfterReload.click();
     await waitForText(page.locator('.feedback-success'), 'Private note vault unlocked and synced.', 'empty vault unlock after loss');
     await waitForText(page.locator('.vault-panel'), '0 confirmed notes · 0 pending', 'vault loss reflected locally');
@@ -219,6 +229,34 @@ async function main() {
     await waitForText(confirmedChangeRow, '0.01 SOL', 'final change amount');
     await waitForText(confirmedChangeRow, 'PRIVATE CHANGE', 'final change kind');
 
+    console.log('Legacy wallet selection migration');
+    const rememberedWallet = await page.evaluate(({ key }) => window.localStorage.getItem(key), { key: WALLET_STORAGE_KEY });
+    if (!rememberedWallet) fail('wallet compatibility regression: namespaced remembered wallet is missing');
+    await page.evaluate(({ currentKey, legacyKey, value }) => {
+      window.localStorage.removeItem(currentKey);
+      window.localStorage.setItem(legacyKey, value);
+    }, {
+      currentKey: WALLET_STORAGE_KEY,
+      legacyKey: LEGACY_WALLET_STORAGE_KEY,
+      value: rememberedWallet,
+    });
+    await page.reload({ waitUntil: 'domcontentloaded', timeout });
+    await waitForText(page.locator('.nav-statuses'), 'DEVNET VERIFIED', 'runtime verification after wallet migration reload');
+    const primaryAfterMigration = page.locator('.primary-action');
+    await waitForText(primaryAfterMigration, 'Unlock private vault', 'legacy wallet selection migration auto-connect');
+    await page.waitForFunction(
+      ({ currentKey, legacyKey, value }) => (
+        window.localStorage.getItem(currentKey) === value
+        && window.localStorage.getItem(legacyKey) === null
+      ),
+      {
+        currentKey: WALLET_STORAGE_KEY,
+        legacyKey: LEGACY_WALLET_STORAGE_KEY,
+        value: rememberedWallet,
+      },
+      { timeout },
+    );
+
     if (pageErrors.length > 0) {
       fail(`Browser page errors:\n\n${pageErrors.join('\n\n')}`);
     }
@@ -226,17 +264,22 @@ async function main() {
     console.log(JSON.stringify({
       status: 'pass',
       flow: [
+        'no-wallet-state',
+        'multi-wallet-modal',
         'connect',
+        'namespaced-wallet-persistence',
         'locked-vault-form-hidden',
         'unlock',
         'deposit',
         'deposit',
         'backup-export-ciphertext-only',
         'local-vault-loss',
+        'remembered-wallet-auto-connect',
         'backup-restore-and-sync',
         'withdraw-v0-alt',
         'sync',
         'post-withdraw-deposit-shortcut',
+        'legacy-wallet-storage-migration',
       ],
       lookupTableAddress,
       final: {
@@ -248,6 +291,9 @@ async function main() {
         spentNullifiers: 2,
         encryptedBackupRecovery: true,
         depositShortcutReady: true,
+        rememberedWalletAutoConnect: true,
+        multiWalletModal: true,
+        legacyWalletStorageMigrated: true,
       },
     }, null, 2));
   } catch (error) {
