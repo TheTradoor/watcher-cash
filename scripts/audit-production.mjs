@@ -7,6 +7,19 @@ const ALLOWED_UNPATCHED = new Set([
   'GHSA-5P2G-FCMC-QVQQ',
 ]);
 
+// npm propagates image-size's severity up through Metro/React Native. These
+// package names are allowed only when they have no direct high/critical
+// advisory of their own. This keeps the exception narrow and fail-closed if a
+// new advisory lands on any parent package.
+const ALLOWED_TRANSITIVE_CHAIN = new Set([
+  '@react-native/community-cli-plugin',
+  '@react-native/virtualized-lists',
+  'metro',
+  'metro-config',
+  'metro-transform-worker',
+  'react-native',
+]);
+
 const result = spawnSync('npm', ['audit', '--omit=dev', '--json'], {
   encoding: 'utf8',
   maxBuffer: 16 * 1024 * 1024,
@@ -27,7 +40,6 @@ try {
 }
 
 const vulnerabilities = report?.vulnerabilities || {};
-const memo = new Map();
 
 function isBlockingSeverity(value) {
   return value === 'high' || value === 'critical';
@@ -39,71 +51,58 @@ function advisoryId(entry) {
   return match ? match[0].toUpperCase() : '';
 }
 
-function onlyAllowedUnpatchedChain(name, stack = new Set()) {
-  if (memo.has(name)) return memo.get(name);
-  const vulnerability = vulnerabilities[name];
-  if (!vulnerability || !isBlockingSeverity(vulnerability.severity)) {
-    memo.set(name, true);
-    return true;
-  }
-  if (stack.has(name)) return false;
-
-  const nextStack = new Set(stack);
-  nextStack.add(name);
-  let sawBlockingCause = false;
-
-  for (const cause of vulnerability.via || []) {
-    if (typeof cause === 'string') {
-      const nested = vulnerabilities[cause];
-      if (nested && isBlockingSeverity(nested.severity)) {
-        sawBlockingCause = true;
-        if (!onlyAllowedUnpatchedChain(cause, nextStack)) {
-          memo.set(name, false);
-          return false;
-        }
-      }
-      continue;
-    }
-
-    if (!cause || !isBlockingSeverity(cause.severity)) continue;
-    sawBlockingCause = true;
-    const id = advisoryId(cause);
-    if (name !== 'image-size' || !ALLOWED_UNPATCHED.has(id)) {
-      memo.set(name, false);
-      return false;
-    }
-  }
-
-  const allowed = sawBlockingCause;
-  memo.set(name, allowed);
-  return allowed;
+function directBlockingAdvisories(vulnerability) {
+  return (vulnerability?.via || [])
+    .filter((cause) => typeof cause === 'object' && cause && isBlockingSeverity(cause.severity));
 }
 
-const blockers = Object.keys(vulnerabilities)
-  .filter((name) => isBlockingSeverity(vulnerabilities[name]?.severity))
-  .filter((name) => !onlyAllowedUnpatchedChain(name));
+function isAllowedUnpatchedNode(name) {
+  const vulnerability = vulnerabilities[name];
+  if (!vulnerability || !isBlockingSeverity(vulnerability.severity)) return false;
+
+  const direct = directBlockingAdvisories(vulnerability);
+
+  if (name === 'image-size') {
+    return direct.length > 0
+      && direct.every((cause) => ALLOWED_UNPATCHED.has(advisoryId(cause)));
+  }
+
+  if (!ALLOWED_TRANSITIVE_CHAIN.has(name)) return false;
+
+  // Parent packages may inherit `high` from a vulnerable dependency, but they
+  // must not have a direct high/critical advisory of their own.
+  if (direct.length > 0) return false;
+
+  const inheritedBlockingNames = (vulnerability.via || [])
+    .filter((cause) => typeof cause === 'string')
+    .filter((cause) => isBlockingSeverity(vulnerabilities[cause]?.severity));
+
+  return inheritedBlockingNames.length > 0
+    && inheritedBlockingNames.every(
+      (cause) => cause === 'image-size' || ALLOWED_TRANSITIVE_CHAIN.has(cause),
+    );
+}
+
+const blockingNames = Object.keys(vulnerabilities)
+  .filter((name) => isBlockingSeverity(vulnerabilities[name]?.severity));
+const blockers = blockingNames.filter((name) => !isAllowedUnpatchedNode(name));
 
 if (blockers.length > 0) {
   console.error('Blocking production dependency vulnerabilities remain:');
   for (const name of blockers) {
     const vulnerability = vulnerabilities[name];
     console.error(`- ${name}: ${vulnerability.severity}`);
-    for (const cause of vulnerability.via || []) {
-      if (typeof cause === 'object' && isBlockingSeverity(cause?.severity)) {
-        console.error(`  ${advisoryId(cause) || cause.source || 'advisory'} ${cause.title || ''}`.trimEnd());
-      }
+    for (const cause of directBlockingAdvisories(vulnerability)) {
+      console.error(`  ${advisoryId(cause) || cause.source || 'advisory'} ${cause.title || ''}`.trimEnd());
     }
   }
   process.exit(1);
 }
 
-const allowedPresent = Object.keys(vulnerabilities)
-  .filter((name) => isBlockingSeverity(vulnerabilities[name]?.severity))
-  .filter((name) => onlyAllowedUnpatchedChain(name));
-
+const allowedPresent = blockingNames.filter((name) => isAllowedUnpatchedNode(name));
 if (allowedPresent.length > 0) {
   console.warn(
-    'Production audit passed with a narrow temporary exception for the two unpatched image-size DoS advisories reached through the React Native/Metro wallet-adapter dependency chain.',
+    'Production audit passed with a narrow temporary exception for the two unpatched image-size DoS advisories and their exact Metro/React Native inherited chain.',
   );
   console.warn(`Allowed high-severity chain: ${allowedPresent.join(', ')}`);
 }
