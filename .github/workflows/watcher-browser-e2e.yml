@@ -57,6 +57,9 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      - name: Prepare diagnostics directory
+        run: mkdir -p .github/browser-e2e
+
       - name: Install Node and browser test dependencies
         run: |
           npm ci --no-audit --no-fund
@@ -101,8 +104,6 @@ jobs:
           echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
 
       - name: Build Watcher SBF program
-        env:
-          PATH: ${{ env.HOME }}/.local/share/solana/install/active_release/bin:${{ env.PATH }}
         run: |
           cargo build-sbf \
             --manifest-path programs/watcher-protocol/Cargo.toml \
@@ -110,11 +111,8 @@ jobs:
           test -s target/deploy/watcher_protocol_program.so
 
       - name: Start isolated validator and deploy Watcher
-        env:
-          PATH: ${{ env.HOME }}/.local/share/solana/install/active_release/bin:${{ env.PATH }}
         run: |
           set -euo pipefail
-          mkdir -p .github/browser-e2e
           solana-keygen new --no-bip39-passphrase --force --silent -o /tmp/watcher-browser-e2e-payer.json
           solana-keygen new --no-bip39-passphrase --force --silent -o /tmp/watcher-browser-e2e-program.json
           solana-test-validator \
@@ -141,7 +139,6 @@ jobs:
 
       - name: Bootstrap isolated protocol runtime and fund browser wallet
         env:
-          PATH: ${{ env.HOME }}/.local/share/solana/install/active_release/bin:${{ env.PATH }}
           WATCHER_RPC_URL: http://127.0.0.1:8899
           WATCHER_PUBLIC_RPC_URL: http://127.0.0.1:8899
           WATCHER_PAYER_KEYPAIR: /tmp/watcher-browser-e2e-payer.json
