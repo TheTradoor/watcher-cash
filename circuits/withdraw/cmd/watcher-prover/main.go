@@ -76,11 +76,11 @@ func (service *server) health(response http.ResponseWriter, request *http.Reques
 		return
 	}
 	writeJSON(response, http.StatusOK, map[string]any{
-		"status": "ready",
-		"curve": "BN254",
-		"scheme": "Groth16",
+		"status":       "ready",
+		"curve":        "BN254",
+		"scheme":       "Groth16",
 		"bundleDigest": service.bundle.Digest,
-		"circuits": []string{"deposit-v1", "withdraw-v1"},
+		"circuits":     []string{"deposit-v1", "withdraw-v1"},
 	})
 }
 
@@ -161,12 +161,12 @@ func main() {
 	})
 
 	httpServer := &http.Server{
-		Addr: *listen,
-		Handler: mux,
+		Addr:              *listen,
+		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout: 30 * time.Second,
-		WriteTimeout: 10 * time.Minute,
-		IdleTimeout: 30 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      10 * time.Minute,
+		IdleTimeout:       30 * time.Second,
 	}
 	log.Printf("Watcher local prover ready on http://%s (bundle %s)", *listen, bundle.Digest)
 	if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {

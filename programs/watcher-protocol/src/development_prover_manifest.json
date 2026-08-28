@@ -1,0 +1,7 @@
+{
+  "bundle_manifest_sha256": "4259e64d0c21f78a285de2ae17266d6a87ea7fb4db8529a844d457182a57c69d",
+  "deposit_vk_sha256": "25cc1e81dba18b5394fdb242c340ecf0a2549d833ed17eb9d755388ddaa9aea0",
+  "version": 1,
+  "warning": "DEVELOPMENT SINGLE-PARTY SETUP ONLY. Never use this bundle with production funds.",
+  "withdraw_vk_sha256": "55a97ee5f82edc4573875e54024f24b9bdde21a9bc131ea6e4b59f42fc33e78c"
+}
