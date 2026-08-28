@@ -72,26 +72,9 @@ jobs:
 
       - name: Prove sample deposits and withdrawal locally
         working-directory: circuits/withdraw
-        run: |
-          rm -rf fixture-out/local-proof-deposit fixture-out/local-proof-withdraw
-          go run ./cmd/watcher-prover \
-            --circuit deposit \
-            --pk fixture-out/local-prover/deposit.pk \
-            --vk fixture-out/local-prover/deposit.vk \
-            --witness fixture-out/local-prover/sample-deposit-0-witness.json \
-            --out fixture-out/local-proof-deposit
-          cmp \
-            fixture-out/local-prover/sample-deposit-0-public-inputs.bin \
-            fixture-out/local-proof-deposit/public-inputs.bin
-          go run ./cmd/watcher-prover \
-            --circuit withdraw \
-            --pk fixture-out/local-prover/withdraw.pk \
-            --vk fixture-out/local-prover/withdraw.vk \
-            --witness fixture-out/local-prover/sample-withdraw-witness.json \
-            --out fixture-out/local-proof-withdraw
-          cmp \
-            fixture-out/local-prover/sample-withdraw-public-inputs.bin \
-            fixture-out/local-proof-withdraw/public-inputs.bin
+        env:
+          WATCHER_PROVER_ASSETS: fixture-out/local-prover
+        run: go test -run TestExportedProverBundleRoundTrip -v .
 
       - name: Test Watcher client
         run: |
