@@ -15,6 +15,9 @@ no-entrypoint = []
 custom-heap = []
 custom-panic = []
 
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("solana"))'] }
+
 [dependencies]
 solana-program = "2.3.0"
 solana-system-interface = { version = "1.0.0", features = ["bincode"] }
