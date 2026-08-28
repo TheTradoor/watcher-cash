@@ -212,6 +212,8 @@ export default function Home() {
   const privateBalance = useMemo(() => privateBalanceLamportsV1(records), [records]);
   const confirmedNotes = useMemo(() => confirmedNoteRecordsV1(records), [records]);
   const pendingNotes = useMemo(() => records.filter((record) => record.status === 'pending'), [records]);
+  const missingWithdrawNotes = Math.max(0, 2 - confirmedNotes.length);
+  const withdrawInputReady = missingWithdrawNotes === 0;
   const amountLamports = useMemo(() => {
     try {
       return parseSol(amount);
@@ -223,16 +225,32 @@ export default function Home() {
   const relayerFee = BigInt(runtime?.relayerFeeLamports || '0');
   const withdrawPreview = useMemo(() => {
     if (mode !== 'withdraw' || amountLamports === null) return null;
+    if (!withdrawInputReady) {
+      const noteWord = missingWithdrawNotes === 1 ? 'note' : 'notes';
+      return {
+        selection: null,
+        error: `Another withdrawal needs 2 confirmed notes. Deposit ${missingWithdrawNotes} more private ${noteWord} to continue.`,
+        hint: true,
+      };
+    }
     try {
       const selection = selectInputPairV1(
         records,
         amountLamports + protocolFee + relayerFee,
       );
-      return { selection, error: '' };
+      return { selection, error: '', hint: false };
     } catch (error) {
-      return { selection: null, error: friendlyError(error) };
+      return { selection: null, error: friendlyError(error), hint: false };
     }
-  }, [mode, amountLamports, records, protocolFee, relayerFee]);
+  }, [
+    mode,
+    amountLamports,
+    records,
+    protocolFee,
+    relayerFee,
+    missingWithdrawNotes,
+    withdrawInputReady,
+  ]);
 
   const handleProverProgress = useCallback((progress) => {
     const value = Number(progress?.progress);
@@ -762,6 +780,7 @@ export default function Home() {
     }
   }, [busy, persistRecords, records]);
 
+  const withdrawBlocked = connected && unlocked && mode === 'withdraw' && !withdrawInputReady;
   const primaryLabel = busy
     ? actionStage || 'Working…'
     : !connected
@@ -770,7 +789,11 @@ export default function Home() {
         ? 'Unlock private notes'
         : mode === 'deposit'
           ? 'Generate proof & deposit'
-          : 'Generate proof & withdraw';
+          : withdrawInputReady
+            ? 'Generate proof & withdraw'
+            : missingWithdrawNotes === 1
+              ? 'Deposit 1 more note to withdraw again'
+              : 'Deposit 2 notes to enable withdrawal';
 
   const capacity = runtime?.commitmentCapacity || 16;
   const capacityRemaining = Math.max(0, capacity - treeCount);
@@ -880,7 +903,7 @@ export default function Home() {
           ) : null}
 
           {mode === 'withdraw' && withdrawPreview ? (
-            <div className={`preview-card ${withdrawPreview.error ? 'preview-warning' : ''}`}>
+            <div className={`preview-card ${withdrawPreview.error && !withdrawPreview.hint ? 'preview-warning' : ''}`}>
               {withdrawPreview.error ? (
                 <p>{withdrawPreview.error}</p>
               ) : (
@@ -896,7 +919,7 @@ export default function Home() {
           <button
             type="button"
             className="primary-action"
-            disabled={Boolean(busy)}
+            disabled={Boolean(busy) || withdrawBlocked}
             onClick={handlePrimaryAction}
           >
             <span>{primaryLabel}</span>
