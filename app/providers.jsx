@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   ConnectionProvider,
   WalletProvider,
@@ -319,6 +319,7 @@ function ReliableWalletTransport({ children }) {
 }
 
 export default function Providers({ children }) {
+  const [hydrated, setHydrated] = useState(false);
   const endpoint = useMemo(
     () => process.env.NEXT_PUBLIC_RPC_URL || clusterApiUrl('devnet'),
     [],
@@ -330,11 +331,12 @@ export default function Providers({ children }) {
 
   useEffect(() => {
     installReliableDevnetSend();
+    setHydrated(true);
   }, []);
 
   return (
     <ConnectionProvider endpoint={endpoint} config={{ commitment: 'confirmed' }}>
-      <WalletProvider wallets={wallets} autoConnect>
+      <WalletProvider wallets={wallets} autoConnect={hydrated}>
         <ReliableWalletTransport>
           <WalletModalProvider>{children}</WalletModalProvider>
         </ReliableWalletTransport>
