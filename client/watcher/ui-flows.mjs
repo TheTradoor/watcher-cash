@@ -99,7 +99,10 @@ export async function prepareUiDepositV1({
     amount,
     assetId,
   });
-  const proof = await prover.proveDeposit(built.witness, built.publicInputs);
+  const proof = await prover.proveDeposit({
+    witness: built.witness,
+    expectedPublicInputs: built.publicInputs,
+  });
   const instruction = buildDepositInstructionV1({
     ...accounts,
     commitment: built.commitment,
@@ -154,7 +157,10 @@ export async function prepareUiWithdrawV1({
     assetId,
     contextBinding,
   });
-  const proof = await prover.proveWithdraw(built.witness, built.publicInputs);
+  const proof = await prover.proveWithdraw({
+    witness: built.witness,
+    expectedPublicInputs: built.publicInputs,
+  });
   const instruction = buildWithdrawInstructionV1({
     ...accounts,
     statement: built.statement,
