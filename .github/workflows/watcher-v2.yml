@@ -49,6 +49,9 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '24.x'
+          cache: npm
+      - name: Install browser dependencies
+        run: npm ci
       - name: Test V2 sparse tree, selection, compact wire and bindings
         run: >-
           node --test
