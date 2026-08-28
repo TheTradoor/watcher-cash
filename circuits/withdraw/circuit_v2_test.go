@@ -210,20 +210,14 @@ func validV2(inputCount int, changeAmount int64) CircuitV2 {
 		panic("invalid V2 input count")
 	}
 	notes, epochA, epochB := makeV2Notes()
-	assignment := CircuitV2{
-		InputCount:       inputCount,
-		PublicAmount:     1,
-		ProtocolFee:      0,
-		RelayerFee:       0,
-		RecipientBinding: fixtureRecipientBinding(),
-		AssetID:          1,
-		ContextBinding:   fixtureWithdrawContextBinding(),
-	}
+	assignment := CircuitV2{}
 	zeroV2Arrays(&assignment)
 	assignment.InputCount = inputCount
 	assignment.RecipientBinding = fixtureRecipientBinding()
 	assignment.AssetID = 1
 	assignment.ContextBinding = fixtureWithdrawContextBinding()
+	assignment.ProtocolFee = 0
+	assignment.RelayerFee = 0
 
 	total := int64(0)
 	for i := 0; i < inputCount; i++ {
@@ -239,8 +233,6 @@ func validV2(inputCount int, changeAmount int64) CircuitV2 {
 		total += note.amount.Int64()
 	}
 
-	assignment.ProtocolFee = 0
-	assignment.RelayerFee = 0
 	if changeAmount > 0 {
 		assignment.ChangeEnabled = 1
 		assignment.ChangeAmount = changeAmount
@@ -299,7 +291,9 @@ func TestCircuitV2FourInputsAcrossEpochRootsProve(t *testing.T) {
 	if err := proveWithdrawV2(t, assignment); err != nil {
 		t.Fatal(err)
 	}
-	if assignment.InputRoots[0] == assignment.InputRoots[2] {
+	left := assignment.InputRoots[0].(*big.Int)
+	right := assignment.InputRoots[2].(*big.Int)
+	if left.Cmp(right) == 0 {
 		t.Fatal("fixture must exercise distinct epoch roots")
 	}
 }
@@ -327,7 +321,15 @@ func TestCircuitV2RejectsInputGap(t *testing.T) {
 
 func TestCircuitV2RejectsDuplicateActiveNullifier(t *testing.T) {
 	assignment := validV2(2, 1_000_000)
+	assignment.InputAmount[1] = assignment.InputAmount[0]
+	assignment.InputOwner[1] = assignment.InputOwner[0]
+	assignment.InputNonce[1] = assignment.InputNonce[0]
+	assignment.InputPath[1] = assignment.InputPath[0]
+	assignment.InputIndex[1] = assignment.InputIndex[0]
+	assignment.InputRoots[1] = assignment.InputRoots[0]
 	assignment.Nullifiers[1] = assignment.Nullifiers[0]
+	// Preserve conservation after replacing the second note with the first.
+	assignment.PublicAmount = 15_000_000
 	if err := proveWithdrawV2(t, assignment); err == nil {
 		t.Fatal("expected duplicate active nullifier to fail")
 	}
@@ -343,7 +345,7 @@ func TestCircuitV2RejectsWrongInputRoot(t *testing.T) {
 
 func TestCircuitV2RejectsValueCreation(t *testing.T) {
 	assignment := validV2(2, 1_000_000)
-	assignment.PublicAmount = new(big.Int).Add(bi(1), new(big.Int).Set(assignment.PublicAmount.(*big.Int)))
+	assignment.PublicAmount = 10_000_001
 	if err := proveWithdrawV2(t, assignment); err == nil {
 		t.Fatal("expected value creation to fail")
 	}
