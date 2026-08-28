@@ -63,14 +63,17 @@ async function main() {
   assert.equal(ready.status, 'ready');
   assert.match(ready.bundleDigest, /^[0-9a-f]{64}$/);
 
-  const depositWitness = await readFile(
+  const depositWitness = JSON.parse(await readFile(
     resolve(bundleDirectory, 'sample-deposit-0-witness.json'),
     'utf8',
+  ));
+  depositWitness.Index = normalizeIndexBits(depositWitness, 'Index');
+  const deposit = JSON.parse(
+    globalThis.watcherProverProveDeposit(JSON.stringify(depositWitness)),
   );
-  const deposit = JSON.parse(globalThis.watcherProverProveDeposit(depositWitness));
   assert.equal(deposit.error, undefined);
   assert.equal(deposit.proofBytes, 256);
-  assert.equal(deposit.publicInputBytes, 96);
+  assert.equal(deposit.publicInputBytes, 192);
   assert.deepEqual(
     Buffer.from(deposit.publicInputsHex, 'hex'),
     await readFile(resolve(bundleDirectory, 'sample-deposit-0-public-inputs.bin')),
@@ -81,17 +84,17 @@ async function main() {
     'utf8',
   ));
   // The setup fixture stores every witness value as a decimal string for
-  // deterministic JSON. The public browser client already emits numeric index
-  // bits, so normalize only these uint8 arrays before exercising the same Go
-  // decoder used by the WebAssembly bridge.
+  // deterministic JSON. The browser client emits numeric index bits, so
+  // normalize every uint8 path-index array before exercising the same decoder.
   withdrawWitness.Input0Index = normalizeIndexBits(withdrawWitness, 'Input0Index');
   withdrawWitness.Input1Index = normalizeIndexBits(withdrawWitness, 'Input1Index');
+  withdrawWitness.ChangeIndex = normalizeIndexBits(withdrawWitness, 'ChangeIndex');
   const withdrawal = JSON.parse(
     globalThis.watcherProverProveWithdraw(JSON.stringify(withdrawWitness)),
   );
   assert.equal(withdrawal.error, undefined);
   assert.equal(withdrawal.proofBytes, 256);
-  assert.equal(withdrawal.publicInputBytes, 320);
+  assert.equal(withdrawal.publicInputBytes, 416);
   assert.deepEqual(
     Buffer.from(withdrawal.publicInputsHex, 'hex'),
     await readFile(resolve(bundleDirectory, 'sample-withdraw-public-inputs.bin')),
@@ -102,7 +105,9 @@ async function main() {
     status: 'PASS',
     bundleDigest: ready.bundleDigest,
     depositProofBytes: deposit.proofBytes,
+    depositPublicInputBytes: deposit.publicInputBytes,
     withdrawalProofBytes: withdrawal.proofBytes,
+    withdrawalPublicInputBytes: withdrawal.publicInputBytes,
   }, null, 2));
   // The Go entrypoint intentionally blocks forever after registering its JS
   // bridge. Exit explicitly once the proof assertions are complete.
