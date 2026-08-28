@@ -30,9 +30,9 @@ type CircuitV2 struct {
 
 	// Each active input carries its own accepted root. This lets one withdrawal
 	// aggregate notes from different sealed tree epochs.
-	InputRoots  [MaxInputsV2]frontend.Variable `gnark:",public"`
-	Nullifiers  [MaxInputsV2]frontend.Variable `gnark:",public"`
-	InputCount  frontend.Variable              `gnark:",public"`
+	InputRoots [MaxInputsV2]frontend.Variable `gnark:",public"`
+	Nullifiers [MaxInputsV2]frontend.Variable `gnark:",public"`
+	InputCount frontend.Variable              `gnark:",public"`
 
 	ChangeCommitment frontend.Variable `gnark:",public"`
 	PublicAmount     frontend.Variable `gnark:",public"`
@@ -42,9 +42,10 @@ type CircuitV2 struct {
 	AssetID          frontend.Variable `gnark:",public"`
 	ContextBinding   frontend.Variable `gnark:",public"`
 
-	// The optional private change note always targets the current active tree.
-	// When ChangeCommitment is zero, no tree append occurs and NewMerkleRoot must
-	// equal CurrentRoot.
+	// A change-producing withdrawal targets the exact current active tree. An
+	// exact withdrawal has no append dependency at all and uses zero sentinels
+	// for CurrentRoot, NewMerkleRoot and ChangeLeafIndex. That means a concurrent
+	// deposit cannot stale an otherwise independent exact withdrawal proof.
 	CurrentRoot     frontend.Variable `gnark:",public"`
 	NewMerkleRoot   frontend.Variable `gnark:",public"`
 	ChangeLeafIndex frontend.Variable `gnark:",public"`
@@ -233,15 +234,14 @@ func (c *CircuitV2) Define(api frontend.API) error {
 		0,
 	)
 
-	// Enabled change appends one leaf; disabled change leaves tree state untouched.
+	// Enabled change appends one leaf. Disabled change has no dependency on the
+	// active tree at all, so all append-state public fields must be zero.
 	api.AssertIsEqual(
 		api.Mul(c.ChangeEnabled, api.Sub(rootAfterChange, c.NewMerkleRoot)),
 		0,
 	)
-	api.AssertIsEqual(
-		api.Mul(changeDisabled, api.Sub(c.NewMerkleRoot, c.CurrentRoot)),
-		0,
-	)
+	api.AssertIsEqual(api.Mul(changeDisabled, c.CurrentRoot), 0)
+	api.AssertIsEqual(api.Mul(changeDisabled, c.NewMerkleRoot), 0)
 	api.AssertIsEqual(api.Mul(changeDisabled, c.ChangeLeafIndex), 0)
 	assertEnabledNonZeroV2(api, c.ChangeEnabled, c.NewMerkleRoot)
 
