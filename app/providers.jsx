@@ -318,6 +318,18 @@ function ReliableWalletTransport({ children }) {
   return children;
 }
 
+function WalletHydrationShell() {
+  return (
+    <div className="wallet-hydration-shell" role="status" aria-live="polite">
+      <div className="wallet-hydration-mark" aria-hidden="true"><span /></div>
+      <div>
+        <strong>WATCHER CASH</strong>
+        <span>Preparing private vault…</span>
+      </div>
+    </div>
+  );
+}
+
 export default function Providers({ children }) {
   const [hydrated, setHydrated] = useState(false);
   const endpoint = useMemo(
@@ -334,9 +346,16 @@ export default function Providers({ children }) {
     setHydrated(true);
   }, []);
 
+  // WalletProvider reads its selected wallet from localStorage in a useState
+  // initializer. Mounting it during SSR would let the server render `null` while
+  // the first browser render sees a stored wallet, which causes React hydration
+  // mismatch on reload. Keep the server and first client render deterministic,
+  // then mount all wallet-dependent UI after hydration.
+  if (!hydrated) return <WalletHydrationShell />;
+
   return (
     <ConnectionProvider endpoint={endpoint} config={{ commitment: 'confirmed' }}>
-      <WalletProvider wallets={wallets} autoConnect={hydrated}>
+      <WalletProvider wallets={wallets} autoConnect>
         <ReliableWalletTransport>
           <WalletModalProvider>{children}</WalletModalProvider>
         </ReliableWalletTransport>
