@@ -19,7 +19,7 @@ import {
 import { createWatcherE2EWallet, watcherE2EEnabled } from './e2e-wallet';
 
 const WATCHER_RELIABLE_SEND_PATCH = '__watcherReliableDevnetSendV1';
-const WATCHER_WALLET_SEND_PATCH = '__watcherWalletDirectRpcSendV2';
+const WATCHER_WALLET_SEND_PATCH = '__watcherWalletOversizedSendV3';
 const MAX_TRANSACTION_BYTES = 1232;
 
 function sleep(ms) {
@@ -273,7 +273,7 @@ function ReliableWalletTransport({ children }) {
   useEffect(() => {
     const adapter = wallet?.adapter;
     if (!connected || !adapter || adapter[WATCHER_WALLET_SEND_PATCH]) return;
-    if (typeof adapter.sendTransaction !== 'function' || typeof adapter.signTransaction !== 'function') return;
+    if (typeof adapter.sendTransaction !== 'function') return;
 
     const originalSendTransaction = adapter.sendTransaction.bind(adapter);
 
@@ -291,22 +291,16 @@ function ReliableWalletTransport({ children }) {
         const rpc = targetConnection || connection;
         const endpoint = String(rpc?.rpcEndpoint || '').toLowerCase();
         const useDappTransport = endpoint.includes('devnet') || watcherE2EEnabled();
+        const oversizedLegacy = transaction instanceof Transaction && !legacyTransactionFits(transaction);
 
-        // Wallet Standard wallets such as Phantom prefer signAndSendTransaction.
-        // For the verified devnet app we deliberately ask the wallet to sign only,
-        // then submit the exact signed bytes through the RPC that the dapp verified.
-        if (!useDappTransport || typeof adapter.signTransaction !== 'function') {
+        // Keep normal deposits and any other transaction that fits Solana's packet
+        // limit on the wallet adapter's native transport. Only the oversized Groth16
+        // withdrawal needs our v0 + lookup-table conversion and direct RPC send.
+        if (!useDappTransport || !oversizedLegacy || typeof adapter.signTransaction !== 'function') {
           return originalSendTransaction(transaction, rpc, options);
         }
 
-        let transactionToSign = transaction;
-        if (transaction instanceof Transaction && !legacyTransactionFits(transaction)) {
-          // Groth16 withdrawals are larger than Solana's legacy 1232-byte packet cap.
-          // Create/reuse a wallet-owned ALT and compile the same instructions into a
-          // v0 transaction before the wallet signs them.
-          transactionToSign = await convertOversizedLegacyTransaction(adapter, rpc, transaction);
-        }
-
+        const transactionToSign = await convertOversizedLegacyTransaction(adapter, rpc, transaction);
         const signedTransaction = await adapter.signTransaction(transactionToSign);
         const rawTransaction = signedTransaction.serialize();
         const requestedRetries = Number(options?.maxRetries || 0);
