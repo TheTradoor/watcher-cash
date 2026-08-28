@@ -123,7 +123,7 @@ async function main() {
     console.log('Wallet message rejection + retry');
     await armWalletRejection(page, E2E_REJECT_MESSAGE_KEY);
     await primary.click();
-    await waitForText(page.locator('.feedback'), CANCELLED_MESSAGE, 'friendly unlock rejection');
+    await waitForText(page.locator('.feedback-info'), CANCELLED_MESSAGE, 'informational unlock rejection');
     await waitForText(primary, 'Unlock private vault', 'unlock remains retryable after rejection');
     await waitForCount(page.locator('#amount'), 0, 'unlock rejection keeps private form locked');
 
@@ -137,7 +137,7 @@ async function main() {
     await armWalletRejection(page, E2E_REJECT_TRANSACTION_KEY);
     await waitForText(primary, 'Generate proof & deposit', 'rejected deposit button');
     await primary.click();
-    await waitForText(page.locator('.feedback'), CANCELLED_MESSAGE, 'friendly deposit rejection');
+    await waitForText(page.locator('.feedback-info'), CANCELLED_MESSAGE, 'informational deposit rejection');
     await waitForText(page.locator('.vault-panel'), '0 confirmed notes · 1 pending', 'rejected deposit draft retained locally');
     const discardDraft = page.getByRole('button', { name: 'Discard local draft', exact: true });
     await discardDraft.click();
@@ -331,6 +331,7 @@ async function main() {
         multiWalletModal: true,
         legacyWalletStorageMigrated: true,
         walletRejectionRecovery: true,
+        retryableFailuresInformational: true,
       },
     }, null, 2));
   } catch (error) {
