@@ -159,6 +159,7 @@ export default function Home() {
     publicKey,
     sendTransaction,
     signMessage,
+    signTransaction,
   } = useWallet();
   const { setVisible } = useWalletModal();
 
@@ -478,18 +479,56 @@ export default function Home() {
       ComputeBudgetProgram.setComputeUnitPrice({ microLamports: COMPUTE_UNIT_PRICE }),
       descriptorInstruction(descriptor),
     );
-    const signature = await sendTransaction(transaction, connection, {
-      skipPreflight: false,
-      preflightCommitment: 'confirmed',
-      maxRetries: 8,
-    });
-    await connection.confirmTransaction({
-      signature,
-      blockhash: latest.blockhash,
-      lastValidBlockHeight: latest.lastValidBlockHeight,
-    }, 'confirmed');
+
+    const opcode = Number(descriptor?.data?.[0] ?? -1);
+    let signature;
+    if (opcode === 1 && typeof signTransaction === 'function') {
+      const signedTransaction = await signTransaction(transaction);
+      const rawTransaction = signedTransaction.serialize();
+      try {
+        signature = await connection.sendRawTransaction(rawTransaction, {
+          skipPreflight: false,
+          preflightCommitment: 'confirmed',
+          maxRetries: 40,
+        });
+      } catch (error) {
+        const message = error?.message || String(error || '');
+        if (!/unexpected|429|fetch|network|timeout|temporar/i.test(message)) throw error;
+        signature = await connection.sendRawTransaction(rawTransaction, {
+          skipPreflight: true,
+          preflightCommitment: 'confirmed',
+          maxRetries: 40,
+        });
+      }
+    } else {
+      signature = await sendTransaction(transaction, connection, {
+        skipPreflight: false,
+        preflightCommitment: 'confirmed',
+        maxRetries: 8,
+      });
+    }
+
+    try {
+      await connection.confirmTransaction({
+        signature,
+        blockhash: latest.blockhash,
+        lastValidBlockHeight: latest.lastValidBlockHeight,
+      }, 'confirmed');
+    } catch (error) {
+      const statuses = await connection.getSignatureStatuses(
+        [signature],
+        { searchTransactionHistory: true },
+      ).catch(() => null);
+      const status = statuses?.value?.[0];
+      if (status?.err) {
+        throw new Error(`Transaction failed on devnet: ${JSON.stringify(status.err)}`);
+      }
+      if (status?.confirmationStatus !== 'confirmed' && status?.confirmationStatus !== 'finalized') {
+        throw error;
+      }
+    }
     return signature;
-  }, [connection, publicKey, sendTransaction]);
+  }, [connection, publicKey, sendTransaction, signTransaction]);
 
   const browserDepositProof = useCallback((options) => (
     proveDepositWithBrowserProverV1({
