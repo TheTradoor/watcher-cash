@@ -31,6 +31,10 @@ import {
   syncNoteRecordsV1,
   upsertNoteRecordV1,
 } from '../client/watcher/index.mjs';
+import {
+  classifyWatcherFailure,
+  watcherFailureMessage,
+} from '../client/watcher/failure-errors.mjs';
 
 const RUNTIME_URL = process.env.NEXT_PUBLIC_WATCHER_RUNTIME_URL || '/watcher-protocol/devnet.json';
 const DEFAULT_PROVER_BASE = process.env.NEXT_PUBLIC_WATCHER_PROVER_BASE || '/watcher-prover';
@@ -68,11 +72,18 @@ function shortAddress(value, left = 5, right = 5) {
 }
 
 function friendlyError(error) {
-  const message = error?.message || String(error || 'Unknown error');
-  return message
-    .replace(/^WalletSendTransactionError:\s*/i, '')
-    .replace(/^Error:\s*/i, '')
-    .replace('Transaction simulation failed: ', 'Simulation failed: ');
+  return watcherFailureMessage(error);
+}
+
+function feedbackForError(error) {
+  const failure = classifyWatcherFailure(error);
+  const informational = failure.kind === 'wallet_rejected'
+    || failure.kind === 'blockhash_expired'
+    || failure.kind === 'rpc_transient';
+  return {
+    tone: informational ? 'info' : 'error',
+    text: watcherFailureMessage(error),
+  };
 }
 
 function descriptorInstruction(descriptor) {
@@ -555,7 +566,7 @@ export default function Home() {
         text: 'Encrypted vault backup downloaded. The file contains ciphertext only; keep it private and store it safely.',
       });
     } catch (error) {
-      setFeedback({ tone: 'error', text: friendlyError(error) });
+      setFeedback(feedbackForError(error));
     }
   }, [localVaultStorageKey, publicKey, runtimeScope, unlocked, walletAddress]);
 
@@ -606,7 +617,7 @@ export default function Home() {
         text: `Encrypted vault backup restored and synced. ${synced.length} note record${synced.length === 1 ? '' : 's'} available.`,
       });
     } catch (error) {
-      setFeedback({ tone: 'error', text: friendlyError(error) });
+      setFeedback(feedbackForError(error));
     } finally {
       setBusy('');
       setActionStage('');
@@ -746,7 +757,7 @@ export default function Home() {
         signature,
       });
     } catch (error) {
-      setFeedback({ tone: 'error', text: friendlyError(error) });
+      setFeedback(feedbackForError(error));
       throw error;
     } finally {
       setBusy('');
@@ -842,7 +853,7 @@ export default function Home() {
         signature,
       });
     } catch (error) {
-      setFeedback({ tone: 'error', text: friendlyError(error) });
+      setFeedback(feedbackForError(error));
       throw error;
     } finally {
       setBusy('');
@@ -900,15 +911,12 @@ export default function Home() {
       }
       await executeWithdraw();
     } catch (error) {
-      if (!feedback || feedback.tone !== 'error') {
-        setFeedback({ tone: 'error', text: friendlyError(error) });
-      }
+      setFeedback(feedbackForError(error));
     }
   }, [
     connected,
     executeDeposit,
     executeWithdraw,
-    feedback,
     missingWithdrawNotes,
     mode,
     publicKey,
@@ -927,7 +935,7 @@ export default function Home() {
       await persistRecords(next);
       setFeedback({ tone: 'success', text: 'Local pending note draft removed.' });
     } catch (error) {
-      setFeedback({ tone: 'error', text: friendlyError(error) });
+      setFeedback(feedbackForError(error));
     }
   }, [busy, persistRecords, records]);
 
@@ -1003,7 +1011,7 @@ export default function Home() {
               type="button"
               className="refresh-button"
               disabled={!unlocked || syncing || Boolean(busy)}
-              onClick={() => syncPrivateState().catch((error) => setFeedback({ tone: 'error', text: friendlyError(error) }))}
+              onClick={() => syncPrivateState().catch((error) => setFeedback(feedbackForError(error)))}
             >
               {syncing ? 'Syncing…' : 'Refresh balance'}
             </button>
