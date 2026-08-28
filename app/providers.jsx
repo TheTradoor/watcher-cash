@@ -222,6 +222,29 @@ async function getOrCreateLookupTable(adapter, rpc, transaction) {
   return createLookupTable(adapter, rpc, addresses);
 }
 
+async function ensureWithdrawalBlockhashIsValid(rpc, blockhash) {
+  let lastError = null;
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    try {
+      const validity = await rpc.isBlockhashValid(blockhash, { commitment: 'confirmed' });
+      if (!validity?.value) {
+        throw new Error(
+          'Withdrawal blockhash expired while preparing its lookup table. The table is cached; retry withdrawal to use a fresh blockhash.',
+        );
+      }
+      return;
+    } catch (error) {
+      if (/blockhash expired while preparing/i.test(error?.message || String(error))) throw error;
+      lastError = error;
+      await sleep(400);
+    }
+  }
+
+  throw new Error(
+    `Could not verify the withdrawal blockhash after lookup-table setup. Retry withdrawal; the cached table will be reused.${lastError?.message ? ` RPC: ${lastError.message}` : ''}`,
+  );
+}
+
 async function convertOversizedLegacyTransaction(adapter, rpc, transaction) {
   const payer = transaction.feePayer || adapter.publicKey;
   if (!payer || !transaction.recentBlockhash) {
@@ -229,6 +252,7 @@ async function convertOversizedLegacyTransaction(adapter, rpc, transaction) {
   }
 
   const lookupTable = await getOrCreateLookupTable(adapter, rpc, transaction);
+  await ensureWithdrawalBlockhashIsValid(rpc, transaction.recentBlockhash);
   const message = new TransactionMessage({
     payerKey: payer,
     recentBlockhash: transaction.recentBlockhash,
