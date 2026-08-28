@@ -11,6 +11,8 @@ import {
 
 const E2E_WALLET_NAME = 'Watcher E2E Wallet';
 const E2E_ALTERNATE_WALLET_NAME = 'Watcher E2E Alternate Wallet';
+const E2E_REJECT_MESSAGE_KEY = 'watcher-e2e:reject-next-message';
+const E2E_REJECT_TRANSACTION_KEY = 'watcher-e2e:reject-next-transaction';
 const E2E_WALLET_ICON = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='18' fill='%23111310'/%3E%3Ccircle cx='32' cy='32' r='16' fill='none' stroke='%23b7ff45' stroke-width='4'/%3E%3Ccircle cx='32' cy='32' r='4' fill='%23b7ff45'/%3E%3C/svg%3E";
 
 function parseSeedHex(value) {
@@ -29,6 +31,23 @@ function alternateSeed(seed) {
   const bytes = seed.slice();
   bytes[bytes.length - 1] ^= 0x01;
   return bytes;
+}
+
+function consumeRejectFlag(key) {
+  if (typeof window === 'undefined') return false;
+  try {
+    if (window.sessionStorage.getItem(key) !== '1') return false;
+    window.sessionStorage.removeItem(key);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function userRejectedError() {
+  const error = new Error('User rejected the request.');
+  error.code = 4001;
+  return error;
 }
 
 class WatcherE2EWalletAdapter extends BaseSignerWalletAdapter {
@@ -72,6 +91,7 @@ class WatcherE2EWalletAdapter extends BaseSignerWalletAdapter {
 
   async signTransaction(transaction) {
     if (!this._connected) throw new Error('Watcher E2E wallet is not connected');
+    if (consumeRejectFlag(E2E_REJECT_TRANSACTION_KEY)) throw userRejectedError();
     if (transaction instanceof VersionedTransaction) {
       transaction.sign([this._keypair]);
       return transaction;
@@ -86,6 +106,7 @@ class WatcherE2EWalletAdapter extends BaseSignerWalletAdapter {
 
   async signMessage(message) {
     if (!this._connected) throw new Error('Watcher E2E wallet is not connected');
+    if (consumeRejectFlag(E2E_REJECT_MESSAGE_KEY)) throw userRejectedError();
     const input = message instanceof Uint8Array ? message : new Uint8Array(message);
     const signature = new Uint8Array(64);
     for (let index = 0; index < signature.length; index += 1) {
