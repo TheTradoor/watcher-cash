@@ -1,5 +1,6 @@
 name: Clean Temporary Watcher UI Migration Machinery
 
+# Final cleanup pass after the live-registry browser deposit fix.
 on:
   push:
     branches: [watcher-protocol]
