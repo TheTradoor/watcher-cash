@@ -254,12 +254,14 @@ func validV2(inputCount int, changeAmount int64) CircuitV2 {
 		assignment.CurrentRoot = target.root()
 		assignment.NewMerkleRoot = withAppendedV2(target, changeCommitment).root()
 	} else {
+		// Exact withdrawals do not touch the active tree and therefore do not
+		// depend on whatever root/index exists when the proof lands.
 		assignment.ChangeEnabled = 0
 		assignment.ChangeAmount = 0
 		assignment.ChangeCommitment = 0
 		assignment.ChangeLeafIndex = 0
-		assignment.CurrentRoot = epochA.root()
-		assignment.NewMerkleRoot = epochA.root()
+		assignment.CurrentRoot = 0
+		assignment.NewMerkleRoot = 0
 	}
 
 	assignment.PublicAmount = total - changeAmount
@@ -363,6 +365,14 @@ func TestCircuitV2RejectsFakeNoChangeRootTransition(t *testing.T) {
 	assignment := validV2(1, 0)
 	assignment.NewMerkleRoot = 12345
 	if err := proveWithdrawV2(t, assignment); err == nil {
-		t.Fatal("expected disabled change to preserve current root")
+		t.Fatal("expected exact withdrawal append fields to use zero sentinels")
+	}
+}
+
+func TestCircuitV2RejectsNoChangeCurrentRootDependency(t *testing.T) {
+	assignment := validV2(1, 0)
+	assignment.CurrentRoot = 12345
+	if err := proveWithdrawV2(t, assignment); err == nil {
+		t.Fatal("expected exact withdrawal current root to be the zero sentinel")
 	}
 }
