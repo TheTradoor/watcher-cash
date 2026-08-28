@@ -85,7 +85,7 @@ async function send(connection, payer, instructions, extraSigners = []) {
 }
 
 async function createLookupTable(connection, payer, addresses) {
-  const recentSlot = await connection.getSlot('confirmed');
+  const recentSlot = await connection.getSlot('finalized');
   const [createInstruction, lookupTableAddress] = AddressLookupTableProgram.createLookupTable({
     authority: payer.publicKey,
     payer: payer.publicKey,
