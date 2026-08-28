@@ -8,6 +8,7 @@ const timeout = Number(process.env.WATCHER_E2E_TIMEOUT_MS || 300_000);
 const WALLET_STORAGE_KEY = 'watcher-cash:walletName:v1';
 const LEGACY_WALLET_STORAGE_KEY = 'walletName';
 const E2E_WALLET_NAME = 'Watcher E2E Wallet';
+const E2E_ALTERNATE_WALLET_NAME = 'Watcher E2E Alternate Wallet';
 
 function fail(message) {
   throw new Error(message);
@@ -56,11 +57,19 @@ async function waitForCount(locator, expected, label) {
 async function connectE2eWallet(page) {
   const walletButton = page.locator('nav.topbar .wallet-adapter-button').first();
   await walletButton.click({ timeout });
-  const primaryWallet = page.getByRole('button', { name: E2E_WALLET_NAME, exact: true }).last();
-  const alternateWallet = page.getByRole('button', { name: 'Watcher E2E Alternate Wallet', exact: true }).last();
+
+  const modal = page.locator('.wallet-adapter-modal-wrapper');
+  await modal.waitFor({ state: 'visible', timeout });
+
+  // Wallet Adapter UI appends readiness text such as "Detected" to the
+  // accessible button name. Match the visible wallet row by text instead of an
+  // exact aria name so the regression remains stable across adapter UI labels.
+  const primaryWallet = modal.locator('button').filter({ hasText: E2E_WALLET_NAME }).first();
+  const alternateWallet = modal.locator('button').filter({ hasText: E2E_ALTERNATE_WALLET_NAME }).first();
   await primaryWallet.waitFor({ state: 'visible', timeout });
   await alternateWallet.waitFor({ state: 'visible', timeout });
   await primaryWallet.click();
+
   await page.waitForFunction(
     ({ key, legacy, wallet }) => (
       window.localStorage.getItem(key) === JSON.stringify(wallet)
