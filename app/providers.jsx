@@ -16,6 +16,7 @@ import {
   VersionedTransaction,
   clusterApiUrl,
 } from '@solana/web3.js';
+import { createWatcherE2EWallet, watcherE2EEnabled } from './e2e-wallet';
 
 const WATCHER_RELIABLE_SEND_PATCH = '__watcherReliableDevnetSendV1';
 const WATCHER_WALLET_SEND_PATCH = '__watcherWalletDirectRpcSendV2';
@@ -48,7 +49,7 @@ function installReliableDevnetSend() {
     const signature = await originalSendRawTransaction.call(this, rawTransaction, sendOptions);
     const endpoint = String(this.rpcEndpoint || '');
 
-    if (!endpoint.toLowerCase().includes('devnet')) return signature;
+    if (!endpoint.toLowerCase().includes('devnet') && !watcherE2EEnabled()) return signature;
 
     const rawCopy = rawTransaction instanceof Uint8Array
       ? rawTransaction.slice()
@@ -265,19 +266,20 @@ function ReliableWalletTransport({ children }) {
       value: async (transaction, targetConnection = connection, options = {}) => {
         const rpc = targetConnection || connection;
         const endpoint = String(rpc?.rpcEndpoint || '').toLowerCase();
+        const useDappTransport = endpoint.includes('devnet') || watcherE2EEnabled();
 
         // Wallet Standard wallets such as Phantom prefer signAndSendTransaction.
-        // For this devnet app we deliberately ask the wallet to sign only, then
-        // submit the exact signed bytes through the RPC that the dapp verified.
-        if (!endpoint.includes('devnet') || typeof adapter.signTransaction !== 'function') {
+        // For the verified devnet app we deliberately ask the wallet to sign only,
+        // then submit the exact signed bytes through the RPC that the dapp verified.
+        if (!useDappTransport || typeof adapter.signTransaction !== 'function') {
           return originalSendTransaction(transaction, rpc, options);
         }
 
         let transactionToSign = transaction;
         if (transaction instanceof Transaction && !legacyTransactionFits(transaction)) {
           // Groth16 withdrawals are larger than Solana's legacy 1232-byte packet cap.
-          // Create/reuse a wallet-owned devnet ALT and compile the same instructions
-          // into a v0 transaction before Phantom signs them.
+          // Create/reuse a wallet-owned ALT and compile the same instructions into a
+          // v0 transaction before the wallet signs them.
           transactionToSign = await convertOversizedLegacyTransaction(adapter, rpc, transaction);
         }
 
@@ -303,6 +305,10 @@ export default function Providers({ children }) {
     () => process.env.NEXT_PUBLIC_RPC_URL || clusterApiUrl('devnet'),
     [],
   );
+  const wallets = useMemo(() => {
+    const e2eWallet = createWatcherE2EWallet();
+    return e2eWallet ? [e2eWallet] : [];
+  }, []);
 
   useEffect(() => {
     installReliableDevnetSend();
@@ -310,7 +316,7 @@ export default function Providers({ children }) {
 
   return (
     <ConnectionProvider endpoint={endpoint} config={{ commitment: 'confirmed' }}>
-      <WalletProvider wallets={[]} autoConnect>
+      <WalletProvider wallets={wallets} autoConnect>
         <ReliableWalletTransport>
           <WalletModalProvider>{children}</WalletModalProvider>
         </ReliableWalletTransport>
