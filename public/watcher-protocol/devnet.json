@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "cluster": "devnet",
+  "rpcUrl": "https://api.devnet.solana.com",
+  "genesisHash": "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG",
+  "programId": "9urFwd6gEYwkc5Dc8YYakYCX4VEosCRdgfQAz88fYEv5",
+  "config": "CFp2KeLCcA1U8Yc5HttBE9nacYNRsUq6BL4kfTxeD3aK",
+  "commitments": "oMaydFZW6njS9JzFJVG8Te1dqQUYBhQhyV8SCHPbsw6",
+  "nullifiers": "2ZL4oVSNXjh8MSXQzZTUofZjawVAmnzDC13hEuT6dufe",
+  "rootHistory": "5wSrEN4EU2zrhZ85T4KcWqJyn3q5yHh31MRBkTKFb5PP",
+  "vault": "7UC5MA74nZ2KzPC9a5Pts1M2vB8hMWqLBPFCGbEpkSgD",
+  "treasury": "CMuYRGZnEQa4FtTHGnf3XSTGW49mUpBhKXMZos8TVG5D",
+  "relayer": "APRPAGGWPF3x6xwBmpRPDQDZNwGcZLuxSDbFyoD67MFM",
+  "assetId": "1",
+  "protocolFeeLamports": "0",
+  "relayerFeeLamports": "0",
+  "commitmentCapacity": 16,
+  "proverBasePath": "/watcher-cash/watcher-prover",
+  "createdAt": "2026-08-28T12:59:00.270Z",
+  "transactions": {
+    "createProtocolAccounts": "Qt9S5PLFHC16Q9h6RBwPSL3UN1HWHh3GtQw94LaAakLMKnmB6ZjGH8P9yd4BZNECqmQJhbUn7NBeUKde6BBcf3h",
+    "fundPayoutAccounts": "33pSNW5q2mibXdJy41LAWFWsTSNL1CeatWtr9aMxLv8HYAKoNvAHVJwZiKEqHVB22GsTYHKCpf2rhvaygqzVX7H4",
+    "initialize": "3fCTGF6YA1xdmwuBLGZNSK3Pqbgpex1mqNJXd124yLcHG7ENoMN6ok4v4xrZAULSdugidhpPyxT515Bba8p7GCU9"
+  },
+  "warning": "DEVELOPMENT DEVNET DEPLOYMENT. Do not use mainnet funds.",
+  "status": "ready",
+  "proverReleaseTag": "watcher-devnet-prover-e6ab8d55f34bfc5c",
+  "proverBundleSha256": "e6ab8d55f34bfc5c6d000219fc5c8878b36984c5b6bdeceeae67feb025fd4f5b",
+  "programSha256": "6b6183fbd37dda13066bccf620f9e4123aed0d78c273e5b9feb9f5382196da31",
+  "sourceCommit": "3c2ace3806c9e4c91c886e58da0fa32d0d096bc8",
+  "updatedAt": "2026-08-28T12:59:15Z"
+}
