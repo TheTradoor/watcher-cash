@@ -1,5 +1,6 @@
 name: Deploy Watcher Protocol to GitHub Pages
 
+# Final clean-state deployment verification.
 on:
   push:
     branches: [watcher-protocol]
