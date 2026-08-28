@@ -20,7 +20,6 @@ jobs:
     timeout-minutes: 75
     env:
       SOLANA_VERSION: v4.0.0
-      MATCHED_PROVER_RUN_ID: '33078034559'
     steps:
       - uses: actions/checkout@v4
 
@@ -29,6 +28,11 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+          cache-dependency-path: circuits/withdraw/go.sum
 
       - name: Install Agave SBF toolchain
         shell: bash
@@ -60,22 +64,39 @@ jobs:
           sha256sum target/deploy/watcher_protocol_program.so | tee /tmp/program-sha256.txt
           ls -lh target/deploy/watcher_protocol_program.so
 
-      - name: Download the exact matched local-prover bundle
-        uses: actions/download-artifact@v4
-        with:
-          name: watcher-local-prover-v1-dev
-          path: /tmp/watcher-prover
-          github-token: ${{ github.token }}
-          repository: TheTradoor/watcher-cash
-          run-id: ${{ env.MATCHED_PROVER_RUN_ID }}
+      - name: Download synchronized matched prover bundle
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/watcher-prover-release /tmp/watcher-prover-extract /tmp/watcher-prover-assets
+          mkdir -p /tmp/watcher-prover-release /tmp/watcher-prover-extract /tmp/watcher-prover-assets
+          gh release download watcher-dev-prover \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern 'watcher-development-prover-bundle.tar.gz' \
+            --pattern 'watcher-development-prover-bundle.tar.gz.sha256' \
+            --dir /tmp/watcher-prover-release
+          (
+            cd /tmp/watcher-prover-release
+            sha256sum --check watcher-development-prover-bundle.tar.gz.sha256
+          )
+          tar -xzf /tmp/watcher-prover-release/watcher-development-prover-bundle.tar.gz \
+            -C /tmp/watcher-prover-extract
+          BUNDLE_DIR=$(dirname "$(find /tmp/watcher-prover-extract -type f -name deposit.r1cs -print -quit)")
+          test -n "$BUNDLE_DIR"
+          cp -a "$BUNDLE_DIR/." /tmp/watcher-prover-assets/
+          for name in deposit.r1cs deposit.pk deposit.vk withdraw.r1cs withdraw.pk withdraw.vk manifest.json; do
+            test -s "/tmp/watcher-prover-assets/$name"
+          done
+          go -C circuits/withdraw build -trimpath -o /tmp/watcher-prover-bin ./cmd/watcher-prover
 
       - name: Start and verify the local prover
         shell: bash
         run: |
           set -euo pipefail
-          chmod +x /tmp/watcher-prover/watcher-prover-linux-amd64
-          nohup /tmp/watcher-prover/watcher-prover-linux-amd64 \
-            -assets /tmp/watcher-prover \
+          nohup /tmp/watcher-prover-bin \
+            -assets /tmp/watcher-prover-assets \
             -listen 127.0.0.1:8090 \
             -origins http://localhost:3000,http://127.0.0.1:3000 \
             >/tmp/watcher-prover.log 2>&1 &
