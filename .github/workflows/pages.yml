@@ -12,6 +12,7 @@ on:
       - 'scripts/test-browser-prover-wasm.mjs'
       - 'scripts/watcher-runtime-verify.mjs'
       - 'package.json'
+      - 'package-lock.json'
       - 'next.config.mjs'
       - '.github/workflows/pages.yml'
   workflow_dispatch:
@@ -53,8 +54,8 @@ jobs:
           go-version: '1.25.x'
           cache-dependency-path: circuits/withdraw/go.sum
 
-      - name: Install web dependencies
-        run: npm install --ignore-scripts --no-audit --no-fund
+      - name: Install locked web dependencies
+        run: npm ci --ignore-scripts --no-audit --no-fund
 
       - name: Verify published persistent devnet runtime
         shell: bash
