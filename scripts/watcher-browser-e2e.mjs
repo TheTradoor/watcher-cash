@@ -77,6 +77,14 @@ async function main() {
 
     const primary = page.locator('.primary-action');
     await waitForText(primary, 'Unlock private notes', 'wallet connection');
+
+    console.log('Locked withdrawal UX');
+    await page.getByRole('button', { name: 'Withdraw', exact: true }).click();
+    await waitForCount(page.locator('.withdraw-readiness'), 0, 'locked withdrawal guidance hidden');
+    await waitForExactText(page.locator('.capacity-card .side-data-row strong'), '—', 'locked nullifier placeholder');
+    await waitForText(primary, 'Unlock private notes', 'locked withdrawal action');
+    await page.getByRole('button', { name: 'Deposit privately', exact: true }).click();
+
     await primary.click();
     await waitForText(page.locator('.feedback-success'), 'Private note vault unlocked and synced.', 'vault unlock');
 
@@ -126,14 +134,21 @@ async function main() {
     await waitForExactText(page.locator('.capacity-card .capacity-number strong'), '3', 'final commitment count');
     await waitForExactText(page.locator('.capacity-card .side-data-row strong'), '2', 'final nullifier count');
     await waitForText(
-      page.locator('.preview-card'),
-      'Another withdrawal needs 2 confirmed notes. Deposit 1 more private note to continue.',
+      page.locator('.withdraw-readiness'),
+      'Withdrawal requires 2 confirmed notes. You have 1. Deposit 1 more note to continue.',
       'post-withdraw guidance',
     );
-    await waitForText(primary, 'Deposit 1 more note to withdraw again', 'post-withdraw button label');
-    if (!(await primary.isDisabled())) {
-      fail('post-withdraw UX regression: withdrawal button should be disabled with only one confirmed note');
+    await waitForText(primary, 'Deposit 1 more note', 'post-withdraw button label');
+    if (await primary.isDisabled()) {
+      fail('post-withdraw UX regression: deposit shortcut should remain clickable');
     }
+    await primary.click();
+    await waitForText(primary, 'Generate proof & deposit', 'deposit shortcut destination');
+    await waitForText(
+      page.locator('.feedback-info'),
+      'Deposit 1 more private note, then return to Withdraw.',
+      'deposit shortcut feedback',
+    );
 
     // The encrypted inventory intentionally retains spent notes as local history.
     // After two deposits and one two-input withdrawal it should contain two spent
@@ -156,7 +171,16 @@ async function main() {
 
     console.log(JSON.stringify({
       status: 'pass',
-      flow: ['connect', 'unlock', 'deposit', 'deposit', 'withdraw-v0-alt', 'sync', 'post-withdraw-guidance'],
+      flow: [
+        'connect',
+        'locked-withdraw-clean',
+        'unlock',
+        'deposit',
+        'deposit',
+        'withdraw-v0-alt',
+        'sync',
+        'post-withdraw-deposit-shortcut',
+      ],
       lookupTableAddress,
       final: {
         privateBalanceSol: '0.01',
@@ -165,7 +189,7 @@ async function main() {
         pendingNotes: 0,
         commitmentCount: 3,
         spentNullifiers: 2,
-        withdrawalBlockedUntilSecondNote: true,
+        depositShortcutReady: true,
       },
     }, null, 2));
   } catch (error) {
