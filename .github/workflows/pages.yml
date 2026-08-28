@@ -1,6 +1,5 @@
 name: Deploy Watcher Protocol to GitHub Pages
 
-# Final clean-state deployment verification.
 on:
   push:
     branches: [watcher-protocol]
@@ -95,6 +94,7 @@ jobs:
 
       - name: Verify browser-local deposit and withdrawal proving
         run: |
+          set -euo pipefail
           node scripts/test-browser-prover-wasm.mjs \
             circuits/withdraw/fixture-out/pages-prover \
             circuits/withdraw/fixture-out/pages-prover/watcher-prover.wasm \
@@ -117,7 +117,7 @@ jobs:
           readelf --header target/deploy/watcher_protocol_program.so | grep 'Flags:.*0x3'
           sha256sum target/deploy/watcher_protocol_program.so | tee /tmp/watcher-program-sha256.txt
 
-      - name: Deploy an ephemeral immutable-by-key-loss devnet instance
+      - name: Attempt an ephemeral devnet deployment without blocking Pages
         env:
           WATCHER_DEPLOY_RPC: ${{ secrets.NEXT_PUBLIC_RPC_URL }}
         shell: bash
@@ -128,46 +128,118 @@ jobs:
           PROGRAM=/tmp/watcher-pages-program.json
           trap 'rm -f "$PAYER" "$PROGRAM"' EXIT
 
+          write_fallback_runtime() {
+            local reason="$1"
+            local genesis_hash
+            local created_at
+            mkdir -p public/watcher-protocol
+            genesis_hash="$(solana genesis-hash --url "$PUBLIC_DEVNET_RPC" 2>/dev/null || true)"
+            created_at="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+            jq -n \
+              --arg cluster 'devnet' \
+              --arg genesisHash "$genesis_hash" \
+              --arg status 'configuration-required' \
+              --arg reason "$reason" \
+              --arg createdAt "$created_at" \
+              '{
+                cluster: $cluster,
+                genesisHash: $genesisHash,
+                status: $status,
+                reason: $reason,
+                programId: "",
+                config: "",
+                commitments: "",
+                nullifiers: "",
+                rootHistory: "",
+                vault: "",
+                treasury: "",
+                relayer: "",
+                commitmentCapacity: 16,
+                createdAt: $createdAt,
+                transactions: {}
+              }' > public/watcher-protocol/devnet.json
+            {
+              echo 'status=configuration-required'
+              echo "reason=$reason"
+            } > /tmp/watcher-public-deployment.txt
+            jq '{
+              status,
+              reason,
+              cluster,
+              genesisHash,
+              programId,
+              config,
+              commitments,
+              nullifiers,
+              rootHistory,
+              vault,
+              treasury,
+              relayer,
+              commitmentCapacity,
+              createdAt,
+              transactions
+            }' public/watcher-protocol/devnet.json > /tmp/watcher-deployment-evidence.json
+          }
+
           solana-keygen new --silent --no-bip39-passphrase --force --outfile "$PAYER"
           solana-keygen new --silent --no-bip39-passphrase --force --outfile "$PROGRAM"
           PAYER_ADDRESS=$(solana address --keypair "$PAYER")
           PROGRAM_ID=$(solana address --keypair "$PROGRAM")
-          echo "program_id=$PROGRAM_ID" | tee /tmp/watcher-public-deployment.txt
 
           required_lamports=4500000000
-          for attempt in $(seq 1 15); do
-            current=$(solana balance "$PAYER_ADDRESS" --url "$RPC" --lamports 2>/dev/null | awk '{print $1}' || echo 0)
+          current=0
+          for attempt in $(seq 1 5); do
+            current=$(solana balance "$PAYER_ADDRESS" --url "$RPC" --lamports 2>/dev/null | awk '{print $1}' || true)
             current=${current:-0}
             echo "Devnet payer balance attempt ${attempt}: ${current} lamports"
             if [ "$current" -ge "$required_lamports" ]; then
               break
             fi
             solana airdrop 2 "$PAYER_ADDRESS" --url "$RPC" --commitment confirmed || true
-            sleep $((attempt < 5 ? 8 : 18))
+            sleep 5
           done
-          current=$(solana balance "$PAYER_ADDRESS" --url "$RPC" --lamports | awk '{print $1}')
+          current=$(solana balance "$PAYER_ADDRESS" --url "$RPC" --lamports 2>/dev/null | awk '{print $1}' || true)
+          current=${current:-0}
+
           if [ "$current" -lt "$required_lamports" ]; then
-            echo "Devnet faucet did not fund the ephemeral deployment payer." >&2
-            exit 1
+            echo '::warning::Public devnet faucet unavailable; publishing a configuration-required runtime instead.'
+            write_fallback_runtime 'The public devnet faucet could not fund the ephemeral deployment. Configure a deployed Watcher program in Protocol Settings.'
+            exit 0
           fi
 
-          solana program deploy \
+          if ! solana program deploy \
             --url "$RPC" \
             --keypair "$PAYER" \
             --program-id "$PROGRAM" \
             target/deploy/watcher_protocol_program.so \
-            | tee /tmp/watcher-deploy.log
+            | tee /tmp/watcher-deploy.log; then
+            echo '::warning::Devnet program deployment failed; publishing a configuration-required runtime instead.'
+            write_fallback_runtime 'The optional ephemeral devnet program deployment failed. Configure a deployed Watcher program in Protocol Settings.'
+            exit 0
+          fi
 
-          WATCHER_PROGRAM_ID="$PROGRAM_ID" \
-          WATCHER_PAYER_KEYPAIR="$PAYER" \
-          WATCHER_RPC_URL="$RPC" \
-          WATCHER_PUBLIC_RPC_URL="$PUBLIC_DEVNET_RPC" \
-          WATCHER_PUBLIC_BASE_PATH="$NEXT_PUBLIC_BASE_PATH" \
-          WATCHER_RUNTIME_OUT=public/watcher-protocol/devnet.json \
-          node scripts/watcher-devnet-bootstrap.mjs \
-            | tee /tmp/watcher-bootstrap.log
+          if ! WATCHER_PROGRAM_ID="$PROGRAM_ID" \
+            WATCHER_PAYER_KEYPAIR="$PAYER" \
+            WATCHER_RPC_URL="$RPC" \
+            WATCHER_PUBLIC_RPC_URL="$PUBLIC_DEVNET_RPC" \
+            WATCHER_PUBLIC_BASE_PATH="$NEXT_PUBLIC_BASE_PATH" \
+            WATCHER_RUNTIME_OUT=public/watcher-protocol/devnet.json \
+            node scripts/watcher-devnet-bootstrap.mjs \
+            | tee /tmp/watcher-bootstrap.log; then
+            echo '::warning::Devnet bootstrap failed; publishing a configuration-required runtime instead.'
+            write_fallback_runtime 'The optional ephemeral devnet protocol bootstrap failed. Configure a deployed Watcher program in Protocol Settings.'
+            exit 0
+          fi
 
+          runtime_tmp=$(mktemp)
+          jq '. + {status: "ready"}' public/watcher-protocol/devnet.json > "$runtime_tmp"
+          mv "$runtime_tmp" public/watcher-protocol/devnet.json
+          {
+            echo 'status=ready'
+            echo "program_id=$PROGRAM_ID"
+          } > /tmp/watcher-public-deployment.txt
           jq '{
+            status,
             cluster,
             genesisHash,
             programId,
@@ -182,10 +254,6 @@ jobs:
             createdAt,
             transactions
           }' public/watcher-protocol/devnet.json > /tmp/watcher-deployment-evidence.json
-
-          rm -f "$PAYER" "$PROGRAM"
-          test ! -e "$PAYER"
-          test ! -e "$PROGRAM"
 
       - name: Assemble matched browser prover assets
         shell: bash
@@ -216,12 +284,33 @@ jobs:
           test -s out/watcher-prover/watcher-prover.wasm
           test -s out/watcher-prover/assets/deposit.pk
           test -s out/watcher-prover/assets/withdraw.pk
-          ! grep -R --line-number --fixed-strings 'privacycash' out/_next/static || true
 
-      - name: Upload sanitized deployment evidence
+          runtime_status=$(jq -r '.status' out/watcher-protocol/devnet.json)
+          case "$runtime_status" in
+            ready)
+              test -n "$(jq -r '.programId' out/watcher-protocol/devnet.json)"
+              test -n "$(jq -r '.config' out/watcher-protocol/devnet.json)"
+              test -n "$(jq -r '.vault' out/watcher-protocol/devnet.json)"
+              ;;
+            configuration-required)
+              test "$(jq -r '.programId' out/watcher-protocol/devnet.json)" = ''
+              test -n "$(jq -r '.reason' out/watcher-protocol/devnet.json)"
+              ;;
+            *)
+              echo "Unexpected Watcher runtime status: $runtime_status" >&2
+              exit 1
+              ;;
+          esac
+
+          if grep -R --line-number --fixed-strings 'privacycash' out/_next/static; then
+            echo 'Legacy privacycash runtime was found in the exported application.' >&2
+            exit 1
+          fi
+
+      - name: Upload sanitized runtime evidence
         uses: actions/upload-artifact@v4
         with:
-          name: watcher-pages-devnet-deployment
+          name: watcher-pages-devnet-runtime
           path: |
             /tmp/watcher-public-deployment.txt
             /tmp/watcher-program-sha256.txt
