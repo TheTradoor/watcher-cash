@@ -11,6 +11,11 @@ on:
       - 'client/watcher/merkle-v2.mjs'
       - 'client/watcher/selection-v2.mjs'
       - 'client/watcher/v2.test.mjs'
+      - 'client/watcher/instructions-v2.mjs'
+      - 'client/watcher/instructions-v2.test.mjs'
+      - 'client/watcher/bindings-v2.mjs'
+      - 'client/watcher/bindings-v2.test.mjs'
+      - 'client/watcher/public-inputs-v2.mjs'
       - 'programs/watcher-protocol/src/v2/**'
       - 'programs/watcher-protocol/src/lib.rs'
       - 'WATCHER_PROTOCOL_V2.md'
@@ -44,8 +49,12 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '24.x'
-      - name: Test sparse Merkle tree and bounded note selection
-        run: node --test client/watcher/v2.test.mjs
+      - name: Test V2 sparse tree, selection, compact wire and bindings
+        run: >-
+          node --test
+          client/watcher/v2.test.mjs
+          client/watcher/instructions-v2.test.mjs
+          client/watcher/bindings-v2.test.mjs
 
   v2-program:
     runs-on: ubuntu-latest
@@ -54,4 +63,16 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - name: Test compact V2 codec, public-input reconstruction, roots and nullifier markers
-        run: cargo test --manifest-path programs/watcher-protocol/Cargo.toml --lib --locked 'v2::'
+        shell: bash
+        run: |
+          set -o pipefail
+          log="$RUNNER_TEMP/watcher-v2-rust.log"
+          if cargo test --quiet --manifest-path programs/watcher-protocol/Cargo.toml --lib --locked 'v2::' >"$log" 2>&1; then
+            cat "$log"
+            exit 0
+          fi
+          echo 'V2 Rust test failed. Relevant diagnostics:'
+          grep -n -E 'error(\[E[0-9]+\])?:|panicked at|FAILED|failures:|test result:' "$log" || true
+          echo '--- tail ---'
+          tail -n 120 "$log"
+          exit 1
