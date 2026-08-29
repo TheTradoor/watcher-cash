@@ -37,8 +37,11 @@ on:
       - 'client/watcher/index.mjs'
       - 'programs/watcher-protocol/src/v2/**'
       - 'programs/watcher-protocol/src/lib.rs'
+      - 'scripts/watcher-v2-runtime-verify.mjs'
+      - 'scripts/watcher-v2-bootstrap.mjs'
       - 'WATCHER_PROTOCOL_V2.md'
       - '.github/workflows/watcher-v2.yml'
+      - '.github/workflows/watcher-v2-persistent-devnet.yml'
   workflow_dispatch:
 
 permissions:
@@ -75,6 +78,10 @@ jobs:
           cache: npm
       - name: Install browser dependencies
         run: npm ci
+      - name: Check V2 runtime/deployment tooling syntax
+        run: |
+          node --check scripts/watcher-v2-runtime-verify.mjs
+          node --check scripts/watcher-v2-bootstrap.mjs
       - name: Test V2 sparse tree, state, encrypted notes, backups, compact wire, browser prover and flows
         run: >-
           node --test
