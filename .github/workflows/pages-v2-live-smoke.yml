@@ -21,38 +21,64 @@ jobs:
           BASE='https://thetradoor.github.io/watcher-cash'
 
           fetch() {
-            local url="$1"
-            local output="$2"
+            local label="$1"
+            local url="$2"
+            local output="$3"
+            echo "Fetching $label: $url"
             curl --fail --silent --show-error --location \
               --retry 12 --retry-delay 3 --retry-all-errors \
               "$url" -o "$output"
-            test -s "$output"
+            test -s "$output" || { echo "$label returned an empty body" >&2; exit 1; }
+            echo "$label fetch: OK ($(wc -c < "$output") bytes)"
           }
 
-          fetch "$BASE/" /tmp/v1.html
-          fetch "$BASE/v2/" /tmp/v2.html
-          fetch "$BASE/watcher-protocol/devnet.json" /tmp/v1-runtime.json
-          fetch "$BASE/watcher-protocol/v2-devnet.json" /tmp/v2-runtime.json
-          fetch "$BASE/watcher-prover-v2/worker.js" /tmp/v2-worker.js
+          require_contains() {
+            local label="$1"
+            local needle="$2"
+            local file="$3"
+            if ! grep -F -q "$needle" "$file"; then
+              echo "$label is missing expected marker: $needle" >&2
+              head -c 2000 "$file" >&2 || true
+              echo >&2
+              exit 1
+            fi
+            echo "$label marker: OK"
+          }
+
+          require_eq() {
+            local label="$1"
+            local actual="$2"
+            local expected="$3"
+            if [ "$actual" != "$expected" ]; then
+              echo "$label mismatch: got $actual, expected $expected" >&2
+              exit 1
+            fi
+            echo "$label: OK"
+          }
+
+          fetch 'V1 root' "$BASE/" /tmp/v1.html
+          fetch 'V2 route' "$BASE/v2/" /tmp/v2.html
+          fetch 'V1 runtime' "$BASE/watcher-protocol/devnet.json" /tmp/v1-runtime.json
+          fetch 'V2 runtime' "$BASE/watcher-protocol/v2-devnet.json" /tmp/v2-runtime.json
+          fetch 'V2 worker' "$BASE/watcher-prover-v2/worker.js" /tmp/v2-worker.js
+
+          echo 'Fetching V2 WASM prefix'
           curl --fail --silent --show-error --location \
             --retry 12 --retry-delay 3 --retry-all-errors \
             --range 0-65535 "$BASE/watcher-prover-v2/watcher-v2-prover.wasm" \
             -o /tmp/v2-prover-prefix.wasm
-          test -s /tmp/v2-prover-prefix.wasm
+          test -s /tmp/v2-prover-prefix.wasm || { echo 'V2 WASM prefix is empty' >&2; exit 1; }
+          echo "V2 WASM fetch: OK ($(wc -c < /tmp/v2-prover-prefix.wasm) bytes)"
 
-          grep -F -q 'WATCHER' /tmp/v1.html
-          grep -F -q 'Watcher Protocol' /tmp/v2.html
-          grep -F -q 'PROTOCOL V2' /tmp/v2.html
+          require_contains 'V1 root' 'WATCHER' /tmp/v1.html
+          require_contains 'V2 route' 'Watcher Protocol' /tmp/v2.html
+          require_contains 'V2 route isolation marker' 'V2 · ISOLATED' /tmp/v2.html
 
-          test "$(jq -r '.programId' /tmp/v1-runtime.json)" = '9urFwd6gEYwkc5Dc8YYakYCX4VEosCRdgfQAz88fYEv5'
-          test "$(jq -r '.programId' /tmp/v2-runtime.json)" = 'DMU22YyGkLs9cuZXR6eHt4oZpWtMTMtkCNTNV8SW16HM'
-          test "$(jq -r '.status' /tmp/v2-runtime.json)" = ready
-          test "$(jq -r '.network' /tmp/v2-runtime.json)" = devnet
-          test "$(jq -r '.treeDepth' /tmp/v2-runtime.json)" = 16
-          test "$(jq -r '.treeCapacity' /tmp/v2-runtime.json)" = 65536
+          require_eq 'V1 program id' "$(jq -r '.programId' /tmp/v1-runtime.json)" '9urFwd6gEYwkc5Dc8YYakYCX4VEosCRdgfQAz88fYEv5'
+          require_eq 'V2 program id' "$(jq -r '.programId' /tmp/v2-runtime.json)" 'DMU22YyGkLs9cuZXR6eHt4oZpWtMTMtkCNTNV8SW16HM'
+          require_eq 'V2 runtime status' "$(jq -r '.status' /tmp/v2-runtime.json)" ready
+          require_eq 'V2 network' "$(jq -r '.network' /tmp/v2-runtime.json)" devnet
+          require_eq 'V2 tree depth' "$(jq -r '.treeDepth' /tmp/v2-runtime.json)" 16
+          require_eq 'V2 tree capacity' "$(jq -r '.treeCapacity' /tmp/v2-runtime.json)" 65536
 
-          echo 'Live V1 root: OK'
-          echo 'Live V1 runtime: OK'
-          echo 'Live /v2 route: OK'
-          echo 'Live V2 public runtime: OK'
-          echo 'Live V2 prover worker/WASM: OK'
+          echo 'All live V1 + V2 Pages checks passed.'
