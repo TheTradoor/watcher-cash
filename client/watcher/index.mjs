@@ -25,3 +25,4 @@ export * from './state-v2.mjs';
 export * from './public-tree-v2.mjs';
 export * from './flows-v2.mjs';
 export * from './vault-v2.mjs';
+export * from './backup-v2.mjs';
