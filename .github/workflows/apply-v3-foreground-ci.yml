@@ -1,0 +1,69 @@
+name: Apply V3 Foreground Fix CI Wiring
+
+on:
+  push:
+    branches: [watcher-protocol-v3-foreground-fix]
+    paths:
+      - '.github/workflows/apply-v3-foreground-ci.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch-ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: watcher-protocol-v3-foreground-fix
+          fetch-depth: 0
+
+      - name: Add foreground-fix branch and explicit request path to V3 gates
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          changes = [
+              (
+                  Path('.github/workflows/watcher-v3-predeploy-sanity.yml'),
+                  'branches: [watcher-protocol-v3, watcher-protocol-v3-fast-prover]',
+                  'branches: [watcher-protocol-v3, watcher-protocol-v3-fast-prover, watcher-protocol-v3-foreground-fix]',
+              ),
+              (
+                  Path('.github/workflows/watcher-v3-browser-e2e.yml'),
+                  'branches: [watcher-protocol-v3-browser, watcher-protocol-v3-fast-prover]',
+                  'branches: [watcher-protocol-v3-browser, watcher-protocol-v3-fast-prover, watcher-protocol-v3-foreground-fix]',
+              ),
+          ]
+
+          for path, old, new in changes:
+              text = path.read_text()
+              if text.count(old) != 1:
+                  raise SystemExit(f'{path}: branch selector mismatch')
+              text = text.replace(old, new, 1)
+              marker = "      - '.github/v3-foreground-ci-request'\n"
+              paths_anchor = "    paths:\n"
+              if marker not in text:
+                  if text.count(paths_anchor) != 1:
+                      raise SystemExit(f'{path}: paths anchor mismatch')
+                  text = text.replace(paths_anchor, paths_anchor + marker, 1)
+              path.write_text(text)
+          PY
+
+      - name: Validate workflow diff
+        run: |
+          set -euo pipefail
+          git diff --check
+          grep -F -q 'watcher-protocol-v3-foreground-fix' .github/workflows/watcher-v3-predeploy-sanity.yml
+          grep -F -q 'watcher-protocol-v3-foreground-fix' .github/workflows/watcher-v3-browser-e2e.yml
+          grep -F -q '.github/v3-foreground-ci-request' .github/workflows/watcher-v3-predeploy-sanity.yml
+          grep -F -q '.github/v3-foreground-ci-request' .github/workflows/watcher-v3-browser-e2e.yml
+
+      - name: Commit CI wiring
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add .github/workflows/watcher-v3-predeploy-sanity.yml .github/workflows/watcher-v3-browser-e2e.yml
+          git commit -m 'Run V3 foreground fix through isolated CI gates'
+          git push origin HEAD:watcher-protocol-v3-foreground-fix
