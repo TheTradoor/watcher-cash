@@ -61,6 +61,37 @@ function storageKey({ publicKey, scope }) {
   return `watcher-note-vault:v${VAULT_VERSION}:${normalizedScope}:${hex(keyBytes(publicKey))}`;
 }
 
+function optionalTreeMetadata(record) {
+  const protocolVersion = record.protocolVersion === undefined || record.protocolVersion === null
+    ? 1
+    : Number(record.protocolVersion);
+  if (!Number.isInteger(protocolVersion) || protocolVersion < 1 || protocolVersion > 255) {
+    throw new RangeError('note protocolVersion is invalid');
+  }
+  if (protocolVersion < 2) {
+    return {
+      protocolVersion,
+      epoch: null,
+      leafIndex: null,
+      root: '',
+    };
+  }
+  const epoch = record.epoch === undefined || record.epoch === null ? null : Number(record.epoch);
+  const leafIndex = record.leafIndex === undefined || record.leafIndex === null ? null : Number(record.leafIndex);
+  if (epoch !== null && (!Number.isSafeInteger(epoch) || epoch < 0)) {
+    throw new RangeError('note epoch is invalid');
+  }
+  if (leafIndex !== null && (!Number.isSafeInteger(leafIndex) || leafIndex < 0)) {
+    throw new RangeError('note leafIndex is invalid');
+  }
+  let root = '';
+  if (record.root !== undefined && record.root !== null && record.root !== '') {
+    const rootField = assertFieldV1(record.root, 'note root');
+    root = rootField.toString(10);
+  }
+  return { protocolVersion, epoch, leafIndex, root };
+}
+
 function normalizeRecord(record) {
   if (!record || typeof record !== 'object') throw new TypeError('note record is invalid');
   const assetId = assertFieldV1(record.assetId ?? 1n, 'note assetId');
@@ -71,6 +102,7 @@ function normalizeRecord(record) {
   if (record.commitment !== undefined && BigInt(record.commitment) !== commitment) {
     throw new Error('stored note commitment does not match its private opening');
   }
+  const tree = optionalTreeMetadata(record);
   return {
     id: String(record.id || commitment.toString(16)),
     assetId: assetId.toString(10),
@@ -87,6 +119,7 @@ function normalizeRecord(record) {
     spentAt: Number.isFinite(record.spentAt) ? record.spentAt : null,
     transaction: typeof record.transaction === 'string' ? record.transaction : '',
     spentTransaction: typeof record.spentTransaction === 'string' ? record.spentTransaction : '',
+    ...tree,
   };
 }
 
@@ -121,6 +154,10 @@ export function createNoteRecordV1({
   kind = 'deposit',
   status = 'pending',
   transaction = '',
+  protocolVersion = 1,
+  epoch = null,
+  leafIndex = null,
+  root = '',
 } = {}) {
   return normalizeRecord({
     assetId,
@@ -130,6 +167,10 @@ export function createNoteRecordV1({
     kind,
     status,
     transaction,
+    protocolVersion,
+    epoch,
+    leafIndex,
+    root,
     createdAt: Date.now(),
   });
 }
