@@ -1,0 +1,232 @@
+name: Finalize Watcher V2 Public Devnet
+
+on:
+  push:
+    branches: [watcher-protocol-v2]
+    paths:
+      - '.github/v2-finalize-public-devnet-request'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: watcher-v2-finalize-public-devnet
+  cancel-in-progress: false
+
+env:
+  WATCHER_V2_RPC_URL: https://api.devnet.solana.com
+  EXPECTED_V2_PROGRAM_ID: DMU22YyGkLs9cuZXR6eHt4oZpWtMTMtkCNTNV8SW16HM
+  DEPLOYED_PROGRAM_SHA256: 62756f7c81884729645ce7256d14d8cf905ea47ab3fbef7add8e6c02c33ababb
+  DEPLOY_SOURCE_COMMIT: 0ba3ad07ff8aa8091af100b766967a58846ce1a2
+  DEPLOY_SIGNATURE: 3dr5ei8YkSdwAzDx431XzN3jbQixbBT3GYDc3nxK3XoNtWhPiXEUQ55eP2FXcYmLb7zHsfzuwjpPdYuATi4vXonz
+
+jobs:
+  finalize:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout isolated V2 branch
+        uses: actions/checkout@v4
+        with:
+          ref: watcher-protocol-v2
+          fetch-depth: 0
+
+      - name: Decode persistent identities
+        env:
+          PAYER_KEYPAIR_B64: ${{ secrets.WATCHER_DEVNET_DEPLOYER_KEYPAIR_B64 }}
+          PROGRAM_KEYPAIR_B64: ${{ secrets.WATCHER_V2_DEVNET_PROGRAM_KEYPAIR_B64 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$PAYER_KEYPAIR_B64"
+          test -n "$PROGRAM_KEYPAIR_B64"
+          printf '%s' "$PAYER_KEYPAIR_B64" | base64 --decode > /tmp/watcher-v2-devnet-payer.json
+          printf '%s' "$PROGRAM_KEYPAIR_B64" | base64 --decode > /tmp/watcher-v2-devnet-program.json
+          chmod 600 /tmp/watcher-v2-devnet-payer.json /tmp/watcher-v2-devnet-program.json
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.x'
+          cache: npm
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+          cache-dependency-path: circuits/withdraw/go.sum
+
+      - name: Install locked web dependencies
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Verify deployed program identity and funding on public devnet
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module - <<'NODE' | tee /tmp/watcher-v2-finalize-preflight.json
+          import fs from 'node:fs';
+          import { Connection, Keypair, PublicKey } from '@solana/web3.js';
+          const secret = JSON.parse(fs.readFileSync('/tmp/watcher-v2-devnet-program.json', 'utf8'));
+          const payerSecret = JSON.parse(fs.readFileSync('/tmp/watcher-v2-devnet-payer.json', 'utf8'));
+          const program = Keypair.fromSecretKey(Uint8Array.from(secret));
+          const payer = Keypair.fromSecretKey(Uint8Array.from(payerSecret));
+          const expected = process.env.EXPECTED_V2_PROGRAM_ID;
+          if (program.publicKey.toBase58() !== expected) throw new Error('V2 program secret no longer matches deployed program id');
+          const v1 = JSON.parse(fs.readFileSync('public/watcher-protocol/devnet.json', 'utf8'));
+          if (String(v1.programId) === expected) throw new Error('V2 program id unexpectedly equals V1');
+          const connection = new Connection(process.env.WATCHER_V2_RPC_URL, 'confirmed');
+          const [programInfo, balance, tx] = await Promise.all([
+            connection.getAccountInfo(new PublicKey(expected), 'confirmed'),
+            connection.getBalance(payer.publicKey, 'confirmed'),
+            connection.getSignatureStatus(process.env.DEPLOY_SIGNATURE, { searchTransactionHistory: true }),
+          ]);
+          if (!programInfo?.executable) throw new Error('V2 program is not executable on public devnet');
+          if (tx?.value?.err) throw new Error(`V2 deployment signature failed: ${JSON.stringify(tx.value.err)}`);
+          if (balance < 300_000_000) throw new Error(`V2 deployer balance too low to bootstrap/smoke: ${balance}`);
+          console.log(JSON.stringify({
+            status: 'ready',
+            programId: expected,
+            programExecutable: programInfo.executable,
+            deploySignature: process.env.DEPLOY_SIGNATURE,
+            deploySignatureObserved: Boolean(tx?.value),
+            payer: payer.publicKey.toBase58(),
+            payerBalanceLamports: balance,
+            differsFromV1: true,
+          }, null, 2));
+          NODE
+          test ! -e public/watcher-protocol/v2-devnet.json || {
+            echo 'Persistent V2 runtime already exists; refusing finalize one-shot.' >&2
+            exit 1
+          }
+
+      - name: Install cryptographically pinned browser prover
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/install-pinned-v2-prover.mjs | tee /tmp/watcher-v2-finalize-pin.json
+          PIN=public/watcher-protocol/v2-prover-pin.json
+          RUST=programs/watcher-protocol/src/v2/development_prover_manifest_v2.json
+          test "$(jq -r '.depositVkSha256' "$PIN")" = "$(jq -r '.depositVkSha256' "$RUST")"
+          test "$(jq -r '.withdrawVkSha256' "$PIN")" = "$(jq -r '.withdrawVkSha256' "$RUST")"
+
+      - name: Build matched V2 CLI prover
+        shell: bash
+        run: |
+          set -euo pipefail
+          go -C circuits/withdraw test -run '^(TestCircuitV2|TestDepositCircuitV2|TestProverV2)' .
+          go -C circuits/withdraw build -trimpath -o /tmp/watcher-v2-prover ./cmd/watcher-v2-prover
+          test -s /tmp/watcher-v2-prover
+
+      - name: Bootstrap fresh persistent V2 config tree and vault
+        shell: bash
+        run: |
+          set -euo pipefail
+          WATCHER_V2_PROGRAM_ID="$EXPECTED_V2_PROGRAM_ID" \
+          WATCHER_V2_PAYER_KEYPAIR=/tmp/watcher-v2-devnet-payer.json \
+          WATCHER_V2_RPC_URL="$WATCHER_V2_RPC_URL" \
+          WATCHER_V2_RUNTIME_OUT=public/watcher-protocol/v2-devnet.json \
+          WATCHER_V2_PROVER_BASE_PATH=/watcher-cash/watcher-prover-v2 \
+          WATCHER_V2_NETWORK=devnet \
+          WATCHER_V2_RELAYER_FEE_LAMPORTS=0 \
+          node scripts/watcher-v2-bootstrap.mjs \
+          | tee /tmp/watcher-v2-finalize-bootstrap.json
+
+      - name: Seal runtime to exact pinned prover and deployed SBF
+        shell: bash
+        run: |
+          set -euo pipefail
+          RUNTIME=public/watcher-protocol/v2-devnet.json
+          PIN=public/watcher-protocol/v2-prover-pin.json
+          UPDATED_AT=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+          TMP=$(mktemp)
+          jq \
+            --arg status ready \
+            --arg programId "$EXPECTED_V2_PROGRAM_ID" \
+            --arg proverBasePath "/watcher-cash/watcher-prover-v2" \
+            --arg proverReleaseTag "$(jq -r '.releaseTag' "$PIN")" \
+            --arg proverBundleSha256 "$(jq -r '.bundleSha256' "$PIN")" \
+            --arg depositVkSha256 "$(jq -r '.depositVkSha256' "$PIN")" \
+            --arg withdrawVkSha256 "$(jq -r '.withdrawVkSha256' "$PIN")" \
+            --arg programSha256 "$DEPLOYED_PROGRAM_SHA256" \
+            --arg sourceCommit "$DEPLOY_SOURCE_COMMIT" \
+            --arg deploySignature "$DEPLOY_SIGNATURE" \
+            --arg updatedAt "$UPDATED_AT" \
+            '. + {
+              status: $status,
+              network: "devnet",
+              rpcUrl: "https://api.devnet.solana.com",
+              programId: $programId,
+              proverBasePath: $proverBasePath,
+              proverReleaseTag: $proverReleaseTag,
+              proverBundleSha256: $proverBundleSha256,
+              depositVkSha256: $depositVkSha256,
+              withdrawVkSha256: $withdrawVkSha256,
+              programSha256: $programSha256,
+              sourceCommit: $sourceCommit,
+              programDeploymentSignature: $deploySignature,
+              updatedAt: $updatedAt
+            }' "$RUNTIME" > "$TMP"
+          mv "$TMP" "$RUNTIME"
+          node scripts/watcher-v2-runtime-verify.mjs \
+            --runtime "$RUNTIME" \
+            --rpc "$WATCHER_V2_RPC_URL" \
+            --pin "$PIN" \
+            | tee /tmp/watcher-v2-finalize-runtime.json
+
+      - name: Run real public-devnet custody smoke test
+        shell: bash
+        run: |
+          set -euo pipefail
+          WATCHER_V2_RPC_URL="$WATCHER_V2_RPC_URL" \
+          WATCHER_V2_PROGRAM_ID="$EXPECTED_V2_PROGRAM_ID" \
+          WATCHER_V2_PAYER_KEYPAIR=/tmp/watcher-v2-devnet-payer.json \
+          WATCHER_V2_PROVER=/tmp/watcher-v2-prover \
+          WATCHER_V2_BUNDLE=public/watcher-prover-v2/assets \
+          WATCHER_V2_ALLOW_AIRDROP=0 \
+          WATCHER_V2_REQUIRED_PAYER_LAMPORTS=300000000 \
+          node scripts/watcher-v2-e2e.mjs \
+          | tee /tmp/watcher-v2-finalize-smoke.json
+
+      - name: Verify persistent state remains clean after separate smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/watcher-v2-runtime-verify.mjs \
+            --runtime public/watcher-protocol/v2-devnet.json \
+            --rpc "$WATCHER_V2_RPC_URL" \
+            --pin public/watcher-protocol/v2-prover-pin.json \
+            | tee /tmp/watcher-v2-finalize-post-smoke.json
+          test "$(jq -r '.nextIndex' /tmp/watcher-v2-finalize-post-smoke.json)" = 0
+          test "$(jq -r '.trackedBalance' /tmp/watcher-v2-finalize-post-smoke.json)" = 0
+
+      - name: Commit public V2 devnet runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add public/watcher-protocol/v2-devnet.json
+          git commit -m 'Publish persistent Watcher V2 public devnet runtime'
+          git fetch origin watcher-protocol-v2
+          git rebase origin/watcher-protocol-v2
+          git push origin HEAD:watcher-protocol-v2
+
+      - name: Upload sanitized finalization evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: watcher-v2-public-devnet-finalization
+          path: |
+            /tmp/watcher-v2-finalize-preflight.json
+            /tmp/watcher-v2-finalize-pin.json
+            /tmp/watcher-v2-finalize-bootstrap.json
+            /tmp/watcher-v2-finalize-runtime.json
+            /tmp/watcher-v2-finalize-smoke.json
+            /tmp/watcher-v2-finalize-post-smoke.json
+            public/watcher-protocol/v2-devnet.json
+            public/watcher-protocol/v2-prover-pin.json
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Remove deployment key material
+        if: always()
+        run: rm -f /tmp/watcher-v2-devnet-payer.json /tmp/watcher-v2-devnet-program.json
