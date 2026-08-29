@@ -1,0 +1,60 @@
+name: Watcher V2 Pinned Bundle Consumer
+
+on:
+  push:
+    branches: [watcher-protocol-v2]
+    paths:
+      - 'public/watcher-protocol/v2-prover-pin.json'
+      - 'scripts/install-pinned-v2-prover.mjs'
+      - 'app/v2/**'
+      - '.github/workflows/watcher-v2-pinned-consumer.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: watcher-v2-pinned-consumer-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pinned-browser-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.x'
+          cache: npm
+
+      - name: Install locked browser dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Install only the content-addressed pinned V2 prover release
+        run: node scripts/install-pinned-v2-prover.mjs | tee /tmp/watcher-v2-pinned-install.json
+
+      - name: Build Pages-shaped V2 static browser output
+        env:
+          NEXT_PUBLIC_BASE_PATH: /watcher-cash
+          NEXT_PUBLIC_RPC_URL: https://api.devnet.solana.com
+          NEXT_PUBLIC_WATCHER_V2_RUNTIME_URL: /watcher-cash/watcher-protocol/v2-devnet.json
+          NEXT_PUBLIC_WATCHER_V2_PROVER_BASE: /watcher-cash/watcher-prover-v2
+        run: npm run build
+
+      - name: Verify pinned bytes survive static export unchanged
+        run: |
+          set -euo pipefail
+          test -s out/v2/index.html
+          test -s out/watcher-prover-v2/watcher-v2-prover.wasm
+          test -s out/watcher-prover-v2/worker.js
+          test -s out/watcher-prover-v2/assets/manifest.json
+          for name in deposit.r1cs deposit.pk deposit.vk withdraw.r1cs withdraw.pk withdraw.vk; do
+            test -s "out/watcher-prover-v2/assets/$name"
+            test "$(sha256sum "public/watcher-prover-v2/assets/$name" | awk '{print $1}')" = "$(sha256sum "out/watcher-prover-v2/assets/$name" | awk '{print $1}')"
+          done
+          test "$(sha256sum public/watcher-prover-v2/watcher-v2-prover.wasm | awk '{print $1}')" = "$(sha256sum out/watcher-prover-v2/watcher-v2-prover.wasm | awk '{print $1}')"
+          PIN_TAG=$(jq -r '.releaseTag' public/watcher-protocol/v2-prover-pin.json)
+          INSTALL_TAG=$(jq -r '.releaseTag' /tmp/watcher-v2-pinned-install.json)
+          test "$PIN_TAG" = "$INSTALL_TAG"
+          echo "Pinned V2 static browser build verified: $PIN_TAG"
