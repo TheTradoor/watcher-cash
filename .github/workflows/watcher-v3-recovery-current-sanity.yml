@@ -1,0 +1,60 @@
+name: Watcher V3 Recovery Current Sanity
+
+on:
+  push:
+    branches: [watcher-protocol-v3-recovery-current]
+    paths:
+      - '.github/workflows/watcher-v3-recovery-current-sanity.yml'
+      - 'app/v3/**'
+      - 'client/watcher/backup-v3*'
+      - 'client/watcher/index.mjs'
+
+permissions:
+  contents: read
+
+jobs:
+  sanity:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: watcher-protocol-v3-recovery-current
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.x'
+          cache: npm
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+          cache-dependency-path: circuits/withdraw/go.sum
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install locked dependencies
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Test recovery plus current circuit-scoped prover surface
+        run: >-
+          node --test
+          client/watcher/backup-v3.test.mjs
+          client/watcher/browser-prover-v2.test.mjs
+          client/watcher/browser-prover-v3.test.mjs
+          client/watcher/instructions-v3.test.mjs
+          client/watcher/flows-v3.test.mjs
+          client/watcher/vault-v3.test.mjs
+
+      - name: Test current Go prover implementation
+        run: go -C circuits/withdraw test ./...
+
+      - name: Build production V3 recovery UI on current public runtime
+        env:
+          NEXT_PUBLIC_BASE_PATH: /watcher-cash
+          NEXT_PUBLIC_RPC_URL: https://api.devnet.solana.com
+          NEXT_PUBLIC_WATCHER_V3_RUNTIME_URL: /watcher-cash/watcher-protocol/v3-devnet.json
+          NEXT_PUBLIC_WATCHER_V3_PROVER_BASE: /watcher-cash/watcher-prover-v3
+        run: |
+          set -euo pipefail
+          npm run build
+          test -s out/v3/index.html
+          grep -R -F -q '/watcher-cash/watcher-prover-v3' out/v3 out/_next
+          grep -R -F -q 'PORTABLE RECOVERY' out/v3 out/_next
