@@ -5,6 +5,7 @@ on:
     branches: [watcher-protocol-v3]
     paths:
       - 'public/watcher-protocol/v3-devnet.json'
+      - '.github/v3-smoke-request'
   workflow_dispatch:
 
 permissions:
@@ -59,13 +60,23 @@ jobs:
       - name: Verify runtime and shared pinned prover before custody test
         run: |
           set -euo pipefail
-          node scripts/watcher-v3-runtime-verify.mjs \
-            --runtime public/watcher-protocol/v3-devnet.json \
-            --rpc "$WATCHER_V3_RPC_URL" \
-            --pin public/watcher-protocol/v2-prover-pin.json \
-            | tee /tmp/watcher-v3-runtime-before-smoke.json
+          success=0
+          for attempt in 1 2 3 4 5 6; do
+            if node scripts/watcher-v3-runtime-verify.mjs \
+              --runtime public/watcher-protocol/v3-devnet.json \
+              --rpc "$WATCHER_V3_RPC_URL" \
+              --pin public/watcher-protocol/v2-prover-pin.json \
+              > /tmp/watcher-v3-runtime-before-smoke.json; then
+              success=1
+              cat /tmp/watcher-v3-runtime-before-smoke.json
+              break
+            fi
+            sleep $((attempt * 5))
+          done
+          test "$success" = 1
           test "$(jq -r '.nextIndex' /tmp/watcher-v3-runtime-before-smoke.json)" = 0
           test "$(jq -r '.trackedBalance' /tmp/watcher-v3-runtime-before-smoke.json)" = 0
+          test "$(jq -r '.packedNullifiers' /tmp/watcher-v3-runtime-before-smoke.json)" = 0
           node scripts/install-pinned-v2-prover.mjs
           test -s public/watcher-prover-v2/assets/deposit.pk
           test -s public/watcher-prover-v2/assets/withdraw.pk
@@ -97,13 +108,24 @@ jobs:
       - name: Verify persistent runtime after smoke
         run: |
           set -euo pipefail
-          node scripts/watcher-v3-runtime-verify.mjs \
-            --runtime public/watcher-protocol/v3-devnet.json \
-            --rpc "$WATCHER_V3_RPC_URL" \
-            --pin public/watcher-protocol/v2-prover-pin.json \
-            | tee /tmp/watcher-v3-runtime-after-smoke.json
+          success=0
+          for attempt in 1 2 3 4 5 6; do
+            if node scripts/watcher-v3-runtime-verify.mjs \
+              --runtime public/watcher-protocol/v3-devnet.json \
+              --rpc "$WATCHER_V3_RPC_URL" \
+              --pin public/watcher-protocol/v2-prover-pin.json \
+              > /tmp/watcher-v3-runtime-after-smoke.json; then
+              success=1
+              cat /tmp/watcher-v3-runtime-after-smoke.json
+              break
+            fi
+            sleep $((attempt * 5))
+          done
+          test "$success" = 1
           test "$(jq -r '.nextIndex' /tmp/watcher-v3-runtime-after-smoke.json)" = 1
           test "$(jq -r '.trackedBalance' /tmp/watcher-v3-runtime-after-smoke.json)" = 0
+          test "$(jq -r '.packedNullifiers' /tmp/watcher-v3-runtime-after-smoke.json)" = 1
+          test "$(jq -r '.packedBytesBeyondHeaders' /tmp/watcher-v3-runtime-after-smoke.json)" = 36
 
       - name: Publish sanitized V3 smoke evidence
         run: |
