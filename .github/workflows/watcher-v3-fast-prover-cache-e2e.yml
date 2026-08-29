@@ -1,0 +1,72 @@
+name: Watcher V3 Fast Prover Cache Security E2E
+
+on:
+  push:
+    branches: [watcher-protocol-v3-fast-prover]
+    paths:
+      - 'client/watcher/browser-prover-v3-fast.worker.js'
+      - 'scripts/watcher-v3-fast-prover-cache-e2e.mjs'
+      - '.github/workflows/watcher-v3-fast-prover-cache-e2e.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: watcher-v3-fast-prover-cache-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cache-security:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.x'
+          cache: npm
+
+      - name: Install locked dependencies and Chromium
+        run: |
+          npm ci --no-audit --no-fund
+          npm install --no-save --package-lock=false playwright@1.55.0
+          npx playwright install --with-deps chromium
+
+      - name: Assemble exact pinned V2/V3 bundle with V3-only fast worker
+        run: |
+          set -euo pipefail
+          node scripts/install-pinned-v2-prover.mjs
+          rm -rf /tmp/watcher-v3-cache-site
+          mkdir -p /tmp/watcher-v3-cache-site
+          cp -a public/watcher-prover-v2 /tmp/watcher-v3-cache-site/watcher-prover-v3
+          cp client/watcher/browser-prover-v3-fast.worker.js /tmp/watcher-v3-cache-site/watcher-prover-v3/worker.js
+          node --check /tmp/watcher-v3-cache-site/watcher-prover-v3/worker.js
+          node --check scripts/watcher-v3-fast-prover-cache-e2e.mjs
+          printf '<!doctype html><meta charset="utf-8"><title>Watcher V3 cache test</title>\n' > /tmp/watcher-v3-cache-site/index.html
+
+      - name: Serve exact fast-prover bundle
+        run: |
+          python3 -m http.server 3000 --directory /tmp/watcher-v3-cache-site > /tmp/watcher-v3-cache-site.log 2>&1 &
+          echo $! > /tmp/watcher-v3-cache-site.pid
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:3000/watcher-prover-v3/assets/manifest.json >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          exit 1
+
+      - name: Prove cached assets are integrity-bound and self-repairing
+        env:
+          WATCHER_V3_CACHE_E2E_URL: http://127.0.0.1:3000/
+          WATCHER_V3_CACHE_E2E_PROVER_BASE: /watcher-prover-v3
+          WATCHER_V3_CACHE_E2E_TIMEOUT_MS: '180000'
+        run: node scripts/watcher-v3-fast-prover-cache-e2e.mjs | tee /tmp/watcher-v3-cache-e2e.json
+
+      - name: Stop cache test server
+        if: always()
+        run: |
+          if test -f /tmp/watcher-v3-cache-site.pid; then
+            kill "$(cat /tmp/watcher-v3-cache-site.pid)" || true
+          fi
