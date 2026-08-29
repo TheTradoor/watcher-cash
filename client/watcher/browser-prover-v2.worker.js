@@ -71,7 +71,13 @@ async function loadAssets(basePath) {
     throw new Error(`V2 proving bundle manifest failed with HTTP ${manifestResponse.status}`);
   }
   const manifest = await manifestResponse.json();
-  const checksums = manifest.files_sha256 || manifest.files || {};
+  if (Number(manifest.version) !== 2 || manifest.curve !== 'BN254' || manifest.scheme !== 'Groth16') {
+    throw new Error('V2 proving bundle manifest does not describe the expected BN254 Groth16 setup');
+  }
+  if (Number(manifest.merkleDepth) !== 16 || Number(manifest.maxInputs) !== 4) {
+    throw new Error('V2 proving bundle manifest has unexpected circuit dimensions');
+  }
+  const checksums = manifest.filesSha256 || manifest.files_sha256 || manifest.files || {};
   const assets = {};
 
   for (let index = 0; index < REQUIRED_ASSETS.length; index += 1) {
