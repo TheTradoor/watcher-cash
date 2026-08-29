@@ -137,23 +137,20 @@ jobs:
             fi
           done
           BALANCE=$(solana balance "$PAYER_ADDRESS" --url "$WATCHER_V3_RPC_URL" --lamports | awk '{print $1}')
-          SHARD_RENT=$(solana rent 8240 --url "$WATCHER_V3_RPC_URL" --lamports | awk '/Rent-exempt minimum:/ {print $3}')
-          if ! [[ "$SHARD_RENT" =~ ^[0-9]+$ ]]; then
-            SHARD_RENT=$(node --input-type=module - <<'NODE'
-            import { Connection } from '@solana/web3.js';
-            const c = new Connection(process.env.WATCHER_V3_RPC_URL, 'confirmed');
-            console.log(await c.getMinimumBalanceForRentExemption(8240));
-            NODE
-            )
-          fi
-          REQUIRED=$(( SHARD_RENT * 32 + 4000000000 ))
+          SHARD_RENT=$(node --input-type=module - <<'NODE'
+          import { Connection } from '@solana/web3.js';
+          const c = new Connection(process.env.WATCHER_V3_RPC_URL, 'confirmed');
+          console.log(await c.getMinimumBalanceForRentExemption(8240));
+          NODE
+          )
+          REQUIRED=$(( SHARD_RENT * 32 + 3000000000 ))
           echo "Persistent V3 payer: $PAYER_ADDRESS"
           echo "Persistent V3 program id: $PROGRAM_ID"
           echo "Payer balance: $BALANCE lamports"
           echo "32 shard header rent: $((SHARD_RENT * 32)) lamports"
           echo "Readiness floor: $REQUIRED lamports"
           if [ "${BALANCE:-0}" -lt "$REQUIRED" ]; then
-            echo 'Persistent V3 devnet payer does not have enough SOL for 32 shard headers plus the 4 SOL deployment buffer.' >&2
+            echo 'Persistent V3 devnet payer does not have enough SOL for 32 shard headers plus the 3 SOL deployment buffer.' >&2
             exit 1
           fi
           echo "payer=$PAYER_ADDRESS" >> "$GITHUB_OUTPUT"
