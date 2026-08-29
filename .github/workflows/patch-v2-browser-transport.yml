@@ -22,25 +22,11 @@ jobs:
         run: |
           python3 - <<'PY'
           from pathlib import Path
+          import re
 
           page = Path('app/v2/page.jsx')
           text = page.read_text()
-          old = '''  async function sendDescriptor(descriptor) {
-            const transaction = new Transaction().add(
-              ComputeBudgetProgram.setComputeUnitLimit({ units: GROTH16_COMPUTE_UNITS }),
-              ComputeBudgetProgram.setComputeUnitPrice({ microLamports: COMPUTE_UNIT_PRICE }),
-              descriptorInstruction(descriptor),
-            );
-            const signature = await wallet.sendTransaction(transaction, connection, {
-              skipPreflight: false,
-              preflightCommitment: 'confirmed',
-              maxRetries: 25,
-            });
-            await connection.confirmTransaction(signature, 'confirmed');
-            return signature;
-          }
-          '''
-          new = '''  async function sendDescriptor(descriptor) {
+          transport = '''  async function sendDescriptor(descriptor) {
             if (!publicKey) throw new Error('Wallet is not connected');
             const latest = await connection.getLatestBlockhash('confirmed');
             const transaction = new Transaction({
@@ -67,21 +53,16 @@ jobs:
             return signature;
           }
           '''
-          if old not in text:
-              raise SystemExit('page transport target not found')
-          page.write_text(text.replace(old, new, 1))
+          pattern = r"  async function sendDescriptor\(descriptor\) \{.*?\n  \}\n\n  async function transact\(\) \{"
+          replacement = transport + "\n  async function transact() {"
+          text, count = re.subn(pattern, lambda _: replacement, text, count=1, flags=re.S)
+          if count != 1:
+              raise SystemExit(f'page transport target count={count}')
+          page.write_text(text)
 
           e2e = Path('scripts/watcher-v2-browser-e2e.mjs')
           text = e2e.read_text()
-          old = '''async function runTransaction(page, expectedMessage, label) {
-            const primary = page.locator('[data-v2-primary]');
-            await primary.click({ timeout });
-            await waitForText(page.locator('[data-v2-message]'), expectedMessage, label);
-            const error = page.locator('[data-v2-error="true"]');
-            if (await error.count()) fail(`${label}: ${String(await error.textContent()).trim()}`);
-          }
-          '''
-          new = '''async function runTransaction(page, expectedMessage, label) {
+          helper = '''async function runTransaction(page, expectedMessage, label) {
             const primary = page.locator('[data-v2-primary]');
             const message = page.locator('[data-v2-message]');
             const error = page.locator('[data-v2-error="true"]');
@@ -100,9 +81,12 @@ jobs:
             fail(`${label}: timed out waiting for ${JSON.stringify(expectedMessage)}; message=${JSON.stringify(String(await message.textContent().catch(() => '')).trim())}; prover=${JSON.stringify(proverText)}`);
           }
           '''
-          if old not in text:
-              raise SystemExit('E2E transaction helper target not found')
-          e2e.write_text(text.replace(old, new, 1))
+          pattern = r"async function runTransaction\(page, expectedMessage, label\) \{.*?\n\}\n\nasync function main\(\) \{"
+          replacement = helper + "\nasync function main() {"
+          text, count = re.subn(pattern, lambda _: replacement, text, count=1, flags=re.S)
+          if count != 1:
+              raise SystemExit(f'E2E transaction helper target count={count}')
+          e2e.write_text(text)
           PY
       - name: Commit transport patch
         run: |
