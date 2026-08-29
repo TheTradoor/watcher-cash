@@ -1,6 +1,10 @@
 name: Deploy Persistent Watcher V3 Devnet
 
 on:
+  push:
+    branches: [watcher-protocol-v3]
+    paths:
+      - '.github/v3-deploy-request'
   workflow_dispatch:
     inputs:
       force_bootstrap:
@@ -24,6 +28,8 @@ concurrency:
 env:
   SOLANA_VERSION: v4.0.0
   WATCHER_V3_RPC_URL: https://api.devnet.solana.com
+  FORCE_BOOTSTRAP: ${{ github.event_name == 'workflow_dispatch' && inputs.force_bootstrap || false }}
+  ACK_NONZERO_RESET: ${{ github.event_name == 'workflow_dispatch' && inputs.acknowledge_nonzero_reset || false }}
 
 jobs:
   deploy:
@@ -160,8 +166,6 @@ jobs:
         id: preflight
         env:
           PROGRAM_ID: ${{ steps.identity.outputs.program_id }}
-          FORCE_BOOTSTRAP: ${{ inputs.force_bootstrap }}
-          ACK_NONZERO: ${{ inputs.acknowledge_nonzero_reset }}
           PIN_SHA: ${{ steps.pin.outputs.bundle_sha }}
         run: |
           set -euo pipefail
@@ -187,7 +191,7 @@ jobs:
               echo 'Verifier-key rotation requires force_bootstrap=true in development.' >&2
               exit 1
             fi
-            if [ "$FORCE_BOOTSTRAP" = true ] && [ "$TRACKED" != 0 ] && [ "$ACK_NONZERO" != true ]; then
+            if [ "$FORCE_BOOTSTRAP" = true ] && [ "$TRACKED" != 0 ] && [ "$ACK_NONZERO_RESET" != true ]; then
               echo "Published V3 vault tracks $TRACKED lamports of private liability." >&2
               echo 'Refusing reset without acknowledge_nonzero_reset=true.' >&2
               exit 1
