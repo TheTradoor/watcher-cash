@@ -1,4 +1,4 @@
-import { PublicKey } from '@solana/web3.js';
+import { PublicKey, SystemProgram } from '@solana/web3.js';
 
 import { assertU64 } from './field.mjs';
 import { asBytes, concatBytes } from './keccak.mjs';
@@ -6,11 +6,13 @@ import { publicKeyBytesV1 } from './instructions.mjs';
 
 export const WATCHER_INSTRUCTION_DEPOSIT_V2 = 0x20;
 export const WATCHER_INSTRUCTION_WITHDRAW_V2 = 0x21;
+export const WATCHER_INSTRUCTION_INITIALIZE_V2 = 0x22;
 export const WATCHER_GROTH16_PROOF_BYTES_V2 = 256;
 export const WATCHER_MAX_INPUTS_V2 = 4;
 export const WATCHER_DEPOSIT_DATA_BYTES_V2 = 329;
 export const WATCHER_WITHDRAW_DATA_BYTES_V2 = 634;
 export const NULLIFIER_MARKER_SEED_V2 = new TextEncoder().encode('watcher-nullifier-v2');
+export const VAULT_SEED_V2 = new TextEncoder().encode('watcher-vault-v2');
 
 function exactBytes(value, length, label) {
   const bytes = asBytes(value, label);
@@ -37,6 +39,20 @@ function normalizeFields(values, label) {
     throw new RangeError(`${label} must contain exactly ${WATCHER_MAX_INPUTS_V2} fields`);
   }
   return values.map((value, index) => exactBytes(value, 32, `${label}[${index}]`));
+}
+
+function toPublicKey(value, label) {
+  return value instanceof PublicKey ? value : new PublicKey(publicKeyBytesV1(value, label));
+}
+
+function meta(pubkey, isSigner, isWritable) {
+  return { pubkey: toPublicKey(pubkey, 'account pubkey'), isSigner, isWritable };
+}
+
+export function deriveWatcherVaultPdaV2({ programId, config }) {
+  const program = toPublicKey(programId, 'programId');
+  const configBytes = publicKeyBytesV1(config, 'config');
+  return PublicKey.findProgramAddressSync([VAULT_SEED_V2, configBytes], program);
 }
 
 export function validateWithdrawStatementV2({
@@ -81,6 +97,13 @@ export function validateWithdrawStatementV2({
     throw new Error('changeCommitment and newRoot must both be zero or both be non-zero');
   }
   return { roots, spends, change, nextRoot };
+}
+
+export function encodeInitializeDataV2({ treasury }) {
+  return concatBytes(
+    Uint8Array.of(WATCHER_INSTRUCTION_INITIALIZE_V2),
+    publicKeyBytesV1(treasury, 'treasury'),
+  );
 }
 
 export function encodeDepositDataV2({ commitment, amount, newRoot, proof }) {
@@ -139,7 +162,7 @@ export function encodeWithdrawDataV2({
 }
 
 export function deriveNullifierMarkerPdaV2({ programId, config, nullifier }) {
-  const program = programId instanceof PublicKey ? programId : new PublicKey(publicKeyBytesV1(programId, 'programId'));
+  const program = toPublicKey(programId, 'programId');
   const configBytes = publicKeyBytesV1(config, 'config');
   const nullifierBytes = exactBytes(nullifier, 32, 'nullifier');
   if (isZero32(nullifierBytes)) throw new Error('nullifier must be non-zero');
@@ -147,4 +170,104 @@ export function deriveNullifierMarkerPdaV2({ programId, config, nullifier }) {
     [NULLIFIER_MARKER_SEED_V2, configBytes, nullifierBytes],
     program,
   );
+}
+
+export function buildInitializeInstructionV2({
+  programId,
+  authority,
+  config,
+  activeTree,
+  vault,
+  treasury,
+  systemProgram = SystemProgram.programId,
+}) {
+  return {
+    programId: toPublicKey(programId, 'programId'),
+    keys: [
+      meta(authority, true, true),
+      meta(config, false, true),
+      meta(activeTree, false, true),
+      meta(vault, false, true),
+      meta(systemProgram, false, false),
+    ],
+    data: encodeInitializeDataV2({ treasury }),
+  };
+}
+
+export function buildDepositInstructionV2({
+  programId,
+  depositor,
+  config,
+  activeTree,
+  vault,
+  commitment,
+  amount,
+  newRoot,
+  proof,
+  systemProgram = SystemProgram.programId,
+}) {
+  return {
+    programId: toPublicKey(programId, 'programId'),
+    keys: [
+      meta(depositor, true, true),
+      meta(config, false, false),
+      meta(activeTree, false, true),
+      meta(vault, false, true),
+      meta(systemProgram, false, false),
+    ],
+    data: encodeDepositDataV2({ commitment, amount, newRoot, proof }),
+  };
+}
+
+export function buildWithdrawInstructionV2({
+  programId,
+  config,
+  activeTree,
+  vault,
+  recipient,
+  relayer,
+  treasury,
+  inputCount,
+  inputRoots,
+  nullifiers,
+  changeCommitment,
+  publicAmount,
+  protocolFee = 0n,
+  relayerFee = 0n,
+  newRoot,
+  proof,
+  markerAccounts,
+  sealedRootAccounts = [],
+  systemProgram = SystemProgram.programId,
+}) {
+  if (!Array.isArray(markerAccounts) || markerAccounts.length !== inputCount) {
+    throw new RangeError('markerAccounts must contain one PDA for each active V2 input');
+  }
+  if (!Array.isArray(sealedRootAccounts)) throw new TypeError('sealedRootAccounts must be an array');
+  return {
+    programId: toPublicKey(programId, 'programId'),
+    keys: [
+      meta(config, false, false),
+      meta(activeTree, false, true),
+      meta(vault, false, true),
+      meta(recipient, false, true),
+      meta(relayer, true, true),
+      meta(treasury, false, true),
+      meta(systemProgram, false, false),
+      ...markerAccounts.map((account) => meta(account, false, true)),
+      ...sealedRootAccounts.map((account) => meta(account, false, false)),
+    ],
+    data: encodeWithdrawDataV2({
+      inputCount,
+      inputRoots,
+      nullifiers,
+      changeCommitment,
+      recipient,
+      publicAmount,
+      protocolFee,
+      relayerFee,
+      newRoot,
+      proof,
+    }),
+  };
 }
