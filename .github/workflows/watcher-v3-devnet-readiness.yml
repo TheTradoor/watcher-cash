@@ -52,51 +52,75 @@ jobs:
           test -s /tmp/watcher-v3-release-prefix
           echo "Shared pinned release reachable: $TAG"
 
-      - name: Check persistent V3 identity, isolation, and deployment budget
+      - name: Check deployer balance and exact 32-shard rent budget
         env:
           PAYER_KEYPAIR_B64: ${{ secrets.WATCHER_DEVNET_DEPLOYER_KEYPAIR_B64 }}
-          PROGRAM_KEYPAIR_B64: ${{ secrets.WATCHER_V3_DEVNET_PROGRAM_KEYPAIR_B64 }}
         run: |
           set -euo pipefail
           if [ -z "$PAYER_KEYPAIR_B64" ]; then
             echo 'READINESS_BLOCKER=missing WATCHER_DEVNET_DEPLOYER_KEYPAIR_B64' >&2
             exit 1
           fi
-          if [ -z "$PROGRAM_KEYPAIR_B64" ]; then
-            echo 'READINESS_BLOCKER=missing WATCHER_V3_DEVNET_PROGRAM_KEYPAIR_B64' >&2
-            exit 1
-          fi
           if ! printf '%s' "$PAYER_KEYPAIR_B64" | base64 --decode > /tmp/watcher-v3-readiness-payer.json 2>/dev/null; then
             echo 'READINESS_BLOCKER=WATCHER_DEVNET_DEPLOYER_KEYPAIR_B64 is not valid base64' >&2
+            exit 1
+          fi
+          chmod 600 /tmp/watcher-v3-readiness-payer.json
+          node --input-type=module - <<'NODE'
+          import fs from 'node:fs';
+          import { Connection, Keypair } from '@solana/web3.js';
+          const value = JSON.parse(fs.readFileSync('/tmp/watcher-v3-readiness-payer.json', 'utf8'));
+          if (!Array.isArray(value) || value.length !== 64) throw new Error('WATCHER_DEVNET_DEPLOYER_KEYPAIR_B64 must decode to a 64-byte keypair');
+          const payer = Keypair.fromSecretKey(Uint8Array.from(value));
+          const connection = new Connection(process.env.WATCHER_V3_RPC_URL, 'confirmed');
+          const [balance, genesisHash, shardRent, configRent, treeRent, vaultRent] = await Promise.all([
+            connection.getBalance(payer.publicKey, 'confirmed'),
+            connection.getGenesisHash(),
+            connection.getMinimumBalanceForRentExemption(8240),
+            connection.getMinimumBalanceForRentExemption(100),
+            connection.getMinimumBalanceForRentExemption(81),
+            connection.getMinimumBalanceForRentExemption(50),
+          ]);
+          const stateRentEstimate = shardRent * 32 + configRent + treeRent + vaultRent;
+          const required = stateRentEstimate + 4_000_000_000;
+          console.log(JSON.stringify({
+            stage: 'budget',
+            payer: payer.publicKey.toBase58(),
+            payerBalanceLamports: balance,
+            payerBalanceSol: balance / 1e9,
+            devnetGenesisHash: genesisHash,
+            shardHeaderRentLamports: shardRent,
+            allShardHeaderRentLamports: shardRent * 32,
+            baseStateRentEstimateLamports: stateRentEstimate,
+            readinessRequiredLamports: required,
+            readinessRequiredSol: required / 1e9,
+            budgetReady: balance >= required,
+          }, null, 2));
+          if (balance < required) {
+            throw new Error(`V3 deployer has ${(balance / 1e9).toFixed(6)} SOL; requires ${(required / 1e9).toFixed(6)} SOL including 32-shard rent plus a 4 SOL deployment buffer`);
+          }
+          NODE
+
+      - name: Check persistent V3 program identity and V1/V2 isolation
+        env:
+          PROGRAM_KEYPAIR_B64: ${{ secrets.WATCHER_V3_DEVNET_PROGRAM_KEYPAIR_B64 }}
+        run: |
+          set -euo pipefail
+          if [ -z "$PROGRAM_KEYPAIR_B64" ]; then
+            echo 'READINESS_BLOCKER=missing WATCHER_V3_DEVNET_PROGRAM_KEYPAIR_B64' >&2
             exit 1
           fi
           if ! printf '%s' "$PROGRAM_KEYPAIR_B64" | base64 --decode > /tmp/watcher-v3-readiness-program.json 2>/dev/null; then
             echo 'READINESS_BLOCKER=WATCHER_V3_DEVNET_PROGRAM_KEYPAIR_B64 is not valid base64' >&2
             exit 1
           fi
-          chmod 600 /tmp/watcher-v3-readiness-payer.json /tmp/watcher-v3-readiness-program.json
+          chmod 600 /tmp/watcher-v3-readiness-program.json
           node --input-type=module - <<'NODE'
           import fs from 'node:fs';
           import { Connection, Keypair, PublicKey } from '@solana/web3.js';
-
-          function load(path, secretName) {
-            let value;
-            try {
-              value = JSON.parse(fs.readFileSync(path, 'utf8'));
-            } catch {
-              throw new Error(`${secretName} decodes from base64 but is not valid JSON`);
-            }
-            if (!Array.isArray(value) || value.length !== 64) {
-              throw new Error(`${secretName} must decode to a Solana 64-byte keypair JSON array`);
-            }
-            if (value.some((item) => !Number.isInteger(item) || item < 0 || item > 255)) {
-              throw new Error(`${secretName} contains invalid keypair bytes`);
-            }
-            return Keypair.fromSecretKey(Uint8Array.from(value));
-          }
-
-          const payer = load('/tmp/watcher-v3-readiness-payer.json', 'WATCHER_DEVNET_DEPLOYER_KEYPAIR_B64');
-          const program = load('/tmp/watcher-v3-readiness-program.json', 'WATCHER_V3_DEVNET_PROGRAM_KEYPAIR_B64');
+          const value = JSON.parse(fs.readFileSync('/tmp/watcher-v3-readiness-program.json', 'utf8'));
+          if (!Array.isArray(value) || value.length !== 64) throw new Error('WATCHER_V3_DEVNET_PROGRAM_KEYPAIR_B64 must decode to a 64-byte keypair');
+          const program = Keypair.fromSecretKey(Uint8Array.from(value));
           const forbidden = [];
           for (const path of ['public/watcher-protocol/devnet.json', 'public/watcher-protocol/v2-devnet.json']) {
             try {
@@ -104,42 +128,18 @@ jobs:
               if (runtime.programId) forbidden.push(new PublicKey(runtime.programId));
             } catch {}
           }
-          if (forbidden.some((value) => program.publicKey.equals(value))) {
+          if (forbidden.some((other) => program.publicKey.equals(other))) {
             throw new Error('V3 program key resolves to an existing V1/V2 program id; refusing shared program identity');
           }
-
           const connection = new Connection(process.env.WATCHER_V3_RPC_URL, 'confirmed');
-          const [balance, genesisHash, programInfo, shardRent, configRent, treeRent, vaultRent] = await Promise.all([
-            connection.getBalance(payer.publicKey, 'confirmed'),
-            connection.getGenesisHash(),
-            connection.getAccountInfo(program.publicKey, 'confirmed'),
-            connection.getMinimumBalanceForRentExemption(8240),
-            connection.getMinimumBalanceForRentExemption(100),
-            connection.getMinimumBalanceForRentExemption(81),
-            connection.getMinimumBalanceForRentExemption(50),
-          ]);
-          if (programInfo && !programInfo.executable) {
-            throw new Error('Configured V3 program address exists on devnet but is not executable');
-          }
-          const stateRentEstimate = shardRent * 32 + configRent + treeRent + vaultRent;
-          const required = stateRentEstimate + 4_000_000_000;
-          if (balance < required) {
-            throw new Error(`V3 deployer has ${(balance / 1e9).toFixed(6)} SOL; readiness requires ${(required / 1e9).toFixed(6)} SOL including 32-shard rent plus a 4 SOL program/deploy buffer`);
-          }
+          const programInfo = await connection.getAccountInfo(program.publicKey, 'confirmed');
+          if (programInfo && !programInfo.executable) throw new Error('Configured V3 address exists on devnet but is not executable');
           console.log(JSON.stringify({
+            stage: 'identity',
             status: 'ready',
-            payer: payer.publicKey.toBase58(),
-            payerBalanceLamports: balance,
-            payerBalanceSol: balance / 1e9,
             programId: program.publicKey.toBase58(),
             differsFromV1AndV2: true,
-            devnetGenesisHash: genesisHash,
             programAlreadyDeployed: Boolean(programInfo?.executable),
-            shardHeaderRentLamports: shardRent,
-            allShardHeaderRentLamports: shardRent * 32,
-            baseStateRentEstimateLamports: stateRentEstimate,
-            readinessRequiredLamports: required,
-            readinessRequiredSol: required / 1e9,
           }, null, 2));
           NODE
 
