@@ -42,6 +42,9 @@ function loadPin() {
   if (bundleFile !== 'watcher-v2-devnet-browser-bundle.tar.gz') fail('Unexpected V2 prover bundle filename');
   const expectedUrl = `https://github.com/${expectedRepo}/releases/download/${releaseTag}/${bundleFile}`;
   if (pin.bundleUrl !== expectedUrl) fail('V2 prover bundle URL is not the expected repository release URL');
+  // These are hashes of canonical Xark verifier wire bytes, not the gnark
+  // serialized .vk files. Their binding is checked against the committed Rust
+  // verifier manifest by the deployment gate, never against browser file hashes.
   for (const field of ['depositVkSha256', 'withdrawVkSha256']) {
     const digest = requireString(pin[field], field).toLowerCase();
     if (!/^[0-9a-f]{64}$/.test(digest)) fail(`${field} must be a SHA-256 digest`);
@@ -61,22 +64,32 @@ function sha256(bytes) {
   return createHash('sha256').update(bytes).digest('hex');
 }
 
-function verifyExtracted(pin) {
-  const required = [
+function fileSha256(path) {
+  return sha256(readFileSync(path));
+}
+
+function verifyExtracted() {
+  const requiredRuntime = [
     'watcher-v2-prover.wasm',
     'wasm_exec.js',
     'worker.js',
     'assets/manifest.json',
-    'assets/deposit.r1cs',
-    'assets/deposit.pk',
-    'assets/deposit.vk',
-    'assets/withdraw.r1cs',
-    'assets/withdraw.pk',
-    'assets/withdraw.vk',
   ];
-  for (const name of required) {
+  const browserAssets = [
+    'deposit.r1cs',
+    'deposit.pk',
+    'deposit.vk',
+    'withdraw.r1cs',
+    'withdraw.pk',
+    'withdraw.vk',
+  ];
+  for (const name of requiredRuntime) {
     const path = resolve(outputDir, name);
     if (!existsSync(path)) fail(`Pinned V2 prover bundle is missing ${name}`);
+  }
+  for (const name of browserAssets) {
+    const path = resolve(outputDir, 'assets', name);
+    if (!existsSync(path)) fail(`Pinned V2 prover bundle is missing assets/${name}`);
   }
   const manifest = JSON.parse(readFileSync(resolve(outputDir, 'assets/manifest.json'), 'utf8'));
   if (Number(manifest.version) !== 2 || manifest.curve !== 'BN254' || manifest.scheme !== 'Groth16') {
@@ -86,11 +99,11 @@ function verifyExtracted(pin) {
     fail('Pinned V2 browser manifest has unexpected circuit dimensions');
   }
   const files = manifest.filesSha256 || manifest.files_sha256 || manifest.files || {};
-  if (String(files['deposit.vk'] || '').toLowerCase() !== pin.depositVkSha256.toLowerCase()) {
-    fail('Pinned deposit VK hash does not match the browser bundle manifest');
-  }
-  if (String(files['withdraw.vk'] || '').toLowerCase() !== pin.withdrawVkSha256.toLowerCase()) {
-    fail('Pinned withdrawal VK hash does not match the browser bundle manifest');
+  for (const name of browserAssets) {
+    const expected = String(files[name] || '').toLowerCase();
+    if (!/^[0-9a-f]{64}$/.test(expected)) fail(`Pinned V2 browser manifest is missing SHA-256 for ${name}`);
+    const actual = fileSha256(resolve(outputDir, 'assets', name));
+    if (actual !== expected) fail(`Pinned V2 browser asset ${name} failed its manifest SHA-256 check`);
   }
   return manifest;
 }
@@ -109,13 +122,15 @@ async function main() {
   const extracted = spawnSync('tar', ['-xzf', tempArchive, '-C', outputRoot], { encoding: 'utf8' });
   rmSync(tempArchive, { force: true });
   if (extracted.status !== 0) fail(`Failed to extract pinned V2 prover bundle: ${extracted.stderr || extracted.stdout}`);
-  const manifest = verifyExtracted(pin);
+  const manifest = verifyExtracted();
   console.log(JSON.stringify({
     status: 'ready',
     releaseTag: pin.releaseTag,
     bundleSha256: actual,
-    depositVkSha256: pin.depositVkSha256,
-    withdrawVkSha256: pin.withdrawVkSha256,
+    canonicalDepositVkSha256: pin.depositVkSha256,
+    canonicalWithdrawVkSha256: pin.withdrawVkSha256,
+    serializedDepositVkSha256: manifest.filesSha256?.['deposit.vk'] || '',
+    serializedWithdrawVkSha256: manifest.filesSha256?.['withdraw.vk'] || '',
     merkleDepth: manifest.merkleDepth,
     maxInputs: manifest.maxInputs,
     outputDir,
