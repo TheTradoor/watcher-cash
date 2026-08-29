@@ -237,7 +237,9 @@ export default function WatcherV2Page() {
     setUnlocked(false);
     setVaultKey(null);
     setRecords([]);
-    setTreeState(null);
+    // Public tree verification is deployment-scoped, not wallet-scoped. Keep a
+    // verified tree ready while wallets connect/switch instead of deadlocking
+    // the transaction CTA until an unrelated runtime effect happens again.
     setError('');
     if (walletAddress) setRecipient(walletAddress);
   }, [walletAddress]);
