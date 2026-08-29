@@ -1,0 +1,116 @@
+name: Patch V2 Browser Transport
+
+on:
+  push:
+    branches: [watcher-protocol-v2]
+    paths:
+      - '.github/workflows/patch-v2-browser-transport.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: watcher-protocol-v2
+          fetch-depth: 0
+      - name: Patch fresh blockhash transport and fail-fast E2E
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          page = Path('app/v2/page.jsx')
+          text = page.read_text()
+          old = '''  async function sendDescriptor(descriptor) {
+            const transaction = new Transaction().add(
+              ComputeBudgetProgram.setComputeUnitLimit({ units: GROTH16_COMPUTE_UNITS }),
+              ComputeBudgetProgram.setComputeUnitPrice({ microLamports: COMPUTE_UNIT_PRICE }),
+              descriptorInstruction(descriptor),
+            );
+            const signature = await wallet.sendTransaction(transaction, connection, {
+              skipPreflight: false,
+              preflightCommitment: 'confirmed',
+              maxRetries: 25,
+            });
+            await connection.confirmTransaction(signature, 'confirmed');
+            return signature;
+          }
+          '''
+          new = '''  async function sendDescriptor(descriptor) {
+            if (!publicKey) throw new Error('Wallet is not connected');
+            const latest = await connection.getLatestBlockhash('confirmed');
+            const transaction = new Transaction({
+              feePayer: publicKey,
+              recentBlockhash: latest.blockhash,
+            }).add(
+              ComputeBudgetProgram.setComputeUnitLimit({ units: GROTH16_COMPUTE_UNITS }),
+              ComputeBudgetProgram.setComputeUnitPrice({ microLamports: COMPUTE_UNIT_PRICE }),
+              descriptorInstruction(descriptor),
+            );
+            const signature = await wallet.sendTransaction(transaction, connection, {
+              skipPreflight: false,
+              preflightCommitment: 'confirmed',
+              maxRetries: 25,
+            });
+            const confirmation = await connection.confirmTransaction({
+              signature,
+              blockhash: latest.blockhash,
+              lastValidBlockHeight: latest.lastValidBlockHeight,
+            }, 'confirmed');
+            if (confirmation.value.err) {
+              throw new Error(`V2 transaction failed: ${JSON.stringify(confirmation.value.err)}`);
+            }
+            return signature;
+          }
+          '''
+          if old not in text:
+              raise SystemExit('page transport target not found')
+          page.write_text(text.replace(old, new, 1))
+
+          e2e = Path('scripts/watcher-v2-browser-e2e.mjs')
+          text = e2e.read_text()
+          old = '''async function runTransaction(page, expectedMessage, label) {
+            const primary = page.locator('[data-v2-primary]');
+            await primary.click({ timeout });
+            await waitForText(page.locator('[data-v2-message]'), expectedMessage, label);
+            const error = page.locator('[data-v2-error="true"]');
+            if (await error.count()) fail(`${label}: ${String(await error.textContent()).trim()}`);
+          }
+          '''
+          new = '''async function runTransaction(page, expectedMessage, label) {
+            const primary = page.locator('[data-v2-primary]');
+            const message = page.locator('[data-v2-message]');
+            const error = page.locator('[data-v2-error="true"]');
+            await primary.click({ timeout });
+            const deadline = Date.now() + Math.min(timeout, 240_000);
+            while (Date.now() < deadline) {
+              if (await error.count()) {
+                const errorText = String(await error.textContent().catch(() => '')).trim();
+                if (errorText) fail(`${label}: ${errorText}`);
+              }
+              const messageText = String(await message.textContent().catch(() => ''));
+              if (messageText.includes(expectedMessage)) return;
+              await new Promise((resolve) => setTimeout(resolve, 250));
+            }
+            const proverText = String(await page.locator('[data-v2-prover]').textContent().catch(() => '')).trim();
+            fail(`${label}: timed out waiting for ${JSON.stringify(expectedMessage)}; message=${JSON.stringify(String(await message.textContent().catch(() => '')).trim())}; prover=${JSON.stringify(proverText)}`);
+          }
+          '''
+          if old not in text:
+              raise SystemExit('E2E transaction helper target not found')
+          e2e.write_text(text.replace(old, new, 1))
+          PY
+      - name: Commit transport patch
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add app/v2/page.jsx scripts/watcher-v2-browser-e2e.mjs
+          git commit -m 'Bind V2 browser transactions to fresh blockhashes'
+          git fetch origin watcher-protocol-v2
+          git rebase origin/watcher-protocol-v2
+          git push origin HEAD:watcher-protocol-v2
