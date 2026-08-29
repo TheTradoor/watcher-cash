@@ -10,10 +10,12 @@ import {
 } from '@solana/web3.js';
 
 const E2E_WALLET_NAME = 'Watcher E2E Wallet';
+const E2E_PHANTOM_WALLET_NAME = 'Phantom';
 const E2E_ALTERNATE_WALLET_NAME = 'Watcher E2E Alternate Wallet';
 const E2E_REJECT_MESSAGE_KEY = 'watcher-e2e:reject-next-message';
 const E2E_REJECT_TRANSACTION_KEY = 'watcher-e2e:reject-next-transaction';
 const E2E_WALLET_ICON = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='18' fill='%23111310'/%3E%3Ccircle cx='32' cy='32' r='16' fill='none' stroke='%23b7ff45' stroke-width='4'/%3E%3Ccircle cx='32' cy='32' r='4' fill='%23b7ff45'/%3E%3C/svg%3E";
+const E2E_PHANTOM_ICON = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='18' fill='%23551BF9'/%3E%3Cpath d='M49 19c-3-5-9-8-17-8-11 0-20 7-22 17-1 5 2 9 7 9h4c2 0 4-1 5-3l2-3c1-2 4-1 4 2v5c0 7 5 12 12 12 7 0 12-5 12-12 0-7-2-14-7-19Z' fill='white'/%3E%3C/svg%3E";
 
 function parseSeedHex(value) {
   const text = String(value || '').trim().toLowerCase();
@@ -51,14 +53,14 @@ function userRejectedError() {
 }
 
 class WatcherE2EWalletAdapter extends BaseSignerWalletAdapter {
-  url = 'https://github.com/TheTradoor/watcher-cash';
-  icon = E2E_WALLET_ICON;
   readyState = WalletReadyState.Installed;
   supportedTransactionVersions = new Set(['legacy', 0]);
 
   constructor(seed, name = E2E_WALLET_NAME) {
     super();
     this.name = name;
+    this.url = name === E2E_PHANTOM_WALLET_NAME ? 'https://phantom.app' : 'https://github.com/TheTradoor/watcher-cash';
+    this.icon = name === E2E_PHANTOM_WALLET_NAME ? E2E_PHANTOM_ICON : E2E_WALLET_ICON;
     this._keypair = Keypair.fromSeed(seed);
     this._connected = false;
     this._connecting = false;
@@ -119,8 +121,11 @@ class WatcherE2EWalletAdapter extends BaseSignerWalletAdapter {
 export function createWatcherE2EWallets() {
   if (process.env.NEXT_PUBLIC_WATCHER_E2E !== '1') return [];
   const seed = parseSeedHex(process.env.NEXT_PUBLIC_WATCHER_E2E_SEED);
+  const primaryName = process.env.NEXT_PUBLIC_WATCHER_E2E_PHANTOM === '1'
+    ? E2E_PHANTOM_WALLET_NAME
+    : E2E_WALLET_NAME;
   return [
-    new WatcherE2EWalletAdapter(seed, E2E_WALLET_NAME),
+    new WatcherE2EWalletAdapter(seed, primaryName),
     new WatcherE2EWalletAdapter(alternateSeed(seed), E2E_ALTERNATE_WALLET_NAME),
   ];
 }
