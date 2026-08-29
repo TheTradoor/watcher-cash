@@ -4,54 +4,70 @@ const EXPECTED_V1_PROGRAM_ID = '9urFwd6gEYwkc5Dc8YYakYCX4VEosCRdgfQAz88fYEv5';
 const EXPECTED_V2_PROGRAM_ID = 'DMU22YyGkLs9cuZXR6eHt4oZpWtMTMtkCNTNV8SW16HM';
 const DEFAULT_BASE_URL = 'https://thetradoor.github.io/watcher-cash/';
 
-function baseUrl(value) {
-  const parsed = new URL(value || DEFAULT_BASE_URL);
-  if (parsed.protocol !== 'https:') throw new Error('Live Pages smoke requires HTTPS');
-  if (!parsed.pathname.endsWith('/')) parsed.pathname += '/';
-  return parsed;
+function normalizeBase(value) {
+  const url = new URL(value || DEFAULT_BASE_URL);
+  if (url.protocol !== 'https:') throw new Error('Live Pages smoke requires HTTPS');
+  if (!url.pathname.endsWith('/')) url.pathname += '/';
+  return url;
 }
 
-function cacheBusted(url, token) {
+function busted(url, token) {
   const next = new URL(url);
   next.searchParams.set('watcher_live_smoke', token);
   return next;
 }
 
-async function request(url, { binary = false } = {}) {
+async function text(url) {
   const response = await fetch(url, {
     cache: 'no-store',
     redirect: 'follow',
     headers: { 'cache-control': 'no-cache' },
   });
   if (!response.ok) throw new Error(`${url.pathname} returned HTTP ${response.status}`);
-  if (binary) return new Uint8Array(await response.arrayBuffer());
-  return response.text();
+  const body = await response.text();
+  if (!body) throw new Error(`${url.pathname} returned an empty body`);
+  return body;
+}
+
+async function wasmPrefix(url) {
+  const response = await fetch(url, {
+    cache: 'no-store',
+    redirect: 'follow',
+    headers: {
+      'cache-control': 'no-cache',
+      range: 'bytes=0-65535',
+    },
+  });
+  if (!response.ok) throw new Error(`${url.pathname} returned HTTP ${response.status}`);
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  if (bytes.length < 4 || bytes[0] !== 0x00 || bytes[1] !== 0x61 || bytes[2] !== 0x73 || bytes[3] !== 0x6d) {
+    throw new Error('Live V2 prover has an invalid WebAssembly magic header');
+  }
+  return bytes.length;
 }
 
 async function oneAttempt(base, token) {
-  const rootUrl = cacheBusted(new URL('.', base), token);
-  const v2Url = cacheBusted(new URL('v2/', base), token);
-  const v1RuntimeUrl = cacheBusted(new URL('watcher-protocol/devnet.json', base), token);
-  const v2RuntimeUrl = cacheBusted(new URL('watcher-protocol/v2-devnet.json', base), token);
-  const workerUrl = cacheBusted(new URL('watcher-prover-v2/worker.js', base), token);
-  const wasmUrl = cacheBusted(new URL('watcher-prover-v2/watcher-v2-prover.wasm', base), token);
+  const rootHtml = await text(busted(new URL('.', base), token));
+  const v2Html = await text(busted(new URL('v2/', base), token));
+  const v1RuntimeText = await text(busted(new URL('watcher-protocol/devnet.json', base), token));
+  const v2RuntimeText = await text(busted(new URL('watcher-protocol/v2-devnet.json', base), token));
+  const workerText = await text(busted(new URL('watcher-prover-v2/worker.js', base), token));
 
-  const [rootHtml, v2Html, v1RuntimeText, v2RuntimeText, workerText, wasm] = await Promise.all([
-    request(rootUrl),
-    request(v2Url),
-    request(v1RuntimeUrl),
-    request(v2RuntimeUrl),
-    request(workerUrl),
-    request(wasmUrl, { binary: true }),
-  ]);
-
-  if (!rootHtml.includes('/watcher-cash/_next/')) throw new Error('Live V1 root is missing expected Next assets');
-  if (!v2Html.includes('/watcher-cash/_next/')) throw new Error('Live /v2 route is missing expected Next assets');
+  if (!rootHtml.includes('WATCHER')) throw new Error('Live V1 root is missing its WATCHER marker');
   if (rootHtml.includes('data-watcher-v2="true"') || rootHtml.includes('PROTOCOL V2 · ISOLATED')) {
-    throw new Error('Live V1 root appears to have been replaced by the V2 page');
+    throw new Error('Live V1 root appears to have been replaced by V2');
   }
-  if (!v2Html.includes('PROTOCOL V2') && !v2Html.includes('Watcher Protocol')) {
-    throw new Error('Live /v2 route does not look like the V2 page');
+
+  const chunkMatch = v2Html.match(/\/watcher-cash\/_next\/static\/chunks\/app\/v2\/page-[A-Za-z0-9]+\.js/);
+  if (!chunkMatch) throw new Error('Live /v2 HTML does not reference an app/v2 page chunk');
+  const chunkUrl = busted(new URL(`https://thetradoor.github.io${chunkMatch[0]}`), token);
+  const v2Chunk = await text(chunkUrl);
+  if (!v2Chunk.includes('Watcher Protocol')) throw new Error('Live V2 page chunk is missing its V2 marker');
+  if (!v2Chunk.includes('/watcher-cash/watcher-protocol/v2-devnet.json')) {
+    throw new Error('Live V2 page chunk is missing its V2 runtime binding');
+  }
+  if (!v2Chunk.includes('/watcher-cash/watcher-prover-v2')) {
+    throw new Error('Live V2 page chunk is missing its V2 prover binding');
   }
 
   const v1 = JSON.parse(v1RuntimeText);
@@ -65,12 +81,9 @@ async function oneAttempt(base, token) {
   if (Number(v2.treeDepth) !== 16 || Number(v2.treeCapacity) !== 65_536) {
     throw new Error('Live V2 runtime has unexpected tree dimensions');
   }
-  if (workerText.length < 100 || !workerText.includes('postMessage')) {
-    throw new Error('Live V2 browser prover worker is missing or malformed');
-  }
-  if (wasm.length < 8 || wasm[0] !== 0x00 || wasm[1] !== 0x61 || wasm[2] !== 0x73 || wasm[3] !== 0x6d) {
-    throw new Error('Live V2 prover WASM has an invalid WebAssembly magic header');
-  }
+  if (workerText.length < 100) throw new Error('Live V2 browser prover worker is empty or malformed');
+
+  const wasmBytesFetched = await wasmPrefix(busted(new URL('watcher-prover-v2/watcher-v2-prover.wasm', base), token));
 
   return {
     status: 'pass',
@@ -82,13 +95,14 @@ async function oneAttempt(base, token) {
     v2Vault: v2.vault,
     v2TreeDepth: v2.treeDepth,
     v2TreeCapacity: v2.treeCapacity,
+    v2PageChunk: chunkMatch[0],
     workerBytes: Buffer.byteLength(workerText),
-    wasmBytes: wasm.length,
+    wasmBytesFetched,
   };
 }
 
 async function main() {
-  const base = baseUrl(process.env.WATCHER_PAGES_URL || process.argv[2]);
+  const base = normalizeBase(process.env.WATCHER_PAGES_URL || process.argv[2]);
   const attempts = Number(process.env.WATCHER_LIVE_SMOKE_ATTEMPTS || 30);
   const delayMs = Number(process.env.WATCHER_LIVE_SMOKE_DELAY_MS || 5000);
   let lastError;
