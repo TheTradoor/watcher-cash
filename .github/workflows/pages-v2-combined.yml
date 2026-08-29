@@ -1,0 +1,213 @@
+name: Deploy Combined Watcher V1 + V2 to GitHub Pages
+
+on:
+  push:
+    branches: [watcher-protocol-v2]
+    paths:
+      - 'app/**'
+      - 'client/watcher/**'
+      - 'public/watcher-protocol/devnet.json'
+      - 'public/watcher-protocol/v2-devnet.json'
+      - 'public/watcher-protocol/v2-prover-pin.json'
+      - 'scripts/install-pinned-v2-prover.mjs'
+      - 'scripts/watcher-runtime-verify.mjs'
+      - 'scripts/watcher-v2-runtime-verify.mjs'
+      - 'circuits/withdraw/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'next.config.mjs'
+      - '.github/workflows/pages-v2-combined.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+env:
+  NEXT_PUBLIC_BASE_PATH: /watcher-cash
+  NEXT_PUBLIC_RPC_URL: https://api.devnet.solana.com
+  NEXT_PUBLIC_WATCHER_RUNTIME_URL: /watcher-cash/watcher-protocol/devnet.json
+  NEXT_PUBLIC_WATCHER_PROVER_BASE: /watcher-cash/watcher-prover
+  NEXT_PUBLIC_WATCHER_V2_RUNTIME_URL: /watcher-cash/watcher-protocol/v2-devnet.json
+  NEXT_PUBLIC_WATCHER_V2_PROVER_BASE: /watcher-cash/watcher-prover-v2
+
+concurrency:
+  group: watcher-pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout combined V1 + V2 source
+        uses: actions/checkout@v4
+        with:
+          ref: watcher-protocol-v2
+
+      - name: Setup Node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Setup Go 1.25
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+          cache-dependency-path: circuits/withdraw/go.sum
+
+      - name: Install locked web dependencies
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Verify live V1 runtime remains valid
+        shell: bash
+        run: |
+          set -euo pipefail
+          RUNTIME=public/watcher-protocol/devnet.json
+          test -s "$RUNTIME"
+          test "$(jq -r '.status' "$RUNTIME")" = ready
+          test "$(jq -r '.cluster' "$RUNTIME")" = devnet
+          node scripts/watcher-runtime-verify.mjs \
+            --runtime "$RUNTIME" \
+            --rpc https://api.devnet.solana.com
+
+      - name: Verify isolated V2 public-devnet runtime and pinned prover
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s public/watcher-protocol/v2-devnet.json
+          test -s public/watcher-protocol/v2-prover-pin.json
+          test "$(jq -r '.status' public/watcher-protocol/v2-devnet.json)" = ready
+          test "$(jq -r '.network' public/watcher-protocol/v2-devnet.json)" = devnet
+          test "$(jq -r '.programId' public/watcher-protocol/v2-devnet.json)" = DMU22YyGkLs9cuZXR6eHt4oZpWtMTMtkCNTNV8SW16HM
+          node scripts/watcher-v2-runtime-verify.mjs \
+            --runtime public/watcher-protocol/v2-devnet.json \
+            --rpc https://api.devnet.solana.com \
+            --pin public/watcher-protocol/v2-prover-pin.json
+
+      - name: Download synchronized matched V1 prover bundle
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/watcher-pages-release /tmp/watcher-pages-extract circuits/withdraw/fixture-out/pages-prover
+          mkdir -p /tmp/watcher-pages-release /tmp/watcher-pages-extract circuits/withdraw/fixture-out/pages-prover
+          gh release download watcher-dev-prover \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern 'watcher-development-prover-bundle.tar.gz' \
+            --pattern 'watcher-development-prover-bundle.tar.gz.sha256' \
+            --dir /tmp/watcher-pages-release
+          (
+            cd /tmp/watcher-pages-release
+            sha256sum --check watcher-development-prover-bundle.tar.gz.sha256
+          )
+          ARCHIVE_SHA=$(sha256sum /tmp/watcher-pages-release/watcher-development-prover-bundle.tar.gz | awk '{print $1}')
+          RUNTIME_SHA=$(jq -r '.proverBundleSha256' public/watcher-protocol/devnet.json)
+          test "$ARCHIVE_SHA" = "$RUNTIME_SHA"
+          tar -xzf /tmp/watcher-pages-release/watcher-development-prover-bundle.tar.gz -C /tmp/watcher-pages-extract
+          BUNDLE_DIR=$(dirname "$(find /tmp/watcher-pages-extract -type f -name deposit.r1cs -print -quit)")
+          test -n "$BUNDLE_DIR"
+          cp -a "$BUNDLE_DIR/." circuits/withdraw/fixture-out/pages-prover/
+          for name in deposit.r1cs deposit.pk deposit.vk withdraw.r1cs withdraw.pk withdraw.vk manifest.json; do
+            test -s "circuits/withdraw/fixture-out/pages-prover/$name"
+          done
+
+      - name: Build and verify V1 browser prover
+        working-directory: circuits/withdraw
+        shell: bash
+        run: |
+          set -euo pipefail
+          GOOS=js GOARCH=wasm go build \
+            -trimpath \
+            -ldflags='-s -w' \
+            -o fixture-out/pages-prover/watcher-prover.wasm \
+            ./cmd/watcher-prover-wasm
+          WASM_EXEC="$(go env GOROOT)/lib/wasm/wasm_exec.js"
+          if [ ! -f "$WASM_EXEC" ]; then
+            WASM_EXEC="$(go env GOROOT)/misc/wasm/wasm_exec.js"
+          fi
+          cp "$WASM_EXEC" fixture-out/pages-prover/wasm_exec.js
+
+      - name: Test V1 browser prover and client
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/test-browser-prover-wasm.mjs \
+            circuits/withdraw/fixture-out/pages-prover \
+            circuits/withdraw/fixture-out/pages-prover/watcher-prover.wasm \
+            circuits/withdraw/fixture-out/pages-prover/wasm_exec.js
+          npm run test:watcher-client
+
+      - name: Assemble V1 browser prover assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf public/watcher-prover
+          mkdir -p public/watcher-prover/assets
+          cp circuits/withdraw/fixture-out/pages-prover/watcher-prover.wasm public/watcher-prover/
+          cp circuits/withdraw/fixture-out/pages-prover/wasm_exec.js public/watcher-prover/
+          cp client/watcher/browser-prover.worker.js public/watcher-prover/worker.js
+          for name in deposit.r1cs deposit.pk deposit.vk withdraw.r1cs withdraw.pk withdraw.vk manifest.json; do
+            cp "circuits/withdraw/fixture-out/pages-prover/$name" public/watcher-prover/assets/
+          done
+
+      - name: Install and verify immutable V2 browser prover assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/install-pinned-v2-prover.mjs
+          test -s public/watcher-prover-v2/watcher-v2-prover.wasm
+          test -s public/watcher-prover-v2/worker.js
+          test -s public/watcher-prover-v2/wasm_exec.js
+          test -s public/watcher-prover-v2/assets/deposit.pk
+          test -s public/watcher-prover-v2/assets/withdraw.pk
+          node --test \
+            client/watcher/browser-prover-v2.test.mjs \
+            client/watcher/flows-v2.test.mjs \
+            client/watcher/public-tree-v2.test.mjs \
+            client/watcher/backup-v2.test.mjs
+
+      - name: Build combined static Watcher interface
+        run: npm run build
+
+      - name: Verify V1 root and isolated V2 export
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s out/index.html
+          test -s out/v2/index.html
+          test -s out/watcher-protocol/devnet.json
+          test -s out/watcher-protocol/v2-devnet.json
+          test "$(jq -r '.programId' out/watcher-protocol/v2-devnet.json)" = DMU22YyGkLs9cuZXR6eHt4oZpWtMTMtkCNTNV8SW16HM
+          test -s out/watcher-prover/worker.js
+          test -s out/watcher-prover/watcher-prover.wasm
+          test -s out/watcher-prover-v2/worker.js
+          test -s out/watcher-prover-v2/watcher-v2-prover.wasm
+          test -s out/watcher-prover-v2/assets/deposit.pk
+          test -s out/watcher-prover-v2/assets/withdraw.pk
+          grep -q 'WATCHER CASH' out/index.html
+          grep -q 'V2' out/v2/index.html
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+        with:
+          enablement: true
+
+      - name: Upload combined Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ./out
+
+  deploy:
+    environment:
+      name: watcher-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Deploy V1 root plus isolated V2 route
+        id: deployment
+        uses: actions/deploy-pages@v4
