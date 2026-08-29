@@ -31,6 +31,7 @@ import {
   upsertNoteRecordV1,
   verifyPublicTreeCacheV2,
 } from '../../client/watcher/index.mjs';
+import VaultBackupControls from './VaultBackupControls';
 import styles from './v2.module.css';
 
 if (typeof globalThis !== 'undefined' && !globalThis.Buffer) globalThis.Buffer = Buffer;
@@ -559,6 +560,27 @@ export default function WatcherV2Page() {
 
       <section className={styles.notes}>
         <div className={styles.sectionHead}><div><small>ENCRYPTED NOTES</small><strong>{unlocked ? `${confirmedRecords.length} spendable` : 'Locked'}</strong></div></div>
+        <VaultBackupControls
+          unlocked={unlocked}
+          publicKey={publicKey}
+          walletAddress={walletAddress}
+          runtimeScope={runtimeScope}
+          network={runtime?.network || 'solana-devnet'}
+          vaultKey={vaultKey}
+          records={records}
+          onRestored={async (restored) => {
+            setRecords(restored);
+            const refreshed = await refreshTree({ syncNotes: true, recordsOverride: restored });
+            const synced = refreshed?.records || restored;
+            setRecords(synced);
+            return synced;
+          }}
+          onMessage={(text) => {
+            setError('');
+            setMessage(text);
+          }}
+          onError={(text) => setError(text)}
+        />
         {!unlocked ? <p>Unlock the private vault to inspect note state.</p> : records.length === 0 ? <p>No V2 private notes stored on this device yet.</p> : (
           <div className={styles.noteList}>
             {records.map((record) => (
