@@ -38,8 +38,6 @@ jobs:
             local file="$3"
             if ! grep -F -q "$needle" "$file"; then
               echo "$label is missing expected marker: $needle" >&2
-              head -c 2000 "$file" >&2 || true
-              echo >&2
               exit 1
             fi
             echo "$label marker: OK"
@@ -62,6 +60,10 @@ jobs:
           fetch 'V2 runtime' "$BASE/watcher-protocol/v2-devnet.json" /tmp/v2-runtime.json
           fetch 'V2 worker' "$BASE/watcher-prover-v2/worker.js" /tmp/v2-worker.js
 
+          V2_CHUNK=$(grep -oE '/watcher-cash/_next/static/chunks/app/v2/page-[A-Za-z0-9]+\.js' /tmp/v2.html | head -n1)
+          test -n "$V2_CHUNK" || { echo 'Live /v2 HTML did not reference an app/v2/page chunk' >&2; exit 1; }
+          fetch 'V2 page chunk' "https://thetradoor.github.io${V2_CHUNK}" /tmp/v2-page.js
+
           echo 'Fetching V2 WASM prefix'
           curl --fail --silent --show-error --location \
             --retry 12 --retry-delay 3 --retry-all-errors \
@@ -71,8 +73,9 @@ jobs:
           echo "V2 WASM fetch: OK ($(wc -c < /tmp/v2-prover-prefix.wasm) bytes)"
 
           require_contains 'V1 root' 'WATCHER' /tmp/v1.html
-          require_contains 'V2 route' 'Watcher Protocol' /tmp/v2.html
-          require_contains 'V2 route isolation marker' 'V2 · ISOLATED' /tmp/v2.html
+          require_contains 'V2 route chunk' 'Watcher Protocol' /tmp/v2-page.js
+          require_contains 'V2 runtime binding' '/watcher-cash/watcher-protocol/v2-devnet.json' /tmp/v2-page.js
+          require_contains 'V2 prover binding' '/watcher-cash/watcher-prover-v2' /tmp/v2-page.js
 
           require_eq 'V1 program id' "$(jq -r '.programId' /tmp/v1-runtime.json)" '9urFwd6gEYwkc5Dc8YYakYCX4VEosCRdgfQAz88fYEv5'
           require_eq 'V2 program id' "$(jq -r '.programId' /tmp/v2-runtime.json)" 'DMU22YyGkLs9cuZXR6eHt4oZpWtMTMtkCNTNV8SW16HM'
