@@ -17,6 +17,52 @@ function requireCircuit(value) {
   return circuit;
 }
 
+async function sha256Hex(bytes) {
+  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
+  return Array.from(digest, (value) => value.toString(16).padStart(2, '0')).join('');
+}
+
+export async function checkBrowserProverManifestV3({
+  basePath = DEFAULT_BROWSER_PROVER_BASE_V3,
+  fetchImpl = globalThis.fetch,
+} = {}) {
+  if (typeof fetchImpl !== 'function') throw new Error('Fetch API is unavailable');
+  if (!globalThis.crypto?.subtle) throw new Error('Web Crypto SHA-256 is unavailable');
+  const base = normalizeBasePath(basePath);
+  const response = await fetchImpl(`${base}/assets/manifest.json`, { cache: 'no-store' });
+  if (!response.ok) throw new Error(`V3 proving bundle manifest failed with HTTP ${response.status}`);
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  let manifest;
+  try {
+    manifest = JSON.parse(new TextDecoder().decode(bytes));
+  } catch {
+    throw new Error('V3 proving bundle manifest is not valid JSON');
+  }
+  if (Number(manifest.version) !== 2 || manifest.curve !== 'BN254' || manifest.scheme !== 'Groth16') {
+    throw new Error('V3 proving bundle manifest does not describe the expected BN254 Groth16 setup');
+  }
+  if (Number(manifest.merkleDepth) !== 16 || Number(manifest.maxInputs) !== 4) {
+    throw new Error('V3 proving bundle manifest has unexpected circuit dimensions');
+  }
+  const checksums = manifest.filesSha256 || manifest.files_sha256 || manifest.files || {};
+  for (const name of [
+    'deposit.r1cs', 'deposit.pk', 'deposit.vk',
+    'withdraw.r1cs', 'withdraw.pk', 'withdraw.vk',
+  ]) {
+    if (!/^[0-9a-f]{64}$/i.test(String(checksums[name] || ''))) {
+      throw new Error(`V3 proving bundle manifest is missing SHA-256 for ${name}`);
+    }
+  }
+  return {
+    status: 'ready',
+    version: 3,
+    curve: 'BN254',
+    scheme: 'Groth16',
+    bundleDigest: await sha256Hex(bytes),
+    circuits: ['deposit-v2', 'withdraw-v2'],
+  };
+}
+
 class CircuitWorkerV3 {
   constructor(basePath, circuit) {
     this.basePath = normalizeBasePath(basePath);
