@@ -1,0 +1,245 @@
+name: Publish Watcher V3 Overlay to GitHub Pages
+
+on:
+  push:
+    branches: [watcher-protocol-v3]
+    paths:
+      - 'app/v3/**'
+      - 'client/watcher/**v3*'
+      - 'public/watcher-protocol/v3-devnet.json'
+      - 'scripts/watcher-v3-live-pages-smoke.mjs'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+env:
+  NEXT_PUBLIC_BASE_PATH: /watcher-cash
+  NEXT_PUBLIC_RPC_URL: https://api.devnet.solana.com
+
+concurrency:
+  group: watcher-pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - name: Checkout immutable V1 source
+        uses: actions/checkout@v4
+        with:
+          ref: watcher-protocol
+          path: v1
+
+      - name: Checkout proven V2 overlay source
+        uses: actions/checkout@v4
+        with:
+          ref: watcher-protocol-v2
+          path: v2
+
+      - name: Checkout V3 overlay source
+        uses: actions/checkout@v4
+        with:
+          ref: watcher-protocol-v3
+          path: v3
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.x'
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+          cache: false
+
+      - name: Build exact current V1 Pages artifact
+        working-directory: v1
+        env:
+          NEXT_PUBLIC_WATCHER_RUNTIME_URL: /watcher-cash/watcher-protocol/devnet.json
+          NEXT_PUBLIC_WATCHER_PROVER_BASE: /watcher-cash/watcher-prover
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          npm ci --ignore-scripts --no-audit --no-fund
+          RUNTIME=public/watcher-protocol/devnet.json
+          test -s "$RUNTIME"
+          test "$(jq -r '.status' "$RUNTIME")" = ready
+          test "$(jq -r '.cluster' "$RUNTIME")" = devnet
+          node scripts/watcher-runtime-verify.mjs --runtime "$RUNTIME" --rpc https://api.devnet.solana.com
+
+          rm -rf /tmp/watcher-v1-v3-pages-release /tmp/watcher-v1-v3-pages-extract circuits/withdraw/fixture-out/pages-prover
+          mkdir -p /tmp/watcher-v1-v3-pages-release /tmp/watcher-v1-v3-pages-extract circuits/withdraw/fixture-out/pages-prover
+          gh release download watcher-dev-prover \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern 'watcher-development-prover-bundle.tar.gz' \
+            --pattern 'watcher-development-prover-bundle.tar.gz.sha256' \
+            --dir /tmp/watcher-v1-v3-pages-release
+          (cd /tmp/watcher-v1-v3-pages-release && sha256sum --check watcher-development-prover-bundle.tar.gz.sha256)
+          ARCHIVE_SHA=$(sha256sum /tmp/watcher-v1-v3-pages-release/watcher-development-prover-bundle.tar.gz | awk '{print $1}')
+          test "$ARCHIVE_SHA" = "$(jq -r '.proverBundleSha256' "$RUNTIME")"
+          tar -xzf /tmp/watcher-v1-v3-pages-release/watcher-development-prover-bundle.tar.gz -C /tmp/watcher-v1-v3-pages-extract
+          BUNDLE_DIR=$(dirname "$(find /tmp/watcher-v1-v3-pages-extract -type f -name deposit.r1cs -print -quit)")
+          cp -a "$BUNDLE_DIR/." circuits/withdraw/fixture-out/pages-prover/
+          GOOS=js GOARCH=wasm go -C circuits/withdraw build \
+            -trimpath -ldflags='-s -w' \
+            -o fixture-out/pages-prover/watcher-prover.wasm \
+            ./cmd/watcher-prover-wasm
+          WASM_EXEC="$(go env GOROOT)/lib/wasm/wasm_exec.js"
+          if [ ! -f "$WASM_EXEC" ]; then WASM_EXEC="$(go env GOROOT)/misc/wasm/wasm_exec.js"; fi
+          cp "$WASM_EXEC" circuits/withdraw/fixture-out/pages-prover/wasm_exec.js
+          rm -rf public/watcher-prover
+          mkdir -p public/watcher-prover/assets
+          cp circuits/withdraw/fixture-out/pages-prover/watcher-prover.wasm public/watcher-prover/
+          cp circuits/withdraw/fixture-out/pages-prover/wasm_exec.js public/watcher-prover/
+          cp client/watcher/browser-prover.worker.js public/watcher-prover/worker.js
+          for name in deposit.r1cs deposit.pk deposit.vk withdraw.r1cs withdraw.pk withdraw.vk manifest.json; do
+            cp "circuits/withdraw/fixture-out/pages-prover/$name" public/watcher-prover/assets/
+          done
+          npm run build
+          test -s out/index.html
+          test -s out/watcher-protocol/devnet.json
+          test -s out/watcher-prover/watcher-prover.wasm
+
+      - name: Build exact public V2 overlay artifact
+        working-directory: v2
+        env:
+          NEXT_PUBLIC_WATCHER_V2_RUNTIME_URL: /watcher-cash/watcher-protocol/v2-devnet.json
+          NEXT_PUBLIC_WATCHER_V2_PROVER_BASE: /watcher-cash/watcher-prover-v2
+        run: |
+          set -euo pipefail
+          npm ci --ignore-scripts --no-audit --no-fund
+          node scripts/watcher-v2-runtime-verify.mjs \
+            --runtime public/watcher-protocol/v2-devnet.json \
+            --rpc https://api.devnet.solana.com \
+            --pin public/watcher-protocol/v2-prover-pin.json
+          node scripts/install-pinned-v2-prover.mjs
+          npm run build
+          test -s out/v2/index.html
+          test -s out/watcher-protocol/v2-devnet.json
+          test -s out/watcher-prover-v2/watcher-v2-prover.wasm
+
+      - name: Assemble proven V1 plus V2 baseline and fingerprint it
+        run: |
+          set -euo pipefail
+          mkdir -p v1/out/_next v1/out/watcher-protocol
+          cp -a v2/out/_next/. v1/out/_next/
+          rm -rf v1/out/v2 v1/out/watcher-prover-v2
+          cp -a v2/out/v2 v1/out/v2
+          cp -a v2/out/watcher-prover-v2 v1/out/watcher-prover-v2
+          cp v2/out/watcher-protocol/v2-devnet.json v1/out/watcher-protocol/v2-devnet.json
+          cp v2/public/watcher-protocol/v2-prover-pin.json v1/out/watcher-protocol/v2-prover-pin.json
+
+          sha256sum v1/out/index.html | tee /tmp/v3-overlay-v1-root.sha256
+          sha256sum v1/out/watcher-protocol/devnet.json | tee /tmp/v3-overlay-v1-runtime.sha256
+          sha256sum v1/out/v2/index.html | tee /tmp/v3-overlay-v2-route.sha256
+          sha256sum v1/out/watcher-protocol/v2-devnet.json | tee /tmp/v3-overlay-v2-runtime.sha256
+          V2_CHUNK=$(grep -o '/watcher-cash/_next/static/chunks/app/v2/page-[A-Za-z0-9]*\.js' v1/out/v2/index.html | head -1)
+          test -n "$V2_CHUNK"
+          V2_CHUNK_REL=${V2_CHUNK#/watcher-cash/}
+          test -s "v1/out/$V2_CHUNK_REL"
+          echo "$V2_CHUNK_REL" > /tmp/v3-overlay-v2-chunk-path
+          sha256sum "v1/out/$V2_CHUNK_REL" | tee /tmp/v3-overlay-v2-chunk.sha256
+
+      - name: Build only the V3 overlay artifact from verified public devnet runtime
+        working-directory: v3
+        env:
+          NEXT_PUBLIC_WATCHER_V3_RUNTIME_URL: /watcher-cash/watcher-protocol/v3-devnet.json
+          NEXT_PUBLIC_WATCHER_V3_PROVER_BASE: /watcher-cash/watcher-prover-v3
+        run: |
+          set -euo pipefail
+          npm ci --ignore-scripts --no-audit --no-fund
+          test -s public/watcher-protocol/v3-devnet.json
+          node scripts/watcher-v3-runtime-verify.mjs \
+            --runtime public/watcher-protocol/v3-devnet.json \
+            --rpc https://api.devnet.solana.com \
+            --pin public/watcher-protocol/v2-prover-pin.json
+          node scripts/install-pinned-v2-prover.mjs
+          rm -rf public/watcher-prover-v3
+          cp -a public/watcher-prover-v2 public/watcher-prover-v3
+          test -s public/watcher-prover-v3/watcher-v2-prover.wasm
+          test -s public/watcher-prover-v3/assets/deposit.pk
+          test -s public/watcher-prover-v3/assets/withdraw.pk
+          npm run build
+          test -s out/v3/index.html
+          test -s out/watcher-protocol/v3-devnet.json
+          test -s out/watcher-prover-v3/watcher-v2-prover.wasm
+
+      - name: Overlay V3 and prove V1 plus V2 are byte-preserved
+        run: |
+          set -euo pipefail
+          V1_ROOT_BEFORE=$(awk '{print $1}' /tmp/v3-overlay-v1-root.sha256)
+          V1_RUNTIME_BEFORE=$(awk '{print $1}' /tmp/v3-overlay-v1-runtime.sha256)
+          V2_ROUTE_BEFORE=$(awk '{print $1}' /tmp/v3-overlay-v2-route.sha256)
+          V2_RUNTIME_BEFORE=$(awk '{print $1}' /tmp/v3-overlay-v2-runtime.sha256)
+          V2_CHUNK_BEFORE=$(awk '{print $1}' /tmp/v3-overlay-v2-chunk.sha256)
+          V2_CHUNK_REL=$(cat /tmp/v3-overlay-v2-chunk-path)
+
+          cp -a v3/out/_next/. v1/out/_next/
+          rm -rf v1/out/v3 v1/out/watcher-prover-v3
+          cp -a v3/out/v3 v1/out/v3
+          cp -a v3/out/watcher-prover-v3 v1/out/watcher-prover-v3
+          cp v3/out/watcher-protocol/v3-devnet.json v1/out/watcher-protocol/v3-devnet.json
+
+          test "$(sha256sum v1/out/index.html | awk '{print $1}')" = "$V1_ROOT_BEFORE" || { echo 'V1 root changed during V3 overlay' >&2; exit 1; }
+          test "$(sha256sum v1/out/watcher-protocol/devnet.json | awk '{print $1}')" = "$V1_RUNTIME_BEFORE" || { echo 'V1 runtime changed during V3 overlay' >&2; exit 1; }
+          test "$(sha256sum v1/out/v2/index.html | awk '{print $1}')" = "$V2_ROUTE_BEFORE" || { echo 'V2 route changed during V3 overlay' >&2; exit 1; }
+          test "$(sha256sum v1/out/watcher-protocol/v2-devnet.json | awk '{print $1}')" = "$V2_RUNTIME_BEFORE" || { echo 'V2 runtime changed during V3 overlay' >&2; exit 1; }
+          test "$(sha256sum "v1/out/$V2_CHUNK_REL" | awk '{print $1}')" = "$V2_CHUNK_BEFORE" || { echo 'V2 page chunk changed during V3 overlay' >&2; exit 1; }
+
+          test -s v1/out/v3/index.html
+          test -s v1/out/watcher-prover-v3/worker.js
+          test -s v1/out/watcher-prover-v3/watcher-v2-prover.wasm
+          test "$(jq -r '.version' v1/out/watcher-protocol/v3-devnet.json)" = 3
+          test "$(jq -r '.status' v1/out/watcher-protocol/v3-devnet.json)" = ready
+          grep -R -F -q '/watcher-cash/watcher-protocol/v3-devnet.json' v1/out/v3 v1/out/_next || {
+            echo 'V3 runtime binding was not emitted into the V3 route/chunks' >&2
+            exit 1
+          }
+          grep -R -F -q '/watcher-cash/watcher-prover-v3' v1/out/v3 v1/out/_next || {
+            echo 'V3 prover binding was not emitted into the V3 route/chunks' >&2
+            exit 1
+          }
+          echo 'V1 and V2 fingerprints preserved; V3 overlay assembled successfully.'
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+        with:
+          enablement: true
+
+      - name: Upload combined V1 + V2 + V3 Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ./v1/out
+
+  deploy:
+    environment:
+      name: watcher-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Deploy V1/V2-preserving V3 overlay
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+  live-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: deploy
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: watcher-protocol-v3
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.x'
+      - name: Verify V1, V2, and V3 live routes over HTTPS
+        env:
+          WATCHER_PAGES_URL: https://thetradoor.github.io/watcher-cash/
+          WATCHER_V3_EXPECTED_RUNTIME: public/watcher-protocol/v3-devnet.json
+          WATCHER_LIVE_SMOKE_ATTEMPTS: '30'
+          WATCHER_LIVE_SMOKE_DELAY_MS: '5000'
+        run: node scripts/watcher-v3-live-pages-smoke.mjs
