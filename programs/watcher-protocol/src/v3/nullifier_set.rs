@@ -137,6 +137,7 @@ pub fn unpack_nullifier_shard_header_v3(
     if data.len() < NULLIFIER_SHARD_HEADER_BYTES_V3
         || data[MAGIC_OFFSET..MAGIC_OFFSET + MAGIC.len()] != MAGIC
         || data[VERSION_OFFSET] != super::STATE_VERSION_V3
+        || (data.len() - NULLIFIER_SHARD_HEADER_BYTES_V3) % NULLIFIER_RECORD_BYTES_V3 != 0
     {
         return Err(WatcherError::InvalidAccountData);
     }
@@ -150,7 +151,8 @@ pub fn unpack_nullifier_shard_header_v3(
         return Err(WatcherError::InvalidAccountData);
     }
     let count = read_u32(data, COUNT_OFFSET)?;
-    if data.len() != required_nullifier_shard_len_v3(count)? {
+    let used_len = required_nullifier_shard_len_v3(count)?;
+    if data.len() < used_len {
         return Err(WatcherError::InvalidAccountData);
     }
     Ok(NullifierShardHeaderV3 { config, shard, count })
@@ -204,7 +206,7 @@ pub fn append_nullifier_v3(
         .count
         .checked_add(1)
         .ok_or(WatcherError::ArithmeticOverflow)?;
-    if data.len() != required_nullifier_shard_len_v3(next_count)? {
+    if data.len() < required_nullifier_shard_len_v3(next_count)? {
         return Err(WatcherError::InvalidAccountData);
     }
     let head_offset = head_offset(route.bucket)?;
