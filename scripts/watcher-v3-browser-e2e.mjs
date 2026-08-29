@@ -54,6 +54,16 @@ async function runTransaction(page, expectedMessage, label) {
   const message = page.locator('[data-v3-message]');
   const error = page.locator('[data-v3-error="true"]');
   await primary.click({ timeout });
+  await page.waitForFunction(
+    (expected) => {
+      const button = document.querySelector('[data-v3-primary]');
+      const message = document.querySelector('[data-v3-message]');
+      const busy = button?.getAttribute('data-v3-busy') || 'idle';
+      return busy !== 'idle' || String(message?.textContent || '').includes(expected);
+    },
+    expectedMessage,
+    { timeout: Math.min(assertionTimeout, 10_000) },
+  );
   const deadline = Date.now() + Math.min(timeout, 300_000);
   while (Date.now() < deadline) {
     if (await error.count()) {

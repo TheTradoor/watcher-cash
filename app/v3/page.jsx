@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Buffer } from 'buffer';
 import { useConnection, useWallet } from '@solana/wallet-adapter-react';
 import { WalletMultiButton } from '@solana/wallet-adapter-react-ui';
@@ -124,6 +124,7 @@ export default function WatcherV3Page() {
   const [error, setError] = useState('');
   const [prover, setProver] = useState({ status: 'idle', progress: 0, message: 'V3 uses the proven V2 browser Groth16 bundle; prover not loaded.', digest: '' });
   const [walletBalance, setWalletBalance] = useState(0n);
+  const inFlightRef = useRef(false);
 
   const publicKey = wallet.publicKey;
   const walletAddress = publicKey?.toBase58() || '';
@@ -331,7 +332,10 @@ export default function WatcherV3Page() {
   }
 
   async function transact() {
+    if (inFlightRef.current) return;
+    inFlightRef.current = true;
     setError('');
+    setBusy('prepare');
     try {
       if (!wallet.connected || !publicKey) throw new Error('Connect your wallet first');
       if (runtimeState !== 'ready' || !keys) throw new Error('Watcher V3 runtime is not ready');
@@ -340,10 +344,13 @@ export default function WatcherV3Page() {
         await unlock();
         return;
       }
-      const current = await refreshTree({ syncNotes: true });
+      setMessage('Preparing V3 transaction: syncing private note state and loading the browser prover…');
+      const [current] = await Promise.all([
+        refreshTree({ syncNotes: true }),
+        ensureProver(),
+      ]);
       if (!current || current.status !== 'ready') throw new Error(current?.error || 'V3 public tree cache is not ready');
       const sourceRecords = current.records || records;
-      await ensureProver();
       const value = parseSol(amount);
 
       if (mode === 'deposit') {
@@ -470,6 +477,7 @@ export default function WatcherV3Page() {
     } catch (transactionError) {
       setError(transactionError?.message || String(transactionError));
     } finally {
+      inFlightRef.current = false;
       setBusy('');
     }
   }
@@ -559,6 +567,7 @@ export default function WatcherV3Page() {
             type="button"
             className={styles.primary}
             data-v3-primary
+            data-v3-busy={busy || 'idle'}
             onClick={transact}
             disabled={Boolean(busy) || runtimeState !== 'ready' || (unlocked && !treeReady)}
           >
