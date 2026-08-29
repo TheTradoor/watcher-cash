@@ -142,9 +142,9 @@ func TestProverV2ParsesOneInputExactWithdrawal(t *testing.T) {
 	if decimalStringV2(assignment.InputCount) != "1" {
 		t.Fatalf("unexpected input count %v", assignment.InputCount)
 	}
-	if decimalStringV2(assignment.ChangeCommitment) != "0"
-		|| decimalStringV2(assignment.CurrentRoot) != "0"
-		|| decimalStringV2(assignment.NewMerkleRoot) != "0" {
+	if decimalStringV2(assignment.ChangeCommitment) != "0" ||
+		decimalStringV2(assignment.CurrentRoot) != "0" ||
+		decimalStringV2(assignment.NewMerkleRoot) != "0" {
 		t.Fatal("exact V2 withdrawal parser must retain zero append sentinels")
 	}
 }
