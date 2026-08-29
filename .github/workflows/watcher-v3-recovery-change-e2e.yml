@@ -82,8 +82,8 @@ jobs:
           mkdir -p /tmp/solana-release
           tar -xjf /tmp/solana-release.tar.bz2 -C /tmp/solana-release --strip-components=1
           echo "/tmp/solana-release/bin" >> "$GITHUB_PATH"
-          solana --version
-          cargo-build-sbf --version
+          /tmp/solana-release/bin/solana --version
+          /tmp/solana-release/bin/cargo-build-sbf --version
 
       - name: Build V3 SBF against the unchanged public verifying keys
         run: |
