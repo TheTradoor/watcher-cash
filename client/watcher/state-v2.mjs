@@ -77,5 +77,9 @@ export async function fetchActiveTreeV2({ connection, activeTree, commitment = '
   }
   const info = await connection.getAccountInfo(activeTree, commitment);
   if (!info) throw new Error('V2 active tree account was not found');
-  return decodeActiveTreeV2(info.data);
+  const decoded = decodeActiveTreeV2(info.data);
+  return Object.freeze({
+    ...decoded,
+    owner: info.owner || null,
+  });
 }
