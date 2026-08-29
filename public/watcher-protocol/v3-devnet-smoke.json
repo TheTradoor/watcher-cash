@@ -1,0 +1,19 @@
+{
+  "status": "pass",
+  "network": "devnet",
+  "programId": "AyAyADfWVV3ZRUDGgJ9sEeU5GnYdZ9DyW4t3uW49pUHg",
+  "config": "EtEvKaoydMYPHP2PunqsPiLrEyR8bnZ8e1kxQMf9MRK9",
+  "activeTree": "wcVsirwzEDCzMSb33eM9Z6XmpCThDNzFHaiaGLUAMNa",
+  "vault": "9AJaupuVKW4QLQ6jeoWUWhTD3Pa9Pmr63ktcjcgGhTwe",
+  "depositSignature": "5K16YzPtMrbophQzJYLqVLKE37FZgVnmwggrA1qbifjkDRmJC7hPqgg7KDftY7Gu9MjhYHdPz6XmcNZiTuHmZsKn",
+  "withdrawSignature": "ikwWDAU3JmXnL98BqibNju3d8ejtZoRveHPrygzHtSw16jixAvuTBsLq2ppvoV9a45REdSoi8ZpL8gXnrbrUg2F",
+  "amountLamports": "1000000",
+  "nextIndex": 1,
+  "trackedBalance": "0",
+  "shard": "Fv5fMmscLscRENvYzbf1Nb7nN8sMDqttCDBnaU2KWrpN",
+  "shardGrowthBytes": 36,
+  "replayRejected": true,
+  "legacyV2MarkerAccounts": 0,
+  "verifiedAt": "2026-08-29T22:12:44Z",
+  "sourceCommit": "0738a6f4f9e324b4856a5fee1de9a77c679402de"
+}
