@@ -2,6 +2,7 @@
 
 import fs from 'node:fs';
 
+// This file is also an explicit, V3-only Pages overlay trigger path.
 const EXPECTED_V1_PROGRAM_ID = '9urFwd6gEYwkc5Dc8YYakYCX4VEosCRdgfQAz88fYEv5';
 const EXPECTED_V2_PROGRAM_ID = 'DMU22YyGkLs9cuZXR6eHt4oZpWtMTMtkCNTNV8SW16HM';
 const DEFAULT_BASE_URL = 'https://thetradoor.github.io/watcher-cash/';
@@ -100,6 +101,9 @@ async function oneAttempt(base, token) {
   }
   if (!Array.isArray(v3.nullifierShards) || v3.nullifierShards.length !== 32) {
     throw new Error('Live V3 runtime does not expose all 32 packed nullifier shards');
+  }
+  if (v3.proverBasePath !== '/watcher-cash/watcher-prover-v3') {
+    throw new Error('Live V3 runtime exposes the wrong GitHub Pages prover base path');
   }
   if (workerText.length < 100) throw new Error('Live V3 browser prover worker is empty or malformed');
   const wasmBytesFetched = await wasmPrefix(busted(new URL('watcher-prover-v3/watcher-v2-prover.wasm', base), token));
