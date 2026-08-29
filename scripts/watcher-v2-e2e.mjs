@@ -34,7 +34,14 @@ const programId = new PublicKey(process.env.WATCHER_V2_PROGRAM_ID);
 const payerPath = process.env.WATCHER_V2_PAYER_KEYPAIR;
 const proverPath = process.env.WATCHER_V2_PROVER || 'circuits/withdraw/fixture-out/v2/watcher-v2-prover';
 const bundlePath = process.env.WATCHER_V2_BUNDLE || 'circuits/withdraw/fixture-out/v2';
+const allowAirdrop = String(process.env.WATCHER_V2_ALLOW_AIRDROP ?? '1') === '1';
+const requiredPayerLamports = BigInt(process.env.WATCHER_V2_REQUIRED_PAYER_LAMPORTS || '20000000000');
+const auxiliaryAccountLamports = BigInt(process.env.WATCHER_V2_AUXILIARY_ACCOUNT_LAMPORTS || '1000000');
 if (!payerPath) throw new Error('WATCHER_V2_PAYER_KEYPAIR is required');
+if (requiredPayerLamports < 100_000_000n) throw new Error('WATCHER_V2_REQUIRED_PAYER_LAMPORTS is too low for a custody smoke test');
+if (auxiliaryAccountLamports < 1n || auxiliaryAccountLamports > 10_000_000n) {
+  throw new Error('WATCHER_V2_AUXILIARY_ACCOUNT_LAMPORTS must be between 1 and 10000000');
+}
 const payer = Keypair.fromSecretKey(Uint8Array.from(JSON.parse(fs.readFileSync(payerPath, 'utf8'))));
 const connection = new Connection(rpcUrl, 'confirmed');
 
@@ -82,22 +89,56 @@ async function send(instruction, signers = [payer]) {
   );
 }
 
-async function ensureFunded(key, sol = 2) {
-  const balance = await connection.getBalance(key, 'confirmed');
-  if (balance >= sol * 1_000_000_000) return;
-  const signature = await connection.requestAirdrop(key, sol * 1_000_000_000);
+async function ensurePayerFunding() {
+  let balance = BigInt(await connection.getBalance(payer.publicKey, 'confirmed'));
+  if (balance >= requiredPayerLamports) return balance;
+  if (!allowAirdrop) {
+    throw new Error(
+      `V2 custody smoke payer has ${balance} lamports; ${requiredPayerLamports} required and faucet use is disabled`,
+    );
+  }
+  const deficit = requiredPayerLamports - balance;
+  const signature = await connection.requestAirdrop(payer.publicKey, Number(deficit));
   const latest = await connection.getLatestBlockhash('confirmed');
-  await connection.confirmTransaction({ signature, ...latest }, 'confirmed');
+  const confirmation = await connection.confirmTransaction({ signature, ...latest }, 'confirmed');
+  if (confirmation.value.err) throw new Error(`V2 payer airdrop failed: ${JSON.stringify(confirmation.value.err)}`);
+  balance = BigInt(await connection.getBalance(payer.publicKey, 'confirmed'));
+  if (balance < requiredPayerLamports) {
+    throw new Error(`V2 payer balance remained below ${requiredPayerLamports} after airdrop`);
+  }
+  return balance;
+}
+
+async function fundAuxiliaryAccounts(...publicKeys) {
+  const instructions = [];
+  for (const publicKey of publicKeys) {
+    const balance = BigInt(await connection.getBalance(publicKey, 'confirmed'));
+    if (balance >= auxiliaryAccountLamports) continue;
+    instructions.push(SystemProgram.transfer({
+      fromPubkey: payer.publicKey,
+      toPubkey: publicKey,
+      lamports: Number(auxiliaryAccountLamports - balance),
+    }));
+  }
+  if (instructions.length === 0) return;
+  await sendAndConfirmTransaction(
+    connection,
+    new Transaction().add(...instructions),
+    [payer],
+    { commitment: 'confirmed', skipPreflight: false },
+  );
 }
 
 async function main() {
-  await ensureFunded(payer.publicKey, 20);
+  const payerBalanceBefore = await ensurePayerFunding();
   const config = Keypair.generate();
   const activeTree = Keypair.generate();
   const treasury = Keypair.generate();
   const recipient = Keypair.generate();
-  await ensureFunded(treasury.publicKey, 1);
-  await ensureFunded(recipient.publicKey, 1);
+  // Public-devnet smoke must not depend on faucet capacity for throwaway
+  // recipient/treasury accounts. Fund tiny system-account balances from the
+  // already-funded payer instead; local-validator mode still permits payer airdrop.
+  await fundAuxiliaryAccounts(treasury.publicKey, recipient.publicKey);
 
   const [vault] = PublicKey.findProgramAddressSync(
     [VAULT_SEED_V2, config.publicKey.toBuffer()],
@@ -323,6 +364,7 @@ async function main() {
   }
   if (!replayRejected) throw new Error('V2 replayed nullifier was not rejected');
 
+  const payerBalanceAfter = BigInt(await connection.getBalance(payer.publicKey, 'confirmed'));
   console.log(JSON.stringify({
     status: 'pass',
     programId: programId.toBase58(),
@@ -336,6 +378,10 @@ async function main() {
     nextIndex: u32From(activeAfterWithdraw.data, 41),
     trackedBalance: u64From(vaultAfterWithdraw.data, VAULT_TRACKED_BALANCE_OFFSET).toString(),
     replayRejected,
+    airdropAllowed: allowAirdrop,
+    requiredPayerLamports: requiredPayerLamports.toString(),
+    payerBalanceBefore: payerBalanceBefore.toString(),
+    payerBalanceAfter: payerBalanceAfter.toString(),
   }, null, 2));
 }
 
