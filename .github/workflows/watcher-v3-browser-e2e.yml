@@ -2,7 +2,7 @@ name: Watcher Protocol V3 Phantom Browser E2E
 
 on:
   push:
-    branches: [watcher-protocol-v3-browser]
+    branches: [watcher-protocol-v3-browser, watcher-protocol-v3-fast-prover]
     paths:
       - 'app/v3/**'
       - 'app/providers.jsx'
@@ -66,14 +66,16 @@ jobs:
       - name: Test V3 browser client adapters and packed note sync
         run: >-
           node --test
+          client/watcher/browser-prover-v2.test.mjs
           client/watcher/instructions-v3.test.mjs
           client/watcher/flows-v3.test.mjs
           client/watcher/vault-v3.test.mjs
 
-      - name: Check V3 browser/bootstrap syntax
+      - name: Check V3 browser/bootstrap and fast worker syntax
         run: |
           node --check scripts/watcher-v3-bootstrap.mjs
           node --check scripts/watcher-v3-browser-e2e.mjs
+          node --check client/watcher/browser-prover-v3-fast.worker.js
 
       - name: Generate exact V2 circuit bundle reused by V3 and matching verifier
         working-directory: circuits/withdraw
@@ -96,18 +98,19 @@ jobs:
           test -s fixture-out/v3-browser-e2e/watcher-v2-prover.wasm
           test -s fixture-out/v3-browser-e2e/manifest.json
 
-      - name: Assemble isolated V3 browser prover assets
+      - name: Assemble isolated V3 browser prover assets with fast verified-cache worker
         run: |
           set -euo pipefail
           rm -rf public/watcher-prover-v3
           mkdir -p public/watcher-prover-v3/assets
           cp circuits/withdraw/fixture-out/v3-browser-e2e/watcher-v2-prover.wasm public/watcher-prover-v3/
           cp circuits/withdraw/fixture-out/v3-browser-e2e/wasm_exec.js public/watcher-prover-v3/
-          cp client/watcher/browser-prover-v2.worker.js public/watcher-prover-v3/worker.js
+          cp client/watcher/browser-prover-v3-fast.worker.js public/watcher-prover-v3/worker.js
           for name in deposit.r1cs deposit.pk deposit.vk withdraw.r1cs withdraw.pk withdraw.vk manifest.json; do
             cp "circuits/withdraw/fixture-out/v3-browser-e2e/$name" "public/watcher-prover-v3/assets/$name"
           done
           test -s public/watcher-prover-v3/assets/manifest.json
+          node --check public/watcher-prover-v3/worker.js
 
       - name: Install Agave SBF toolchain
         run: |

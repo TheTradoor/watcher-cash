@@ -2,9 +2,10 @@ name: Watcher V3 Predeploy Sanity
 
 on:
   push:
-    branches: [watcher-protocol-v3]
+    branches: [watcher-protocol-v3, watcher-protocol-v3-fast-prover]
     paths:
       - 'app/v3/**'
+      - 'client/watcher/**v2*'
       - 'client/watcher/**v3*'
       - 'scripts/watcher-v3-bootstrap.mjs'
       - 'scripts/watcher-v3-runtime-verify.mjs'
@@ -20,7 +21,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: watcher-v3-predeploy-sanity
+  group: watcher-v3-predeploy-sanity-${{ github.ref_name }}
   cancel-in-progress: true
 
 jobs:
@@ -30,7 +31,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: watcher-protocol-v3
+          ref: ${{ github.ref_name }}
 
       - uses: actions/setup-node@v4
         with:
@@ -42,16 +43,22 @@ jobs:
       - name: Install locked dependencies
         run: npm ci --ignore-scripts --no-audit --no-fund
 
-      - name: Syntax-check V3 deploy and smoke scripts
+      - name: Syntax-check V3 deploy, smoke, and fast prover worker
         run: |
           set -euo pipefail
           node --check scripts/watcher-v3-bootstrap.mjs
           node --check scripts/watcher-v3-runtime-verify.mjs
           node --check scripts/watcher-v3-public-devnet-smoke.mjs
           node --check scripts/watcher-v3-live-pages-smoke.mjs
+          node --check client/watcher/browser-prover-v3-fast.worker.js
 
-      - name: Run V3 client packed-state tests
-        run: node --test client/watcher/instructions-v3.test.mjs client/watcher/flows-v3.test.mjs client/watcher/vault-v3.test.mjs
+      - name: Run V2 proof-surface plus V3 packed-state tests
+        run: >-
+          node --test
+          client/watcher/browser-prover-v2.test.mjs
+          client/watcher/instructions-v3.test.mjs
+          client/watcher/flows-v3.test.mjs
+          client/watcher/vault-v3.test.mjs
 
       - name: Run V3 Rust packed-state tests
         run: cargo test --quiet --manifest-path programs/watcher-protocol/Cargo.toml --lib --locked 'v3::'

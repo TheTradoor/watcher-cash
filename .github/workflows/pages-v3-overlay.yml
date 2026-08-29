@@ -159,6 +159,9 @@ jobs:
           node scripts/install-pinned-v2-prover.mjs
           rm -rf public/watcher-prover-v3
           cp -a public/watcher-prover-v2 public/watcher-prover-v3
+          cp client/watcher/browser-prover-v3-fast.worker.js public/watcher-prover-v3/worker.js
+          node --check public/watcher-prover-v3/worker.js
+          grep -F -q 'watcher-v3-zk-assets-v1-' public/watcher-prover-v3/worker.js
           test -s public/watcher-prover-v3/watcher-v2-prover.wasm
           test -s public/watcher-prover-v3/assets/deposit.pk
           test -s public/watcher-prover-v3/assets/withdraw.pk
@@ -192,6 +195,7 @@ jobs:
           test -s v1/out/v3/index.html
           test -s v1/out/watcher-prover-v3/worker.js
           test -s v1/out/watcher-prover-v3/watcher-v2-prover.wasm
+          grep -F -q 'watcher-v3-zk-assets-v1-' v1/out/watcher-prover-v3/worker.js
           test "$(jq -r '.version' v1/out/watcher-protocol/v3-devnet.json)" = 3
           test "$(jq -r '.status' v1/out/watcher-protocol/v3-devnet.json)" = ready
           grep -R -F -q '/watcher-cash/watcher-protocol/v3-devnet.json' v1/out/v3 v1/out/_next || {
@@ -202,7 +206,7 @@ jobs:
             echo 'V3 prover binding was not emitted into the V3 route/chunks' >&2
             exit 1
           }
-          echo 'V1 and V2 fingerprints preserved; V3 overlay assembled successfully.'
+          echo 'V1 and V2 fingerprints preserved; V3 fast prover overlay assembled successfully.'
 
       - name: Configure GitHub Pages
         uses: actions/configure-pages@v5
