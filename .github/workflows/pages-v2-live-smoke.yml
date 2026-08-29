@@ -1,0 +1,58 @@
+name: Verify Live Watcher V1 and V2 Pages
+
+on:
+  push:
+    branches: [watcher-protocol-v2]
+    paths:
+      - '.github/workflows/pages-v2-live-smoke.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  live-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Verify deployed V1 root and isolated V2 route
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE='https://thetradoor.github.io/watcher-cash'
+
+          fetch() {
+            local url="$1"
+            local output="$2"
+            curl --fail --silent --show-error --location \
+              --retry 12 --retry-delay 3 --retry-all-errors \
+              "$url" -o "$output"
+            test -s "$output"
+          }
+
+          fetch "$BASE/" /tmp/v1.html
+          fetch "$BASE/v2/" /tmp/v2.html
+          fetch "$BASE/watcher-protocol/devnet.json" /tmp/v1-runtime.json
+          fetch "$BASE/watcher-protocol/v2-devnet.json" /tmp/v2-runtime.json
+          fetch "$BASE/watcher-prover-v2/worker.js" /tmp/v2-worker.js
+          curl --fail --silent --show-error --location \
+            --retry 12 --retry-delay 3 --retry-all-errors \
+            --range 0-65535 "$BASE/watcher-prover-v2/watcher-v2-prover.wasm" \
+            -o /tmp/v2-prover-prefix.wasm
+          test -s /tmp/v2-prover-prefix.wasm
+
+          grep -F -q 'WATCHER' /tmp/v1.html
+          grep -F -q 'Watcher Protocol' /tmp/v2.html
+          grep -F -q 'PROTOCOL V2' /tmp/v2.html
+
+          test "$(jq -r '.programId' /tmp/v1-runtime.json)" = '9urFwd6gEYwkc5Dc8YYakYCX4VEosCRdgfQAz88fYEv5'
+          test "$(jq -r '.programId' /tmp/v2-runtime.json)" = 'DMU22YyGkLs9cuZXR6eHt4oZpWtMTMtkCNTNV8SW16HM'
+          test "$(jq -r '.status' /tmp/v2-runtime.json)" = ready
+          test "$(jq -r '.network' /tmp/v2-runtime.json)" = devnet
+          test "$(jq -r '.treeDepth' /tmp/v2-runtime.json)" = 16
+          test "$(jq -r '.treeCapacity' /tmp/v2-runtime.json)" = 65536
+
+          echo 'Live V1 root: OK'
+          echo 'Live V1 runtime: OK'
+          echo 'Live /v2 route: OK'
+          echo 'Live V2 public runtime: OK'
+          echo 'Live V2 prover worker/WASM: OK'
