@@ -7,3 +7,10 @@ export * from './prover.mjs';
 export * from './browser-prover.mjs';
 export * from './vault.mjs';
 export * from './flows.mjs';
+
+export * from './merkle-v2.mjs';
+export * from './selection-v2.mjs';
+export * from './instructions-v2.mjs';
+export * from './bindings-v2.mjs';
+export * from './public-inputs-v2.mjs';
+export * from './browser-prover-v2.mjs';
