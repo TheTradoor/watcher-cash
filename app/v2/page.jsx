@@ -167,7 +167,7 @@ export default function WatcherV2Page() {
     return saved;
   }, [vaultKey, publicKey, runtimeScope]);
 
-  const refreshTree = useCallback(async ({ syncNotes = true } = {}) => {
+  const refreshTree = useCallback(async ({ syncNotes = true, recordsOverride = null } = {}) => {
     if (!keys || !runtimeScope) return null;
     const checked = await verifyPublicTreeCacheV2({
       connection,
@@ -175,17 +175,18 @@ export default function WatcherV2Page() {
       scope: runtimeScope,
     });
     setTreeState(checked);
+    let effectiveRecords = recordsOverride || records;
     if (syncNotes && unlocked && checked.status === 'ready') {
       const synced = await syncNoteRecordsV2({
         connection,
         programId: keys.programId,
         config: keys.config,
         tree: checked.tree,
-        records,
+        records: effectiveRecords,
       });
-      await persistRecords(synced.records);
+      effectiveRecords = await persistRecords(synced.records);
     }
-    return checked;
+    return { ...checked, records: effectiveRecords };
   }, [connection, keys, runtimeScope, unlocked, records, persistRecords]);
 
   useEffect(() => {
@@ -293,8 +294,7 @@ export default function WatcherV2Page() {
       preflightCommitment: 'confirmed',
       maxRetries: 25,
     });
-    const latest = await connection.getLatestBlockhash('confirmed');
-    await connection.confirmTransaction({ signature, ...latest }, 'confirmed');
+    await connection.confirmTransaction(signature, 'confirmed');
     return signature;
   }
 
@@ -312,6 +312,7 @@ export default function WatcherV2Page() {
       if (!current || current.status !== 'ready') {
         throw new Error(current?.error || 'V2 public tree cache is not ready');
       }
+      const sourceRecords = current.records || records;
       await ensureProver();
       const value = parseSol(amount);
 
@@ -326,7 +327,7 @@ export default function WatcherV2Page() {
           epoch: current.tree.epoch,
           leafIndex: current.tree.count,
         });
-        const pendingRecords = upsertNoteRecordV1(records, pending);
+        const pendingRecords = upsertNoteRecordV1(sourceRecords, pending);
         await persistRecords(pendingRecords);
         const prepared = await prepareDepositV2({
           accounts: {
@@ -359,14 +360,14 @@ export default function WatcherV2Page() {
           leafIndex: prepared.append.index,
           root: prepared.append.newRoot.toString(10),
         };
-        await persistRecords(upsertNoteRecordV1(pendingRecords, confirmed));
-        await refreshTree({ syncNotes: true });
+        const finalRecords = await persistRecords(upsertNoteRecordV1(pendingRecords, confirmed));
+        await refreshTree({ syncNotes: true, recordsOverride: finalRecords });
         setMessage(`Deposited ${formatSol(value)} SOL into a V2 proof-bound private note.`);
       } else {
         setBusy('withdraw');
         if (!recipient) throw new Error('Enter a withdrawal recipient');
         const recipientKey = new PublicKey(recipient);
-        const selection = selectInputsV2(records, {
+        const selection = selectInputsV2(sourceRecords, {
           publicAmount: value,
           protocolFee,
           relayerFee,
@@ -381,7 +382,7 @@ export default function WatcherV2Page() {
               leafIndex: current.tree.count,
             })
           : null;
-        if (changeRecord) await persistRecords(upsertNoteRecordV1(records, changeRecord));
+        if (changeRecord) await persistRecords(upsertNoteRecordV1(sourceRecords, changeRecord));
         setMessage(`Generating V2 ${selection.inputCount}-input withdrawal proof locally…`);
         const prepared = await prepareWithdrawV2({
           accounts: {
@@ -406,7 +407,7 @@ export default function WatcherV2Page() {
           }),
         });
         const signature = await sendDescriptor(prepared.instruction);
-        let nextRecords = records;
+        let nextRecords = sourceRecords;
         for (const spent of selection.records) {
           nextRecords = upsertNoteRecordV1(nextRecords, {
             ...spent,
@@ -429,8 +430,8 @@ export default function WatcherV2Page() {
             root: prepared.append.newRoot.toString(10),
           });
         }
-        await persistRecords(nextRecords);
-        await refreshTree({ syncNotes: true });
+        const finalRecords = await persistRecords(nextRecords);
+        await refreshTree({ syncNotes: true, recordsOverride: finalRecords });
         setMessage(prepared.changeNote
           ? `Withdrew ${formatSol(value)} SOL using ${selection.inputCount} private note${selection.inputCount === 1 ? '' : 's'}. ${formatSol(selection.changeAmount)} SOL returned as private change.`
           : `Withdrew ${formatSol(value)} SOL exactly using ${selection.inputCount} private note${selection.inputCount === 1 ? '' : 's'}. No change note was created.`);
@@ -487,12 +488,12 @@ export default function WatcherV2Page() {
         <div className={styles.panel}>
           <div className={styles.balanceRow}>
             <div><small>PUBLIC WALLET</small><strong>{formatSol(walletBalance, 6)} SOL</strong></div>
-            <div><small>PRIVATE BALANCE</small><strong>{unlocked ? `${formatSol(privateBalance, 6)} SOL` : 'LOCKED'}</strong></div>
+            <div><small>PRIVATE BALANCE</small><strong data-v2-private-balance>{unlocked ? `${formatSol(privateBalance, 6)} SOL` : 'LOCKED'}</strong></div>
           </div>
 
           <div className={styles.tabs}>
-            <button type="button" className={mode === 'deposit' ? styles.activeTab : ''} onClick={() => setMode('deposit')}>Deposit</button>
-            <button type="button" className={mode === 'withdraw' ? styles.activeTab : ''} onClick={() => setMode('withdraw')}>Withdraw</button>
+            <button type="button" data-v2-tab="deposit" className={mode === 'deposit' ? styles.activeTab : ''} onClick={() => setMode('deposit')}>Deposit</button>
+            <button type="button" data-v2-tab="withdraw" className={mode === 'withdraw' ? styles.activeTab : ''} onClick={() => setMode('withdraw')}>Withdraw</button>
           </div>
 
           {!unlocked ? (
@@ -504,16 +505,16 @@ export default function WatcherV2Page() {
             <>
               <label className={styles.field}>
                 <span>{mode === 'deposit' ? 'Deposit amount' : 'Public withdrawal'}</span>
-                <div><input value={amount} onChange={(event) => setAmount(event.target.value)} inputMode="decimal" /><b>SOL</b></div>
+                <div><input data-v2-amount value={amount} onChange={(event) => setAmount(event.target.value)} inputMode="decimal" /><b>SOL</b></div>
               </label>
               {mode === 'withdraw' ? (
                 <label className={styles.field}>
                   <span>Recipient</span>
-                  <div><input value={recipient} onChange={(event) => setRecipient(event.target.value)} /><button type="button" onClick={() => setRecipient(walletAddress)}>ME</button></div>
+                  <div><input data-v2-recipient value={recipient} onChange={(event) => setRecipient(event.target.value)} /><button type="button" onClick={() => setRecipient(walletAddress)}>ME</button></div>
                 </label>
               ) : null}
               {mode === 'withdraw' && selectionPreview ? (
-                <div className={selectionPreview.error ? styles.warning : styles.preview}>
+                <div className={selectionPreview.error ? styles.warning : styles.preview} data-v2-selection>
                   {selectionPreview.error ? selectionPreview.error : (
                     <>
                       <strong>{selectionPreview.selection.inputCount} private input{selectionPreview.selection.inputCount === 1 ? '' : 's'}</strong>
@@ -528,22 +529,23 @@ export default function WatcherV2Page() {
           <button
             type="button"
             className={styles.primary}
+            data-v2-primary
             onClick={transact}
             disabled={Boolean(busy) || runtimeState !== 'ready' || (unlocked && !treeReady)}
           >
             {busy ? 'WORKING…' : primaryLabel}
           </button>
-          {message ? <p className={styles.message}>{message}</p> : null}
+          {message ? <p className={styles.message} data-v2-message>{message}</p> : null}
           {error ? <p className={styles.error} data-v2-error="true">{error}</p> : null}
         </div>
 
         <div className={styles.panel}>
-          <div className={styles.sectionHead}><div><small>V2 PUBLIC TREE</small><strong>{treeState?.chain ? `${treeState.chain.nextIndex} / ${runtime?.treeCapacity || 65_536}` : '—'}</strong></div><button type="button" onClick={() => refreshTree({ syncNotes: true }).catch((refreshError) => setError(refreshError.message))}>Refresh</button></div>
+          <div className={styles.sectionHead}><div><small>V2 PUBLIC TREE</small><strong data-v2-tree-index>{treeState?.chain ? `${treeState.chain.nextIndex} / ${runtime?.treeCapacity || 65_536}` : '—'}</strong></div><button type="button" onClick={() => refreshTree({ syncNotes: true }).catch((refreshError) => setError(refreshError.message))}>Refresh</button></div>
           <div className={styles.statusLine} data-tree-status={treeState?.status || 'loading'}>
             <i />
             <span>{treeState?.status === 'ready' ? `Epoch ${treeState.chain.epoch.toString()} · local commitment history matches on-chain root` : treeState?.error || 'Checking V2 public tree cache…'}</span>
           </div>
-          <div className={styles.proverCard}>
+          <div className={styles.proverCard} data-v2-prover={prover.status}>
             <small>V2 BROWSER PROVER</small>
             <strong>{prover.status.toUpperCase()}</strong>
             <span>{prover.message}</span>
