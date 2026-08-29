@@ -1,0 +1,143 @@
+name: Finalize Recovered Watcher V3 Devnet
+
+on:
+  push:
+    branches: [watcher-protocol-v3]
+    paths:
+      - '.github/v3-finalize-request'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: watcher-v3-finalize-recovered-devnet
+  cancel-in-progress: false
+
+env:
+  WATCHER_V3_RPC_URL: https://api.devnet.solana.com
+  WATCHER_V3_PROGRAM_ID: AyAyADfWVV3ZRUDGgJ9sEeU5GnYdZ9DyW4t3uW49pUHg
+  WATCHER_V3_DEPLOYMENT_SIGNATURE: 5fDkJBQ6hMdhvwBHKoDvjbYx2LMNtFZA9SWW5XhVVL4xJAGSYhB2g3hHzRE6gicfqCXPqoChK8GqN22aSHBJAqqq
+  WATCHER_V3_PROGRAM_SHA256: 59789fe8a090e1fab9cb9e89e54d21701fff9d7df0a50997dc2c7bbe860e3d5c
+  WATCHER_V3_DEPLOYMENT_SOURCE_COMMIT: 8e1cc906b0c2aa193123f4c8566eddfa2b30ba55
+
+jobs:
+  finalize:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: watcher-protocol-v3
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.x'
+          cache: npm
+
+      - name: Install locked dependencies
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Syntax-check read-only recovery and runtime verifier
+        run: |
+          set -euo pipefail
+          node --check scripts/watcher-v3-recover-bootstrap.mjs
+          node --check scripts/watcher-v3-runtime-verify.mjs
+
+      - name: Recover already-created V3 state from confirmed history without sending transactions
+        run: |
+          set -euo pipefail
+          node scripts/watcher-v3-recover-bootstrap.mjs \
+            --rpc "$WATCHER_V3_RPC_URL" \
+            --program-id "$WATCHER_V3_PROGRAM_ID" \
+            --out public/watcher-protocol/v3-devnet.json \
+            | tee /tmp/watcher-v3-recovery.json
+          test "$(jq -r '.programId' /tmp/watcher-v3-recovery.json)" = "$WATCHER_V3_PROGRAM_ID"
+          test "$(jq -r '.nullifierShardCount' /tmp/watcher-v3-recovery.json)" = 32
+          test "$(jq -r '.nullifierShards | length' /tmp/watcher-v3-recovery.json)" = 32
+          test "$(jq -r '.shardInitializeSignatures | length' /tmp/watcher-v3-recovery.json)" -ge 8
+
+      - name: Seal recovered runtime to exact deployed program and immutable prover
+        run: |
+          set -euo pipefail
+          PIN=public/watcher-protocol/v2-prover-pin.json
+          test -s "$PIN"
+          test "$(jq -r '.bundleSha256' "$PIN")" = '11943f387bd260be424501712645bf0b7ae3a4e1762073d222efcbf6ea11181c'
+          UPDATED_AT=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+          TMP=$(mktemp)
+          jq \
+            --arg status ready \
+            --arg proverBasePath '/watcher-cash/watcher-prover-v3' \
+            --arg proverReleaseTag "$(jq -r '.releaseTag' "$PIN")" \
+            --arg proverBundleSha256 "$(jq -r '.bundleSha256' "$PIN")" \
+            --arg depositVkSha256 "$(jq -r '.depositVkSha256' "$PIN")" \
+            --arg withdrawVkSha256 "$(jq -r '.withdrawVkSha256' "$PIN")" \
+            --arg programSha256 "$WATCHER_V3_PROGRAM_SHA256" \
+            --arg sourceCommit "$WATCHER_V3_DEPLOYMENT_SOURCE_COMMIT" \
+            --arg programDeploymentSignature "$WATCHER_V3_DEPLOYMENT_SIGNATURE" \
+            --arg finalizedByCommit "$GITHUB_SHA" \
+            --arg updatedAt "$UPDATED_AT" \
+            '. + {
+              status: $status,
+              proverBasePath: $proverBasePath,
+              proverReleaseTag: $proverReleaseTag,
+              proverBundleSha256: $proverBundleSha256,
+              depositVkSha256: $depositVkSha256,
+              withdrawVkSha256: $withdrawVkSha256,
+              programSha256: $programSha256,
+              sourceCommit: $sourceCommit,
+              programDeploymentSignature: $programDeploymentSignature,
+              finalizedByCommit: $finalizedByCommit,
+              updatedAt: $updatedAt
+            }' public/watcher-protocol/v3-devnet.json > "$TMP"
+          mv "$TMP" public/watcher-protocol/v3-devnet.json
+
+      - name: Verify recovered public V3 runtime with rate-limit backoff
+        run: |
+          set -euo pipefail
+          rm -f /tmp/watcher-v3-runtime-verification.json
+          success=0
+          for attempt in 1 2 3 4 5 6; do
+            echo "Runtime verification attempt $attempt/6"
+            if node scripts/watcher-v3-runtime-verify.mjs \
+              --runtime public/watcher-protocol/v3-devnet.json \
+              --rpc "$WATCHER_V3_RPC_URL" \
+              --pin public/watcher-protocol/v2-prover-pin.json \
+              > /tmp/watcher-v3-runtime-verification.json; then
+              success=1
+              cat /tmp/watcher-v3-runtime-verification.json
+              break
+            fi
+            sleep $((attempt * 5))
+          done
+          test "$success" = 1
+          test "$(jq -r '.programId' /tmp/watcher-v3-runtime-verification.json)" = "$WATCHER_V3_PROGRAM_ID"
+          test "$(jq -r '.nextIndex' /tmp/watcher-v3-runtime-verification.json)" = 0
+          test "$(jq -r '.trackedBalance' /tmp/watcher-v3-runtime-verification.json)" = 0
+          test "$(jq -r '.packedNullifiers' /tmp/watcher-v3-runtime-verification.json)" = 0
+
+      - name: Commit only recovered V3 runtime metadata
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add public/watcher-protocol/v3-devnet.json
+          git diff --cached --name-only | grep -Fx 'public/watcher-protocol/v3-devnet.json'
+          test "$(git diff --cached --name-only | wc -l)" = 1
+          git commit -m 'Publish recovered Watcher V3 devnet runtime'
+          git fetch origin watcher-protocol-v3
+          git rebase origin/watcher-protocol-v3
+          git push origin HEAD:watcher-protocol-v3
+
+      - name: Upload sanitized recovery evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: watcher-v3-recovered-devnet-finalization
+          path: |
+            /tmp/watcher-v3-recovery.json
+            /tmp/watcher-v3-runtime-verification.json
+            public/watcher-protocol/v3-devnet.json
+          if-no-files-found: warn
+          retention-days: 14
