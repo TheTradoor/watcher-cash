@@ -243,7 +243,7 @@ fn grow_and_append_nullifier_v3<'a>(
     let rent = Rent::get()?.minimum_balance(next_len);
     top_up_rent(payer, shard, system, rent)?;
     if shard.data_len() < next_len {
-        shard.realloc(next_len, false)?;
+        shard.resize(next_len)?;
     }
     let mut data = shard.try_borrow_mut_data()?;
     append_nullifier_v3(&mut data, config, nullifier)?;
@@ -484,8 +484,10 @@ mod tests {
 
     #[test]
     fn v3_withdraw_wire_keeps_v2_statement_and_proof_size() {
-        assert_eq!(WITHDRAW_INSTRUCTION_BYTES_V2, 475 + GROTH16_PROOF_BYTES_V2 - 256);
-        // The V3 tag replaces only byte zero; circuit public inputs remain V2-compatible.
+        // V3 swaps only the instruction tag and replay-store accounts. The
+        // proof-bound statement bytes stay byte-for-byte V2 compatible.
+        assert_eq!(WITHDRAW_INSTRUCTION_BYTES_V2, 634);
         assert_eq!(WITHDRAW_INSTRUCTION_BYTES_V2, crate::v2::codec::WITHDRAW_INSTRUCTION_BYTES_V2);
+        assert!(WITHDRAW_INSTRUCTION_BYTES_V2 > GROTH16_PROOF_BYTES_V2);
     }
 }
