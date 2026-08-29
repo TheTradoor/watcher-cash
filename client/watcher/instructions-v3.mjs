@@ -13,9 +13,9 @@ export const WATCHER_INSTRUCTION_WITHDRAW_V3 = 0x31;
 export const WATCHER_INSTRUCTION_INITIALIZE_NULLIFIER_SHARD_V3 = 0x33;
 export const NULLIFIER_SHARD_SEED_V3 = new TextEncoder().encode('watcher-nullifier-shard-v3');
 export const NULLIFIER_BUCKET_DOMAIN_V3 = new TextEncoder().encode('watcher-nullifier-bucket-v3');
-export const NULLIFIER_SHARD_COUNT_V3 = 16;
-export const NULLIFIER_BUCKETS_PER_SHARD_V3 = 4096;
-export const NULLIFIER_SHARD_HEADER_BYTES_V3 = 16_432;
+export const NULLIFIER_SHARD_COUNT_V3 = 32;
+export const NULLIFIER_BUCKETS_PER_SHARD_V3 = 2048;
+export const NULLIFIER_SHARD_HEADER_BYTES_V3 = 8_240;
 export const NULLIFIER_RECORD_BYTES_V3 = 36;
 
 function toPublicKey(value, label) {
@@ -39,8 +39,8 @@ export function routeNullifierV3({ config, nullifier }) {
   const digest = keccak256(concatBytes(NULLIFIER_BUCKET_DOMAIN_V3, configBytes, nullifierBytes));
   const key = (digest[0] << 8) | digest[1];
   return Object.freeze({
-    shard: key >>> 12,
-    bucket: key & 0x0fff,
+    shard: key >>> 11,
+    bucket: key & 0x07ff,
   });
 }
 
