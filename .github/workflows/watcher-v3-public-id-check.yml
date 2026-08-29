@@ -1,0 +1,62 @@
+name: Watcher V3 Reserved Program ID Check
+
+on:
+  push:
+    branches: [watcher-protocol-v3]
+    paths:
+      - 'public/watcher-protocol/v3-program-id.json'
+      - '.github/workflows/watcher-v3-public-id-check.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: watcher-protocol-v3
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.x'
+          cache: npm
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Verify reserved V3 program address on devnet
+        run: |
+          set -euo pipefail
+          node --input-type=module - <<'NODE'
+          import fs from 'node:fs';
+          import { Connection, PublicKey } from '@solana/web3.js';
+
+          const reserved = JSON.parse(fs.readFileSync('public/watcher-protocol/v3-program-id.json', 'utf8'));
+          if (reserved.version !== 3 || reserved.network !== 'devnet') throw new Error('Reserved V3 identity metadata is invalid');
+          const program = new PublicKey(reserved.programId);
+          const forbidden = [];
+          for (const path of ['public/watcher-protocol/devnet.json', 'public/watcher-protocol/v2-devnet.json']) {
+            const runtime = JSON.parse(fs.readFileSync(path, 'utf8'));
+            forbidden.push(new PublicKey(runtime.programId));
+          }
+          if (forbidden.some((other) => program.equals(other))) throw new Error('Reserved V3 program id collides with V1/V2');
+
+          const connection = new Connection('https://api.devnet.solana.com', 'confirmed');
+          const [genesisHash, info] = await Promise.all([
+            connection.getGenesisHash(),
+            connection.getAccountInfo(program, 'confirmed'),
+          ]);
+          if (info && !info.executable) {
+            throw new Error('Reserved V3 address already exists on devnet as a non-executable account');
+          }
+          console.log(JSON.stringify({
+            status: 'ready',
+            programId: program.toBase58(),
+            differsFromV1AndV2: true,
+            genesisHash,
+            accountExists: Boolean(info),
+            alreadyExecutable: Boolean(info?.executable),
+            owner: info?.owner?.toBase58?.() || '',
+            lamports: info?.lamports || 0,
+          }, null, 2));
+          NODE
