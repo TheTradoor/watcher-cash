@@ -30,18 +30,31 @@ class BrowserProverV2 {
     this.sequence = 0;
     this.pending = new Map();
     this.progressListeners = new Set();
+    this.lastProgress = null;
   }
 
   addProgressListener(listener) {
     if (typeof listener !== 'function') return () => {};
     this.progressListeners.add(listener);
+    if (this.lastProgress) {
+      const snapshot = this.lastProgress;
+      queueMicrotask(() => {
+        if (!this.progressListeners.has(listener)) return;
+        try {
+          listener(snapshot);
+        } catch {
+          // Progress reporting is informational only.
+        }
+      });
+    }
     return () => this.progressListeners.delete(listener);
   }
 
   emitProgress(payload) {
+    this.lastProgress = payload && typeof payload === 'object' ? { ...payload } : payload;
     for (const listener of this.progressListeners) {
       try {
-        listener(payload);
+        listener(this.lastProgress);
       } catch {
         // Progress reporting is informational only.
       }
@@ -69,6 +82,7 @@ class BrowserProverV2 {
       for (const pending of this.pending.values()) pending.reject(error);
       this.pending.clear();
       this.ready = null;
+      this.lastProgress = null;
     };
   }
 
@@ -86,6 +100,7 @@ class BrowserProverV2 {
     if (!this.ready) {
       this.ready = this.request('init', { basePath: this.basePath }).catch((error) => {
         this.ready = null;
+        this.lastProgress = null;
         throw error;
       });
     }
@@ -128,6 +143,7 @@ class BrowserProverV2 {
     this.worker?.terminate();
     this.worker = null;
     this.ready = null;
+    this.lastProgress = null;
     const error = new Error('V2 browser prover was terminated');
     for (const pending of this.pending.values()) pending.reject(error);
     this.pending.clear();
