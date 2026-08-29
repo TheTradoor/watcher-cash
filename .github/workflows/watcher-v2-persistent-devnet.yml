@@ -8,11 +8,6 @@ on:
         required: true
         default: false
         type: boolean
-      rotate_prover_bundle:
-        description: Generate a new Groth16 setup (requires force_bootstrap; old V2 notes will not remain spendable)
-        required: true
-        default: false
-        type: boolean
       run_e2e:
         description: Run a separate real-devnet V2 deposit/exact-withdraw smoke test
         required: true
@@ -41,14 +36,31 @@ jobs:
           ref: watcher-protocol-v2
           fetch-depth: 0
 
-      - name: Enforce V2 setup rotation safety
+      - name: Require immutable V2 prover pin
         shell: bash
         run: |
           set -euo pipefail
-          if [ "${{ inputs.rotate_prover_bundle }}" = true ] && [ "${{ inputs.force_bootstrap }}" != true ]; then
-            echo 'rotate_prover_bundle=true requires force_bootstrap=true.' >&2
-            echo 'A new verifying key cannot safely inherit notes created under the old setup.' >&2
-            exit 1
+          PIN=public/watcher-protocol/v2-prover-pin.json
+          test -s "$PIN"
+          test "$(jq -r '.version' "$PIN")" = 2
+          test "$(jq -r '.status' "$PIN")" = pinned-development-setup
+          test "$(jq -r '.networkTarget' "$PIN")" = solana-devnet
+          test "$(jq -r '.treeDepth' "$PIN")" = 16
+          test "$(jq -r '.maxInputs' "$PIN")" = 4
+          test -n "$(jq -r '.releaseTag' "$PIN")"
+          test -n "$(jq -r '.bundleSha256' "$PIN")"
+          test -n "$(jq -r '.depositVkSha256' "$PIN")"
+          test -n "$(jq -r '.withdrawVkSha256' "$PIN")"
+
+          RUNTIME=public/watcher-protocol/v2-devnet.json
+          if [ -s "$RUNTIME" ]; then
+            OLD_SHA=$(jq -r '.proverBundleSha256 // empty' "$RUNTIME")
+            PIN_SHA=$(jq -r '.bundleSha256' "$PIN")
+            if [ -n "$OLD_SHA" ] && [ "$OLD_SHA" != "$PIN_SHA" ] && [ "${{ inputs.force_bootstrap }}" != true ]; then
+              echo 'The pinned V2 proving setup changed from the published runtime.' >&2
+              echo 'Rerun with force_bootstrap=true only if intentionally abandoning compatibility with old V2 notes.' >&2
+              exit 1
+            fi
           fi
 
       - name: Require persistent V2 deployment secrets
@@ -66,7 +78,7 @@ jobs:
           printf '%s' "$PAYER_KEYPAIR_B64" | base64 --decode > /tmp/watcher-v2-devnet-payer.json
           printf '%s' "$PROGRAM_KEYPAIR_B64" | base64 --decode > /tmp/watcher-v2-devnet-program.json
           chmod 600 /tmp/watcher-v2-devnet-payer.json /tmp/watcher-v2-devnet-program.json
-          python - <<'PY'
+          python3 - <<'PY'
           import json
           for path in ('/tmp/watcher-v2-devnet-payer.json', '/tmp/watcher-v2-devnet-program.json'):
               value = json.load(open(path))
@@ -91,6 +103,52 @@ jobs:
       - name: Install locked web dependencies
         run: npm ci --ignore-scripts --no-audit --no-fund
 
+      - name: Download exact content-addressed V2 prover pin
+        id: pin
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          PIN=public/watcher-protocol/v2-prover-pin.json
+          TAG=$(jq -r '.releaseTag' "$PIN")
+          EXPECTED_SHA=$(jq -r '.bundleSha256' "$PIN")
+          FILE=$(jq -r '.bundleFile' "$PIN")
+          rm -rf /tmp/watcher-v2-pin-release /tmp/watcher-v2-pin
+          mkdir -p /tmp/watcher-v2-pin-release /tmp/watcher-v2-pin
+          gh release download "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern "$FILE" \
+            --pattern "$FILE.sha256" \
+            --dir /tmp/watcher-v2-pin-release
+          (
+            cd /tmp/watcher-v2-pin-release
+            sha256sum --check "$FILE.sha256"
+          )
+          ACTUAL_SHA=$(sha256sum "/tmp/watcher-v2-pin-release/$FILE" | awk '{print $1}')
+          if [ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]; then
+            echo 'Downloaded V2 prover pin does not match its committed SHA-256.' >&2
+            exit 1
+          fi
+          tar -xzf "/tmp/watcher-v2-pin-release/$FILE" -C /tmp/watcher-v2-pin
+          ASSETS=/tmp/watcher-v2-pin/watcher-prover-v2/assets
+          for name in deposit.r1cs deposit.pk deposit.vk withdraw.r1cs withdraw.pk withdraw.vk manifest.json; do
+            test -s "$ASSETS/$name"
+          done
+          test -s /tmp/watcher-v2-pin/watcher-prover-v2/watcher-v2-prover.wasm
+          test -s /tmp/watcher-v2-pin/watcher-prover-v2/worker.js
+          test -s /tmp/watcher-v2-pin/watcher-prover-v2/wasm_exec.js
+
+          DEPOSIT_VK_SHA=$(sha256sum "$ASSETS/deposit.vk" | awk '{print $1}')
+          WITHDRAW_VK_SHA=$(sha256sum "$ASSETS/withdraw.vk" | awk '{print $1}')
+          test "$DEPOSIT_VK_SHA" = "$(jq -r '.depositVkSha256' "$PIN")"
+          test "$WITHDRAW_VK_SHA" = "$(jq -r '.withdrawVkSha256' "$PIN")"
+          test "$DEPOSIT_VK_SHA" = "$(jq -r '.depositVkSha256' programs/watcher-protocol/src/v2/development_prover_manifest_v2.json)"
+          test "$WITHDRAW_VK_SHA" = "$(jq -r '.withdrawVkSha256' programs/watcher-protocol/src/v2/development_prover_manifest_v2.json)"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "bundle_sha=$ACTUAL_SHA" >> "$GITHUB_OUTPUT"
+          echo "assets=$ASSETS" >> "$GITHUB_OUTPUT"
+
       - name: Install Agave SBF toolchain
         shell: bash
         run: |
@@ -104,77 +162,12 @@ jobs:
           /tmp/solana-release/bin/solana --version
           /tmp/solana-release/bin/cargo-build-sbf --version
 
-      - name: Resolve immutable matched V2 prover bundle
-        id: bundle
-        env:
-          GH_TOKEN: ${{ github.token }}
-          FORCE_BOOTSTRAP: ${{ inputs.force_bootstrap }}
-          ROTATE: ${{ inputs.rotate_prover_bundle }}
+      - name: Validate pinned V2 source and verifier
         shell: bash
         run: |
           set -euo pipefail
-          RUNTIME=public/watcher-protocol/v2-devnet.json
-          BUNDLE=circuits/withdraw/fixture-out/v2-persistent
-          rm -rf "$BUNDLE" /tmp/watcher-v2-release /tmp/watcher-v2-extract
-          mkdir -p "$BUNDLE" /tmp/watcher-v2-release /tmp/watcher-v2-extract
-
-          GENERATE=0
-          if [ "$ROTATE" = true ] || [ ! -s "$RUNTIME" ]; then
-            GENERATE=1
-          fi
-
-          if [ "$GENERATE" -eq 1 ]; then
-            (
-              cd circuits/withdraw
-              go run ./cmd/watcher-v2-setup \
-                --bundle-out fixture-out/v2-persistent \
-                --rust-out ../../programs/watcher-protocol/src/v2
-            )
-          else
-            TAG=$(jq -r '.proverReleaseTag // empty' "$RUNTIME")
-            EXPECTED_SHA=$(jq -r '.proverBundleSha256 // empty' "$RUNTIME")
-            if [ -z "$TAG" ] || [ -z "$EXPECTED_SHA" ]; then
-              echo 'Published V2 runtime is missing immutable prover metadata.' >&2
-              echo 'Use force_bootstrap=true and rotate_prover_bundle=true to intentionally start a new V2 setup.' >&2
-              exit 1
-            fi
-            gh release download "$TAG" \
-              --repo "$GITHUB_REPOSITORY" \
-              --pattern 'watcher-v2-development-prover-bundle.tar.gz' \
-              --pattern 'watcher-v2-development-prover-bundle.tar.gz.sha256' \
-              --dir /tmp/watcher-v2-release
-            (
-              cd /tmp/watcher-v2-release
-              sha256sum --check watcher-v2-development-prover-bundle.tar.gz.sha256
-            )
-            ACTUAL_SHA=$(sha256sum /tmp/watcher-v2-release/watcher-v2-development-prover-bundle.tar.gz | awk '{print $1}')
-            if [ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]; then
-              echo 'Published V2 prover release checksum does not match runtime metadata.' >&2
-              exit 1
-            fi
-            tar -xzf /tmp/watcher-v2-release/watcher-v2-development-prover-bundle.tar.gz -C /tmp/watcher-v2-extract
-            FOUND=$(dirname "$(find /tmp/watcher-v2-extract -type f -name deposit.r1cs -print -quit)")
-            test -n "$FOUND"
-            cp -a "$FOUND/." "$BUNDLE/"
-          fi
-
-          for name in deposit.r1cs deposit.pk deposit.vk withdraw.r1cs withdraw.pk withdraw.vk manifest.json; do
-            test -s "$BUNDLE/$name"
-          done
-          DEPOSIT_VK_SHA=$(sha256sum "$BUNDLE/deposit.vk" | awk '{print $1}')
-          WITHDRAW_VK_SHA=$(sha256sum "$BUNDLE/withdraw.vk" | awk '{print $1}')
-          MANIFEST_DEPOSIT=$(jq -r '.depositVkSha256 // .filesSha256["deposit.vk"] // empty' programs/watcher-protocol/src/v2/development_prover_manifest_v2.json)
-          MANIFEST_WITHDRAW=$(jq -r '.withdrawVkSha256 // .filesSha256["withdraw.vk"] // empty' programs/watcher-protocol/src/v2/development_prover_manifest_v2.json)
-          if [ "$DEPOSIT_VK_SHA" != "$MANIFEST_DEPOSIT" ] || [ "$WITHDRAW_VK_SHA" != "$MANIFEST_WITHDRAW" ]; then
-            echo 'V2 prover bundle verifying keys do not match the Rust verifier fixtures.' >&2
-            exit 1
-          fi
-          echo "generated=$GENERATE" >> "$GITHUB_OUTPUT"
-
-      - name: Validate V2 circuit, client and verifier source
-        shell: bash
-        run: |
-          set -euo pipefail
+          node --check scripts/watcher-v2-runtime-verify.mjs
+          node --check scripts/watcher-v2-bootstrap.mjs
           node --test \
             client/watcher/v2.test.mjs \
             client/watcher/instructions-v2.test.mjs \
@@ -189,7 +182,7 @@ jobs:
           go -C circuits/withdraw test -run '^(TestCircuitV2|TestDepositCircuitV2|TestProverV2)' .
           cargo test --quiet --manifest-path programs/watcher-protocol/Cargo.toml --lib --locked 'v2::'
 
-      - name: Build matched V2 SBF program and CLI prover
+      - name: Build SBF against pinned V2 verifying keys
         shell: bash
         run: |
           set -euo pipefail
@@ -266,58 +259,17 @@ jobs:
           WATCHER_V2_PROGRAM_ID: ${{ steps.deployment.outputs.program_id }}
           WATCHER_V2_PAYER_KEYPAIR: /tmp/watcher-v2-devnet-payer.json
           WATCHER_V2_PROVER: /tmp/watcher-v2-prover
-          WATCHER_V2_BUNDLE: circuits/withdraw/fixture-out/v2-persistent
+          WATCHER_V2_BUNDLE: ${{ steps.pin.outputs.assets }}
         shell: bash
         run: |
           set -euo pipefail
           node scripts/watcher-v2-e2e.mjs | tee /tmp/watcher-v2-real-devnet-e2e.log
 
-      - name: Publish immutable V2 proving bundle
-        id: release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          BUNDLE=circuits/withdraw/fixture-out/v2-persistent
-          mkdir -p /tmp/watcher-v2-package
-          tar -czf /tmp/watcher-v2-package/watcher-v2-development-prover-bundle.tar.gz -C "$BUNDLE" .
-          (
-            cd /tmp/watcher-v2-package
-            sha256sum watcher-v2-development-prover-bundle.tar.gz > watcher-v2-development-prover-bundle.tar.gz.sha256
-          )
-          ARCHIVE_SHA=$(sha256sum /tmp/watcher-v2-package/watcher-v2-development-prover-bundle.tar.gz | awk '{print $1}')
-          TAG="watcher-v2-devnet-prover-${ARCHIVE_SHA:0:16}"
-          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            rm -rf /tmp/watcher-v2-release-check
-            mkdir -p /tmp/watcher-v2-release-check
-            gh release download "$TAG" \
-              --repo "$GITHUB_REPOSITORY" \
-              --pattern 'watcher-v2-development-prover-bundle.tar.gz' \
-              --dir /tmp/watcher-v2-release-check
-            EXISTING_SHA=$(sha256sum /tmp/watcher-v2-release-check/watcher-v2-development-prover-bundle.tar.gz | awk '{print $1}')
-            if [ "$EXISTING_SHA" != "$ARCHIVE_SHA" ]; then
-              echo 'Immutable V2 prover release tag exists with different bytes.' >&2
-              exit 1
-            fi
-          else
-            gh release create "$TAG" \
-              --repo "$GITHUB_REPOSITORY" \
-              --target "$GITHUB_SHA" \
-              --prerelease \
-              --title "Watcher V2 persistent devnet prover ${ARCHIVE_SHA:0:16}" \
-              --notes "Immutable single-party development Groth16 bundle matched to the persistent Watcher V2 Solana devnet deployment. DEVELOPMENT / NOT AUDITED." \
-              /tmp/watcher-v2-package/watcher-v2-development-prover-bundle.tar.gz \
-              /tmp/watcher-v2-package/watcher-v2-development-prover-bundle.tar.gz.sha256
-          fi
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "archive_sha=$ARCHIVE_SHA" >> "$GITHUB_OUTPUT"
-
       - name: Seal and commit public V2 runtime
         env:
           PROGRAM_ID: ${{ steps.deployment.outputs.program_id }}
-          RELEASE_TAG: ${{ steps.release.outputs.tag }}
-          ARCHIVE_SHA: ${{ steps.release.outputs.archive_sha }}
+          RELEASE_TAG: ${{ steps.pin.outputs.tag }}
+          BUNDLE_SHA: ${{ steps.pin.outputs.bundle_sha }}
         shell: bash
         run: |
           set -euo pipefail
@@ -329,7 +281,7 @@ jobs:
             --arg status ready \
             --arg programId "$PROGRAM_ID" \
             --arg proverReleaseTag "$RELEASE_TAG" \
-            --arg proverBundleSha256 "$ARCHIVE_SHA" \
+            --arg proverBundleSha256 "$BUNDLE_SHA" \
             --arg programSha256 "$PROGRAM_SHA" \
             --arg sourceCommit "$GITHUB_SHA" \
             --arg updatedAt "$UPDATED_AT" \
@@ -347,17 +299,9 @@ jobs:
 
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add \
-            public/watcher-protocol/v2-devnet.json \
-            programs/watcher-protocol/src/v2/dev_deposit_vk_array.in \
-            programs/watcher-protocol/src/v2/dev_withdraw_vk_array.in \
-            programs/watcher-protocol/src/v2/dev_deposit_proof_array.in \
-            programs/watcher-protocol/src/v2/dev_deposit_public_inputs_array.in \
-            programs/watcher-protocol/src/v2/dev_withdraw_proof_array.in \
-            programs/watcher-protocol/src/v2/dev_withdraw_public_inputs_array.in \
-            programs/watcher-protocol/src/v2/development_prover_manifest_v2.json
+          git add public/watcher-protocol/v2-devnet.json
           if git diff --cached --quiet; then
-            echo 'Persistent V2 runtime and verifier fixtures are unchanged.'
+            echo 'Persistent V2 runtime is unchanged.'
           else
             git commit -m 'Publish persistent Watcher V2 devnet runtime'
             git fetch origin watcher-protocol-v2
