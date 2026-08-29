@@ -1,0 +1,155 @@
+name: Watcher V3 Devnet Readiness
+
+on:
+  push:
+    branches: [watcher-protocol-v3]
+    paths:
+      - '.github/workflows/watcher-v3-devnet-readiness.yml'
+      - '.github/v3-devnet-readiness-request'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: watcher-v3-devnet-readiness
+  cancel-in-progress: true
+
+env:
+  WATCHER_V3_RPC_URL: https://api.devnet.solana.com
+
+jobs:
+  readiness:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: watcher-protocol-v3
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.x'
+          cache: npm
+
+      - name: Install locked dependencies
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Require shared immutable V2/V3 prover release
+        run: |
+          set -euo pipefail
+          PIN=public/watcher-protocol/v2-prover-pin.json
+          test -s "$PIN"
+          jq -e '.version == 2 and .status == "pinned-development-setup" and .networkTarget == "solana-devnet"' "$PIN" >/dev/null
+          test "$(jq -r '.treeDepth' "$PIN")" = 16
+          test "$(jq -r '.maxInputs' "$PIN")" = 4
+          URL=$(jq -r '.bundleUrl' "$PIN")
+          EXPECTED=$(jq -r '.bundleSha256' "$PIN")
+          TAG=$(jq -r '.releaseTag' "$PIN")
+          test "${TAG##*-}" = "${EXPECTED:0:16}"
+          curl --fail --location --retry 3 --range 0-1023 "$URL" -o /tmp/watcher-v3-release-prefix >/dev/null 2>&1
+          test -s /tmp/watcher-v3-release-prefix
+          echo "Shared pinned release reachable: $TAG"
+
+      - name: Check persistent V3 identity, isolation, and deployment budget
+        env:
+          PAYER_KEYPAIR_B64: ${{ secrets.WATCHER_DEVNET_DEPLOYER_KEYPAIR_B64 }}
+          PROGRAM_KEYPAIR_B64: ${{ secrets.WATCHER_V3_DEVNET_PROGRAM_KEYPAIR_B64 }}
+        run: |
+          set -euo pipefail
+          if [ -z "$PAYER_KEYPAIR_B64" ]; then
+            echo 'READINESS_BLOCKER=missing WATCHER_DEVNET_DEPLOYER_KEYPAIR_B64' >&2
+            exit 1
+          fi
+          if [ -z "$PROGRAM_KEYPAIR_B64" ]; then
+            echo 'READINESS_BLOCKER=missing WATCHER_V3_DEVNET_PROGRAM_KEYPAIR_B64' >&2
+            exit 1
+          fi
+          if ! printf '%s' "$PAYER_KEYPAIR_B64" | base64 --decode > /tmp/watcher-v3-readiness-payer.json 2>/dev/null; then
+            echo 'READINESS_BLOCKER=WATCHER_DEVNET_DEPLOYER_KEYPAIR_B64 is not valid base64' >&2
+            exit 1
+          fi
+          if ! printf '%s' "$PROGRAM_KEYPAIR_B64" | base64 --decode > /tmp/watcher-v3-readiness-program.json 2>/dev/null; then
+            echo 'READINESS_BLOCKER=WATCHER_V3_DEVNET_PROGRAM_KEYPAIR_B64 is not valid base64' >&2
+            exit 1
+          fi
+          chmod 600 /tmp/watcher-v3-readiness-payer.json /tmp/watcher-v3-readiness-program.json
+          node --input-type=module - <<'NODE'
+          import fs from 'node:fs';
+          import { Connection, Keypair, PublicKey } from '@solana/web3.js';
+
+          function load(path, secretName) {
+            let value;
+            try {
+              value = JSON.parse(fs.readFileSync(path, 'utf8'));
+            } catch {
+              throw new Error(`${secretName} decodes from base64 but is not valid JSON`);
+            }
+            if (!Array.isArray(value) || value.length !== 64) {
+              throw new Error(`${secretName} must decode to a Solana 64-byte keypair JSON array`);
+            }
+            if (value.some((item) => !Number.isInteger(item) || item < 0 || item > 255)) {
+              throw new Error(`${secretName} contains invalid keypair bytes`);
+            }
+            return Keypair.fromSecretKey(Uint8Array.from(value));
+          }
+
+          const payer = load('/tmp/watcher-v3-readiness-payer.json', 'WATCHER_DEVNET_DEPLOYER_KEYPAIR_B64');
+          const program = load('/tmp/watcher-v3-readiness-program.json', 'WATCHER_V3_DEVNET_PROGRAM_KEYPAIR_B64');
+          const forbidden = [];
+          for (const path of ['public/watcher-protocol/devnet.json', 'public/watcher-protocol/v2-devnet.json']) {
+            try {
+              const runtime = JSON.parse(fs.readFileSync(path, 'utf8'));
+              if (runtime.programId) forbidden.push(new PublicKey(runtime.programId));
+            } catch {}
+          }
+          if (forbidden.some((value) => program.publicKey.equals(value))) {
+            throw new Error('V3 program key resolves to an existing V1/V2 program id; refusing shared program identity');
+          }
+
+          const connection = new Connection(process.env.WATCHER_V3_RPC_URL, 'confirmed');
+          const [balance, genesisHash, programInfo, shardRent, configRent, treeRent, vaultRent] = await Promise.all([
+            connection.getBalance(payer.publicKey, 'confirmed'),
+            connection.getGenesisHash(),
+            connection.getAccountInfo(program.publicKey, 'confirmed'),
+            connection.getMinimumBalanceForRentExemption(8240),
+            connection.getMinimumBalanceForRentExemption(100),
+            connection.getMinimumBalanceForRentExemption(81),
+            connection.getMinimumBalanceForRentExemption(50),
+          ]);
+          if (programInfo && !programInfo.executable) {
+            throw new Error('Configured V3 program address exists on devnet but is not executable');
+          }
+          const stateRentEstimate = shardRent * 32 + configRent + treeRent + vaultRent;
+          const required = stateRentEstimate + 4_000_000_000;
+          if (balance < required) {
+            throw new Error(`V3 deployer has ${(balance / 1e9).toFixed(6)} SOL; readiness requires ${(required / 1e9).toFixed(6)} SOL including 32-shard rent plus a 4 SOL program/deploy buffer`);
+          }
+          console.log(JSON.stringify({
+            status: 'ready',
+            payer: payer.publicKey.toBase58(),
+            payerBalanceLamports: balance,
+            payerBalanceSol: balance / 1e9,
+            programId: program.publicKey.toBase58(),
+            differsFromV1AndV2: true,
+            devnetGenesisHash: genesisHash,
+            programAlreadyDeployed: Boolean(programInfo?.executable),
+            shardHeaderRentLamports: shardRent,
+            allShardHeaderRentLamports: shardRent * 32,
+            baseStateRentEstimateLamports: stateRentEstimate,
+            readinessRequiredLamports: required,
+            readinessRequiredSol: required / 1e9,
+          }, null, 2));
+          NODE
+
+      - name: Check V3 deployment scripts and exact packed geometry
+        run: |
+          set -euo pipefail
+          node --check scripts/watcher-v3-bootstrap.mjs
+          node --check scripts/watcher-v3-runtime-verify.mjs
+          node --test client/watcher/instructions-v3.test.mjs client/watcher/flows-v3.test.mjs client/watcher/vault-v3.test.mjs
+
+      - name: Remove readiness key material
+        if: always()
+        run: rm -f /tmp/watcher-v3-readiness-payer.json /tmp/watcher-v3-readiness-program.json
