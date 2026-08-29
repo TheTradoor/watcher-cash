@@ -14,6 +14,20 @@ export default function V3ProverPrewarm() {
   useEffect(() => {
     if (!wallet.connected) return undefined;
     let cancelled = false;
+    let basePath = '';
+
+    const prewarm = (circuit) => {
+      if (!basePath || cancelled) return;
+      // Prewarm handles only immutable public R1CS/PK/VK bytes. Private note
+      // openings and witnesses are created later by the foreground flow.
+      prewarmBrowserProverV3({ basePath, circuit }).catch(() => {});
+    };
+
+    const onClick = (event) => {
+      if (event.target?.closest?.('[data-v3-tab="withdraw"]')) prewarm('withdraw');
+    };
+    document.addEventListener('click', onClick, { passive: true });
+
     const timer = setTimeout(() => {
       (async () => {
         try {
@@ -21,14 +35,12 @@ export default function V3ProverPrewarm() {
           if (!response.ok) return;
           const runtime = await response.json();
           if (cancelled || Number(runtime?.version) !== 3 || runtime?.status !== 'ready') return;
-          const basePath = String(runtime.proverBasePath || DEFAULT_PROVER_BASE).replace(/\/+$/, '');
+          basePath = String(runtime.proverBasePath || DEFAULT_PROVER_BASE).replace(/\/+$/, '');
           if (!basePath) return;
-          // Only immutable public deposit R1CS/PK/VK bytes are loaded here.
-          // No private note opening or witness exists during this prewarm.
-          await prewarmBrowserProverV3({ basePath, circuit: 'deposit' });
+          prewarm('deposit');
         } catch {
-          // Prewarming is a performance optimization only. The foreground flow
-          // repeats all integrity checks and surfaces any real proving error.
+          // Prewarming is performance-only. Foreground proving repeats all
+          // integrity checks and surfaces any real error.
         }
       })();
     }, 150);
@@ -36,6 +48,7 @@ export default function V3ProverPrewarm() {
     return () => {
       cancelled = true;
       clearTimeout(timer);
+      document.removeEventListener('click', onClick);
     };
   }, [wallet.connected]);
 
