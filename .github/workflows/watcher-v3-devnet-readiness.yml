@@ -82,7 +82,7 @@ jobs:
             connection.getMinimumBalanceForRentExemption(50),
           ]);
           const stateRentEstimate = shardRent * 32 + configRent + treeRent + vaultRent;
-          const required = stateRentEstimate + 4_000_000_000;
+          const required = stateRentEstimate + 3_000_000_000;
           console.log(JSON.stringify({
             stage: 'budget',
             payer: payer.publicKey.toBase58(),
@@ -94,10 +94,11 @@ jobs:
             baseStateRentEstimateLamports: stateRentEstimate,
             readinessRequiredLamports: required,
             readinessRequiredSol: required / 1e9,
+            deploymentHeadroomLamports: 3_000_000_000,
             budgetReady: balance >= required,
           }, null, 2));
           if (balance < required) {
-            throw new Error(`V3 deployer has ${(balance / 1e9).toFixed(6)} SOL; requires ${(required / 1e9).toFixed(6)} SOL including 32-shard rent plus a 4 SOL deployment buffer`);
+            throw new Error(`V3 deployer has ${(balance / 1e9).toFixed(6)} SOL; requires ${(required / 1e9).toFixed(6)} SOL including 32-shard rent plus a 3 SOL deployment buffer`);
           }
           NODE
 
