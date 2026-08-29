@@ -32,7 +32,10 @@ jobs:
         run: npm ci --no-audit --no-fund
 
       - name: Install only the content-addressed pinned V2 prover release
-        run: node scripts/install-pinned-v2-prover.mjs | tee /tmp/watcher-v2-pinned-install.json
+        shell: bash
+        run: |
+          set -o pipefail
+          node scripts/install-pinned-v2-prover.mjs | tee /tmp/watcher-v2-pinned-install.json
 
       - name: Build Pages-shaped V2 static browser output
         env:
