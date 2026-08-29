@@ -30,6 +30,8 @@ on:
       - 'client/watcher/flows-v2.test.mjs'
       - 'client/watcher/vault-v2.mjs'
       - 'client/watcher/vault-v2.test.mjs'
+      - 'client/watcher/backup-v2.mjs'
+      - 'client/watcher/backup-v2.test.mjs'
       - 'client/watcher/vault.mjs'
       - 'client/watcher/vault.test.mjs'
       - 'client/watcher/index.mjs'
@@ -73,7 +75,7 @@ jobs:
           cache: npm
       - name: Install browser dependencies
         run: npm ci
-      - name: Test V2 sparse tree, state, encrypted notes, compact wire, browser prover and flows
+      - name: Test V2 sparse tree, state, encrypted notes, backups, compact wire, browser prover and flows
         run: >-
           node --test
           client/watcher/v2.test.mjs
@@ -84,6 +86,7 @@ jobs:
           client/watcher/public-tree-v2.test.mjs
           client/watcher/flows-v2.test.mjs
           client/watcher/vault-v2.test.mjs
+          client/watcher/backup-v2.test.mjs
           client/watcher/vault.test.mjs
 
   v2-program:
