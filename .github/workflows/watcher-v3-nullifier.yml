@@ -1,0 +1,41 @@
+name: Watcher Protocol V3 Nullifier CI
+
+on:
+  push:
+    branches: [watcher-protocol-v3-nullifier]
+    paths:
+      - 'programs/watcher-protocol/src/v3/**'
+      - 'programs/watcher-protocol/src/v2/**'
+      - 'programs/watcher-protocol/src/lib.rs'
+      - 'programs/watcher-protocol/src/entrypoint.rs'
+      - 'client/watcher/**v3**'
+      - 'scripts/**v3**'
+      - '.github/workflows/watcher-v3-nullifier.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rust-v3:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Check full program compiles with isolated V3 dispatch
+        run: cargo check --manifest-path programs/watcher-protocol/Cargo.toml --locked
+      - name: Test V3 packed nullifier storage and processor
+        shell: bash
+        run: |
+          set -o pipefail
+          log="$RUNNER_TEMP/watcher-v3-rust.log"
+          if cargo test --quiet --manifest-path programs/watcher-protocol/Cargo.toml --lib --locked 'v3::' >"$log" 2>&1; then
+            cat "$log"
+            exit 0
+          fi
+          echo 'V3 Rust test failed. Relevant diagnostics:'
+          grep -n -E 'error(\[E[0-9]+\])?:|panicked at|FAILED|failures:|test result:' "$log" || true
+          echo '--- tail ---'
+          tail -n 160 "$log"
+          exit 1
