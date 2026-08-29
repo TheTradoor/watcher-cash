@@ -29,3 +29,4 @@ export * from './backup-v2.mjs';
 
 export * from './instructions-v3.mjs';
 export * from './flows-v3.mjs';
+export * from './vault-v3.mjs';
