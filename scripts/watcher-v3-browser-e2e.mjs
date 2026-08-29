@@ -153,8 +153,7 @@ async function main() {
     await waitForText(page.locator('[data-v3-message]'), 'Unlocked 1 encrypted V3 note record.', 'V3 vault reload');
     await page.locator('[data-v3-tab="withdraw"]').click();
     await page.locator('[data-v3-amount]').fill('0.008');
-    await page.locator('[data-v3-primary]').click();
-    await waitForText(page.locator('[data-v3-error="true"]'), 'No spendable private notes', 'spent V3 note cannot be replay-selected after reload');
+    await waitForText(page.locator('[data-v3-selection]'), 'No spendable private notes', 'spent V3 note cannot be replay-selected after reload');
     await waitForCount(page.locator('[data-note-status="spent"]'), 1, 'V3 packed state resynced spent note');
 
     console.log('V3 two-note exact browser withdrawal');
