@@ -6,6 +6,7 @@ import { Connection, PublicKey } from '@solana/web3.js';
 
 const url = String(process.env.WATCHER_V3_E2E_URL || 'http://127.0.0.1:3000/v3/').trim();
 const timeout = Number(process.env.WATCHER_V3_E2E_TIMEOUT_MS || 600_000);
+const assertionTimeout = Number(process.env.WATCHER_V3_E2E_ASSERT_TIMEOUT_MS || 45_000);
 const runtimePath = process.env.WATCHER_V3_RUNTIME_PATH || 'public/watcher-protocol/v3-local.json';
 const rpcUrl = process.env.WATCHER_V3_RPC_URL || 'http://127.0.0.1:8899';
 const PHANTOM_NAME = 'Phantom';
@@ -15,7 +16,7 @@ function fail(message) {
 }
 
 async function waitForText(locator, expected, label) {
-  const deadline = Date.now() + timeout;
+  const deadline = Date.now() + assertionTimeout;
   while (Date.now() < deadline) {
     const text = String(await locator.textContent().catch(() => ''));
     if (text.includes(expected)) return;
@@ -25,7 +26,7 @@ async function waitForText(locator, expected, label) {
 }
 
 async function waitForCount(locator, expected, label) {
-  const deadline = Date.now() + timeout;
+  const deadline = Date.now() + assertionTimeout;
   while (Date.now() < deadline) {
     if (await locator.count() === expected) return;
     await new Promise((resolve) => setTimeout(resolve, 250));
@@ -153,7 +154,7 @@ async function main() {
     await page.locator('[data-v3-tab="withdraw"]').click();
     await page.locator('[data-v3-amount]').fill('0.008');
     await page.locator('[data-v3-primary]').click();
-    await waitForText(page.locator('[data-v3-error="true"]'), 'Insufficient private balance', 'spent V3 note cannot be replay-selected after reload');
+    await waitForText(page.locator('[data-v3-error="true"]'), 'No spendable private notes', 'spent V3 note cannot be replay-selected after reload');
     await waitForCount(page.locator('[data-note-status="spent"]'), 1, 'V3 packed state resynced spent note');
 
     console.log('V3 two-note exact browser withdrawal');
