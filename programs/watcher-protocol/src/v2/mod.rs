@@ -1,12 +1,13 @@
 //! Watcher Protocol V2 state and statement primitives.
 //!
-//! This module is intentionally not wired into the V1 processor yet. V1 stays
-//! the live devnet path while V2 is developed and regression-tested in isolation.
+//! V1 remains the live devnet path. V2 is wired only through the isolated
+//! V2 branch and its dedicated regression pipeline until migration is explicit.
 
 pub mod codec;
 pub mod nullifier;
 pub mod public_inputs;
 pub mod state;
+pub mod verifier;
 
 pub const STATE_VERSION_V2: u8 = 2;
 pub const MERKLE_DEPTH_V2: u8 = 16;
