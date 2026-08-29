@@ -32,6 +32,7 @@ import {
   upsertNoteRecordV1,
   verifyPublicTreeCacheV2,
 } from '../../client/watcher/index.mjs';
+import VaultBackupControls from './VaultBackupControls';
 import styles from '../v2/v2.module.css';
 
 if (typeof globalThis !== 'undefined' && !globalThis.Buffer) globalThis.Buffer = Buffer;
@@ -487,6 +488,13 @@ export default function WatcherV3Page() {
     await persistRecords(removeNoteRecordV1(records, record.id));
   }
 
+  async function restoreBackupRecords(saved) {
+    const refreshed = await refreshTree({ syncNotes: true, recordsOverride: saved });
+    const synced = refreshed?.records || saved;
+    setRecords(synced);
+    return synced;
+  }
+
   const treeReady = treeState?.status === 'ready';
   const primaryLabel = !wallet.connected
     ? 'Connect wallet above'
@@ -599,6 +607,18 @@ export default function WatcherV3Page() {
 
       <section className={styles.notes}>
         <div className={styles.sectionHead}><div><small>ENCRYPTED V3 NOTES</small><strong>{unlocked ? `${confirmedRecords.length} spendable` : 'Locked'}</strong></div></div>
+        <VaultBackupControls
+          unlocked={unlocked}
+          publicKey={publicKey}
+          walletAddress={walletAddress}
+          runtimeScope={runtimeScope}
+          network={runtime?.network || 'devnet'}
+          vaultKey={vaultKey}
+          records={records}
+          onRestored={restoreBackupRecords}
+          onMessage={(value) => { setError(''); setMessage(value); }}
+          onError={(value) => setError(value)}
+        />
         {!unlocked ? <p>Unlock the private vault to inspect note state.</p> : records.length === 0 ? <p>No V3 private notes stored on this device yet.</p> : (
           <div className={styles.noteList}>
             {records.map((record) => (
