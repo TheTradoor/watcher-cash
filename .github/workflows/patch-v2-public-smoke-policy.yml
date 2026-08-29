@@ -1,0 +1,50 @@
+name: Patch V2 Public Smoke Policy
+
+on:
+  push:
+    branches: [watcher-protocol-v2]
+    paths:
+      - '.github/workflows/patch-v2-public-smoke-policy.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: watcher-protocol-v2
+          fetch-depth: 0
+      - name: Disable faucet use in persistent public-devnet smoke
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('.github/workflows/watcher-v2-persistent-devnet.yml')
+          text = path.read_text()
+          old = '''          WATCHER_V2_PROVER: /tmp/watcher-v2-prover
+          WATCHER_V2_BUNDLE: public/watcher-prover-v2/assets
+'''
+          new = '''          WATCHER_V2_PROVER: /tmp/watcher-v2-prover
+          WATCHER_V2_BUNDLE: public/watcher-prover-v2/assets
+          WATCHER_V2_ALLOW_AIRDROP: '0'
+          WATCHER_V2_REQUIRED_PAYER_LAMPORTS: '1000000000'
+          WATCHER_V2_AUXILIARY_ACCOUNT_LAMPORTS: '1000000'
+'''
+          if text.count(old) != 1:
+              raise SystemExit('persistent V2 smoke env target not found exactly once')
+          path.write_text(text.replace(old, new, 1))
+          PY
+      - name: Commit public smoke policy
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add .github/workflows/watcher-v2-persistent-devnet.yml
+          git commit -m 'Disable faucet use in V2 public devnet smoke'
+          git fetch origin watcher-protocol-v2
+          git rebase origin/watcher-protocol-v2
+          git push origin HEAD:watcher-protocol-v2
