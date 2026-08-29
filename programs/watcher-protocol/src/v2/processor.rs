@@ -14,7 +14,10 @@ use crate::{
 };
 
 use super::{
-    codec::{DepositStatementV2, WatcherInstructionV2, WithdrawalStatementV2},
+    codec::{
+        DepositStatementV2, WithdrawalStatementV2, DEPOSIT_INSTRUCTION_BYTES_V2, DEPOSIT_TAG_V2,
+        WITHDRAW_INSTRUCTION_BYTES_V2, WITHDRAW_TAG_V2,
+    },
     nullifier::{validate_nullifier_marker_v2, NULLIFIER_MARKER_SEED_V2, NULLIFIER_MARKER_SPACE_V2},
     public_inputs::{
         deposit_context_binding_v2, sol_asset_id_field_v2, withdraw_context_binding_v2,
@@ -22,6 +25,7 @@ use super::{
     },
     state::{validate_spend_roots_v2, ActiveTreeV2, SealedRootV2, ACTIVE_TREE_ACCOUNT_LEN_V2},
     verifier::{verify_deposit_v2, verify_withdraw_v2},
+    GROTH16_PROOF_BYTES_V2, MAX_INPUTS_V2,
 };
 
 pub const INITIALIZE_TAG_V2: u8 = 0x22;
@@ -48,15 +52,6 @@ fn writable(account: &AccountInfo) -> Result<(), ProgramError> {
 fn require_system(account: &AccountInfo) -> Result<(), ProgramError> {
     if account.key != &system_program::id() {
         return Err(WatcherError::InvalidSystemProgram.into());
-    }
-    Ok(())
-}
-
-fn require_uninitialized(account: &AccountInfo, minimum: usize) -> Result<(), ProgramError> {
-    owned_by(account, account.owner)?;
-    let data = account.try_borrow_data()?;
-    if data.len() < minimum || data.first().copied().unwrap_or(1) != 0 {
-        return Err(WatcherError::AlreadyInitialized.into());
     }
     Ok(())
 }
@@ -116,6 +111,7 @@ fn validate_vault_liability(vault: &AccountInfo, state: &VaultAccount) -> Result
     Ok(reserve)
 }
 
+#[inline(never)]
 fn initialize_v2(program_id: &Pubkey, accounts: &[AccountInfo], treasury: Pubkey) -> ProgramResult {
     let mut iterator = accounts.iter();
     let authority = next_account_info(&mut iterator)?;
@@ -200,6 +196,7 @@ fn initialize_v2(program_id: &Pubkey, accounts: &[AccountInfo], treasury: Pubkey
     replace_data(vault, &vault_data)
 }
 
+#[inline(never)]
 fn deposit_v2(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
@@ -304,6 +301,7 @@ fn create_nullifier_marker_v2<'a>(
     )
 }
 
+#[inline(never)]
 fn withdraw_v2(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
@@ -439,25 +437,108 @@ fn withdraw_v2(
     replace_data(vault, &vault_data)
 }
 
+fn read_32(data: &[u8], start: usize) -> Result<[u8; 32], WatcherError> {
+    data.get(start..start + 32)
+        .and_then(|slice| slice.try_into().ok())
+        .ok_or(WatcherError::InvalidInstruction)
+}
+
+fn read_u64(data: &[u8], start: usize) -> Result<u64, WatcherError> {
+    let bytes: [u8; 8] = data
+        .get(start..start + 8)
+        .and_then(|slice| slice.try_into().ok())
+        .ok_or(WatcherError::InvalidInstruction)?;
+    Ok(u64::from_le_bytes(bytes))
+}
+
+#[inline(never)]
+fn process_deposit_encoded_v2(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    data: &[u8],
+) -> ProgramResult {
+    if data.len() != DEPOSIT_INSTRUCTION_BYTES_V2 || data.first().copied() != Some(DEPOSIT_TAG_V2) {
+        return Err(WatcherError::InvalidInstruction.into());
+    }
+    let statement = DepositStatementV2 {
+        commitment: read_32(data, 1)?,
+        amount: read_u64(data, 33)?,
+        new_root: read_32(data, 41)?,
+    };
+    statement.validate()?;
+    let proof = data
+        .get(73..73 + GROTH16_PROOF_BYTES_V2)
+        .ok_or(WatcherError::InvalidInstruction)?;
+    deposit_v2(program_id, accounts, statement, proof)
+}
+
+#[inline(never)]
+fn process_withdraw_encoded_v2(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    data: &[u8],
+) -> ProgramResult {
+    if data.len() != WITHDRAW_INSTRUCTION_BYTES_V2 || data.first().copied() != Some(WITHDRAW_TAG_V2) {
+        return Err(WatcherError::InvalidInstruction.into());
+    }
+    let input_count = data[1];
+    let mut input_roots = [[0u8; 32]; MAX_INPUTS_V2];
+    let mut nullifiers = [[0u8; 32]; MAX_INPUTS_V2];
+    let mut cursor = 2usize;
+    for root in &mut input_roots {
+        *root = read_32(data, cursor)?;
+        cursor += 32;
+    }
+    for nullifier in &mut nullifiers {
+        *nullifier = read_32(data, cursor)?;
+        cursor += 32;
+    }
+    let change_commitment = read_32(data, cursor)?;
+    cursor += 32;
+    let recipient = Pubkey::new_from_array(read_32(data, cursor)?);
+    cursor += 32;
+    let public_amount = read_u64(data, cursor)?;
+    cursor += 8;
+    let protocol_fee = read_u64(data, cursor)?;
+    cursor += 8;
+    let relayer_fee = read_u64(data, cursor)?;
+    cursor += 8;
+    let new_root = read_32(data, cursor)?;
+    cursor += 32;
+    let statement = WithdrawalStatementV2 {
+        input_count,
+        input_roots,
+        nullifiers,
+        change_commitment,
+        recipient,
+        public_amount,
+        protocol_fee,
+        relayer_fee,
+        new_root,
+    };
+    statement.validate_development()?;
+    let proof = data
+        .get(cursor..cursor + GROTH16_PROOF_BYTES_V2)
+        .ok_or(WatcherError::InvalidInstruction)?;
+    withdraw_v2(program_id, accounts, statement, proof)
+}
+
 pub fn process_instruction_v2(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
     data: &[u8],
 ) -> ProgramResult {
-    if data.first().copied() == Some(INITIALIZE_TAG_V2) {
-        if data.len() != 33 {
-            return Err(WatcherError::InvalidInstruction.into());
+    match data.first().copied() {
+        Some(INITIALIZE_TAG_V2) => {
+            if data.len() != 33 {
+                return Err(WatcherError::InvalidInstruction.into());
+            }
+            let treasury = Pubkey::new_from_array(data[1..33].try_into().unwrap());
+            initialize_v2(program_id, accounts, treasury)
         }
-        let treasury = Pubkey::new_from_array(data[1..33].try_into().unwrap());
-        return initialize_v2(program_id, accounts, treasury);
-    }
-    match WatcherInstructionV2::unpack(data)? {
-        WatcherInstructionV2::Deposit { statement, proof } => {
-            deposit_v2(program_id, accounts, statement, &proof)
-        }
-        WatcherInstructionV2::Withdraw { statement, proof } => {
-            withdraw_v2(program_id, accounts, statement, &proof)
-        }
+        Some(DEPOSIT_TAG_V2) => process_deposit_encoded_v2(program_id, accounts, data),
+        Some(WITHDRAW_TAG_V2) => process_withdraw_encoded_v2(program_id, accounts, data),
+        _ => Err(WatcherError::InvalidInstruction.into()),
     }
 }
 
@@ -473,5 +554,51 @@ mod tests {
     #[test]
     fn v2_initialize_tag_does_not_overlap_v1() {
         assert!(INITIALIZE_TAG_V2 > 3);
+    }
+
+    #[test]
+    fn borrowed_deposit_dispatch_offsets_match_codec() {
+        let statement = DepositStatementV2 {
+            commitment: [1u8; 32],
+            amount: 5,
+            new_root: [2u8; 32],
+        };
+        let encoded = super::super::codec::WatcherInstructionV2::Deposit {
+            statement: statement.clone(),
+            proof: [7u8; GROTH16_PROOF_BYTES_V2],
+        }
+        .pack()
+        .unwrap();
+        assert_eq!(read_32(&encoded, 1).unwrap(), statement.commitment);
+        assert_eq!(read_u64(&encoded, 33).unwrap(), statement.amount);
+        assert_eq!(read_32(&encoded, 41).unwrap(), statement.new_root);
+        assert_eq!(&encoded[73..], &[7u8; GROTH16_PROOF_BYTES_V2]);
+    }
+
+    #[test]
+    fn borrowed_withdraw_dispatch_reaches_proof_without_copying_it() {
+        let mut roots = [[0u8; 32]; MAX_INPUTS_V2];
+        let mut nullifiers = [[0u8; 32]; MAX_INPUTS_V2];
+        roots[0][0] = 1;
+        nullifiers[0][0] = 2;
+        let statement = WithdrawalStatementV2 {
+            input_count: 1,
+            input_roots: roots,
+            nullifiers,
+            change_commitment: [0u8; 32],
+            recipient: Pubkey::new_unique(),
+            public_amount: 5,
+            protocol_fee: 0,
+            relayer_fee: 0,
+            new_root: [0u8; 32],
+        };
+        let encoded = super::super::codec::WatcherInstructionV2::Withdraw {
+            statement,
+            proof: [9u8; GROTH16_PROOF_BYTES_V2],
+        }
+        .pack()
+        .unwrap();
+        assert_eq!(encoded.len(), WITHDRAW_INSTRUCTION_BYTES_V2);
+        assert_eq!(&encoded[WITHDRAW_INSTRUCTION_BYTES_V2 - GROTH16_PROOF_BYTES_V2..], &[9u8; GROTH16_PROOF_BYTES_V2]);
     }
 }
