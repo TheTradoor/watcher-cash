@@ -3,4 +3,6 @@ node_modules/
 out/
 target/
 .watcher-devnet-recovery.json
+watcher-v2-devnet-program-keypair.json
+watcher-v2-devnet-program-keypair.b64
 *.log
