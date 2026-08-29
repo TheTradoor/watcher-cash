@@ -7,10 +7,16 @@ import (
 	"io"
 	"os"
 
+	"github.com/consensys/gnark/logger"
+
 	withdraw "watcher.cash/circuits/withdraw"
 )
 
 func main() {
+	// The CLI is consumed by browser/E2E transports. Keep stdout reserved for
+	// the proof response instead of mixing zerolog progress output with JSON.
+	logger.Disable()
+
 	bundleDir := flag.String("bundle", "fixture-out/v2", "V2 proving bundle directory")
 	circuit := flag.String("circuit", "", "deposit or withdraw")
 	witnessPath := flag.String("witness", "", "witness JSON file; defaults to stdin")
