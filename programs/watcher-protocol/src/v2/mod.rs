@@ -5,6 +5,7 @@
 
 pub mod codec;
 pub mod nullifier;
+pub mod processor;
 pub mod public_inputs;
 pub mod state;
 pub mod verifier;
