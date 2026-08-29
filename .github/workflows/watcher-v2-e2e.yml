@@ -1,0 +1,137 @@
+name: Watcher Protocol V2 Validator E2E
+
+on:
+  push:
+    branches: [watcher-protocol-v2]
+    paths:
+      - 'programs/watcher-protocol/**'
+      - 'circuits/withdraw/circuit_v2.go'
+      - 'circuits/withdraw/deposit_v2.go'
+      - 'circuits/withdraw/prover_v2.go'
+      - 'circuits/withdraw/cmd/watcher-v2-setup/**'
+      - 'circuits/withdraw/cmd/watcher-v2-prover/**'
+      - 'client/watcher/field.mjs'
+      - 'client/watcher/merkle-v2.mjs'
+      - 'client/watcher/bindings-v2.mjs'
+      - 'client/watcher/instructions-v2.mjs'
+      - 'scripts/watcher-v2-e2e.mjs'
+      - '.github/workflows/watcher-v2-e2e.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: watcher-v2-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  SOLANA_VERSION: v4.0.0
+  WATCHER_V2_RPC_URL: http://127.0.0.1:8899
+
+jobs:
+  validator-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.x'
+          cache: npm
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+          cache-dependency-path: circuits/withdraw/go.sum
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Node dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Generate exact matched V2 prover and verifier bundle
+        working-directory: circuits/withdraw
+        run: |
+          set -euo pipefail
+          rm -rf fixture-out/v2-e2e
+          go run ./cmd/watcher-v2-setup \
+            --bundle-out fixture-out/v2-e2e \
+            --rust-out ../../programs/watcher-protocol/src/v2
+          go build -trimpath -o fixture-out/v2-e2e/watcher-v2-prover ./cmd/watcher-v2-prover
+          test -s fixture-out/v2-e2e/watcher-v2-prover
+          test "$(stat -c%s fixture-out/v2-e2e/sample-withdraw-public.xark)" -eq 608
+
+      - name: Install Agave SBF toolchain
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 \
+            "https://github.com/anza-xyz/agave/releases/download/${SOLANA_VERSION}/solana-release-x86_64-unknown-linux-gnu.tar.bz2" \
+            --output /tmp/solana-release.tar.bz2
+          mkdir -p /tmp/solana-release
+          tar -xjf /tmp/solana-release.tar.bz2 -C /tmp/solana-release --strip-components=1
+          echo "/tmp/solana-release/bin" >> "$GITHUB_PATH"
+          /tmp/solana-release/bin/solana --version
+          /tmp/solana-release/bin/cargo-build-sbf --version
+
+      - name: Build V2-wired SBF program
+        run: |
+          set -euo pipefail
+          rm -rf target/deploy
+          mkdir -p target/deploy
+          cargo build-sbf \
+            --arch v3 \
+            --manifest-path programs/watcher-protocol/Cargo.toml \
+            --sbf-out-dir target/deploy
+          test -s target/deploy/watcher_protocol_program.so
+
+      - name: Start isolated validator and deploy program
+        run: |
+          set -euo pipefail
+          mkdir -p .github/v2-e2e
+          solana-keygen new --no-bip39-passphrase --force --silent -o /tmp/watcher-v2-payer.json
+          solana-keygen new --no-bip39-passphrase --force --silent -o /tmp/watcher-v2-program.json
+          solana-test-validator \
+            --reset \
+            --quiet \
+            --ledger /tmp/watcher-v2-ledger \
+            > .github/v2-e2e/validator.log 2>&1 &
+          echo $! > /tmp/watcher-v2-validator.pid
+          for attempt in $(seq 1 60); do
+            if solana cluster-version --url "$WATCHER_V2_RPC_URL" >/dev/null 2>&1; then
+              break
+            fi
+            sleep 1
+          done
+          solana cluster-version --url "$WATCHER_V2_RPC_URL"
+          solana airdrop 100 --url "$WATCHER_V2_RPC_URL" --keypair /tmp/watcher-v2-payer.json
+          solana program deploy target/deploy/watcher_protocol_program.so \
+            --url "$WATCHER_V2_RPC_URL" \
+            --keypair /tmp/watcher-v2-payer.json \
+            --program-id /tmp/watcher-v2-program.json
+          solana address -k /tmp/watcher-v2-program.json > /tmp/watcher-v2-program-id
+
+      - name: Run V2 deposit, exact withdrawal and replay regression
+        env:
+          WATCHER_V2_PAYER_KEYPAIR: /tmp/watcher-v2-payer.json
+          WATCHER_V2_PROVER: circuits/withdraw/fixture-out/v2-e2e/watcher-v2-prover
+          WATCHER_V2_BUNDLE: circuits/withdraw/fixture-out/v2-e2e
+        run: |
+          set -o pipefail
+          export WATCHER_V2_PROGRAM_ID="$(cat /tmp/watcher-v2-program-id)"
+          node scripts/watcher-v2-e2e.mjs 2>&1 | tee .github/v2-e2e/test.log
+
+      - name: Upload diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: watcher-v2-e2e-diagnostics
+          path: .github/v2-e2e/
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Stop validator and remove key material
+        if: always()
+        run: |
+          if test -f /tmp/watcher-v2-validator.pid; then
+            kill "$(cat /tmp/watcher-v2-validator.pid)" || true
+          fi
+          rm -f /tmp/watcher-v2-payer.json /tmp/watcher-v2-program.json /tmp/watcher-v2-program-id
