@@ -1,8 +1,19 @@
-import { buildSparseMerkleTreeV2 } from './merkle-v2.mjs';
+import { PublicKey } from '@solana/web3.js';
+
+import { fieldFromLe32 } from './field.mjs';
+import { buildSparseMerkleTreeV2, getMerkleAppendTransitionV2 } from './merkle-v2.mjs';
 import { fetchActiveTreeV2 } from './state-v2.mjs';
 
 const CACHE_VERSION_V2 = 1;
 const CACHE_PREFIX_V2 = 'watcher-public-tree:v2';
+const DEPOSIT_TAG_V2 = 0x20;
+const WITHDRAW_TAG_V2 = 0x21;
+const DEPOSIT_BYTES_V2 = 329;
+const WITHDRAW_BYTES_V2 = 634;
+const WITHDRAW_CHANGE_OFFSET_V2 = 258;
+const WITHDRAW_NEW_ROOT_OFFSET_V2 = 346;
+const BASE58_ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+const BASE58_MAP = new Map(Array.from(BASE58_ALPHABET, (character, index) => [character, index]));
 
 function storageName(scope) {
   const value = String(scope || '').trim();
@@ -17,6 +28,141 @@ function normalizeCommitments(values) {
     if (parsed <= 0n) throw new Error(`cached V2 commitment ${index} is invalid`);
     return parsed;
   });
+}
+
+function bytesEqual(left, right) {
+  if (left.length !== right.length) return false;
+  let difference = 0;
+  for (let index = 0; index < left.length; index += 1) difference |= left[index] ^ right[index];
+  return difference === 0;
+}
+
+function isZero32(bytes) {
+  return bytes.length === 32 && bytes.every((value) => value === 0);
+}
+
+function decodeBase58(value) {
+  const text = String(value || '');
+  if (!text) return new Uint8Array();
+  let bytes = [0];
+  for (const character of text) {
+    const digit = BASE58_MAP.get(character);
+    if (digit === undefined) throw new Error('transaction instruction contains invalid base58 data');
+    let carry = digit;
+    for (let index = 0; index < bytes.length; index += 1) {
+      const next = bytes[index] * 58 + carry;
+      bytes[index] = next & 0xff;
+      carry = next >> 8;
+    }
+    while (carry > 0) {
+      bytes.push(carry & 0xff);
+      carry >>= 8;
+    }
+  }
+  let leadingZeroes = 0;
+  while (leadingZeroes < text.length && text[leadingZeroes] === '1') leadingZeroes += 1;
+  const output = new Uint8Array(leadingZeroes + bytes.length);
+  for (let index = 0; index < bytes.length; index += 1) {
+    output[output.length - 1 - index] = bytes[index];
+  }
+  return output;
+}
+
+function instructionBytes(instruction) {
+  const value = instruction?.data;
+  if (value instanceof Uint8Array) return new Uint8Array(value);
+  if (ArrayBuffer.isView(value)) return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+  if (typeof value === 'string') return decodeBase58(value);
+  return null;
+}
+
+function accountKeys(message) {
+  if (Array.isArray(message?.staticAccountKeys)) return message.staticAccountKeys;
+  if (Array.isArray(message?.accountKeys)) {
+    return message.accountKeys.map((value) => value?.pubkey || value);
+  }
+  if (typeof message?.getAccountKeys === 'function') {
+    try {
+      const resolved = message.getAccountKeys();
+      if (Array.isArray(resolved?.staticAccountKeys)) return resolved.staticAccountKeys;
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
+
+function compiledInstructions(message) {
+  if (Array.isArray(message?.compiledInstructions)) return message.compiledInstructions;
+  if (Array.isArray(message?.instructions)) return message.instructions;
+  return [];
+}
+
+function instructionProgramId(message, instruction) {
+  if (instruction?.programId) {
+    try { return instruction.programId instanceof PublicKey ? instruction.programId : new PublicKey(instruction.programId); } catch { return null; }
+  }
+  const index = instruction?.programIdIndex;
+  if (!Number.isInteger(index)) return null;
+  const keys = accountKeys(message);
+  const value = keys[index];
+  if (!value) return null;
+  try { return value instanceof PublicKey ? value : new PublicKey(value); } catch { return null; }
+}
+
+function decodeAppendEventV2(data) {
+  if (!(data instanceof Uint8Array) || data.length < 1) return null;
+  if (data[0] === DEPOSIT_TAG_V2) {
+    if (data.length !== DEPOSIT_BYTES_V2) return null;
+    const commitmentBytes = data.slice(1, 33);
+    const newRootBytes = data.slice(41, 73);
+    if (isZero32(commitmentBytes) || isZero32(newRootBytes)) return null;
+    return Object.freeze({
+      kind: 'deposit',
+      commitment: fieldFromLe32(commitmentBytes, 'V2 deposit commitment'),
+      newRoot: fieldFromLe32(newRootBytes, 'V2 deposit new root'),
+    });
+  }
+  if (data[0] === WITHDRAW_TAG_V2) {
+    if (data.length !== WITHDRAW_BYTES_V2) return null;
+    const commitmentBytes = data.slice(WITHDRAW_CHANGE_OFFSET_V2, WITHDRAW_CHANGE_OFFSET_V2 + 32);
+    if (isZero32(commitmentBytes)) return null;
+    const newRootBytes = data.slice(WITHDRAW_NEW_ROOT_OFFSET_V2, WITHDRAW_NEW_ROOT_OFFSET_V2 + 32);
+    if (isZero32(newRootBytes)) throw new Error('V2 change withdrawal has a zero new-root sentinel');
+    return Object.freeze({
+      kind: 'change',
+      commitment: fieldFromLe32(commitmentBytes, 'V2 change commitment'),
+      newRoot: fieldFromLe32(newRootBytes, 'V2 withdrawal new root'),
+    });
+  }
+  return null;
+}
+
+function appendEventsFromTransaction(transaction, programId) {
+  if (!transaction || transaction.meta?.err) return [];
+  const message = transaction.transaction?.message || transaction.message;
+  if (!message) return [];
+  const output = [];
+  for (const instruction of compiledInstructions(message)) {
+    const instructionProgram = instructionProgramId(message, instruction);
+    if (!instructionProgram?.equals(programId)) continue;
+    const data = instructionBytes(instruction);
+    if (!data) continue;
+    const event = decodeAppendEventV2(data);
+    if (event) output.push(event);
+  }
+  return output;
+}
+
+async function fetchTransactions(connection, signatures, commitment) {
+  const options = { commitment, maxSupportedTransactionVersion: 0 };
+  if (typeof connection.getTransactions === 'function') {
+    return connection.getTransactions(signatures, options);
+  }
+  if (typeof connection.getTransaction !== 'function') {
+    throw new TypeError('connection.getTransactions or connection.getTransaction is required');
+  }
+  return Promise.all(signatures.map((signature) => connection.getTransaction(signature, options)));
 }
 
 export function loadPublicTreeCacheV2({
@@ -77,6 +223,95 @@ export function appendPublicTreeCacheV2({ storage = globalThis.localStorage, sco
   const commitments = current ? [...current.commitments] : [];
   commitments.push(BigInt(commitment));
   return savePublicTreeCacheV2({ storage, scope, epoch, commitments });
+}
+
+export async function rebuildPublicTreeCacheFromChainV2({
+  connection,
+  programId,
+  activeTree,
+  scope,
+  storage = globalThis.localStorage,
+  commitment = 'confirmed',
+  pageSize = 1000,
+  maxSignatures = 20_000,
+} = {}) {
+  if (!connection || typeof connection.getSignaturesForAddress !== 'function') {
+    throw new TypeError('connection.getSignaturesForAddress is required');
+  }
+  const program = programId instanceof PublicKey ? programId : new PublicKey(programId);
+  const treeAddress = activeTree instanceof PublicKey ? activeTree : new PublicKey(activeTree);
+  const chain = await fetchActiveTreeV2({ connection, activeTree: treeAddress, commitment });
+  const target = chain.nextIndex;
+  if (target === 0) {
+    const cache = savePublicTreeCacheV2({ storage, scope, epoch: Number(chain.epoch), commitments: [] });
+    return Object.freeze({ chain, cache, tree: cache.tree, scannedSignatures: 0, appendEvents: 0 });
+  }
+
+  const newestFirst = [];
+  let before;
+  let scannedSignatures = 0;
+  let appendCount = 0;
+  while (appendCount < target && scannedSignatures < maxSignatures) {
+    const limit = Math.min(pageSize, maxSignatures - scannedSignatures);
+    const page = await connection.getSignaturesForAddress(
+      treeAddress,
+      { limit, ...(before ? { before } : {}) },
+      commitment,
+    );
+    if (!Array.isArray(page) || page.length === 0) break;
+    scannedSignatures += page.length;
+    const successful = page.filter((entry) => !entry.err && typeof entry.signature === 'string');
+    const signatures = successful.map((entry) => entry.signature);
+    const transactions = await fetchTransactions(connection, signatures, commitment);
+    for (let index = 0; index < successful.length; index += 1) {
+      const transaction = transactions[index];
+      const events = appendEventsFromTransaction(transaction, program);
+      if (events.length > 0) {
+        newestFirst.push({ signature: successful[index].signature, events });
+        appendCount += events.length;
+      }
+    }
+    before = page.at(-1)?.signature;
+    if (page.length < limit) break;
+  }
+
+  const chronological = newestFirst.reverse().flatMap((entry) => (
+    entry.events.map((event) => ({ ...event, signature: entry.signature }))
+  ));
+  if (chronological.length < target) {
+    throw new Error(`Could only reconstruct ${chronological.length} of ${target} V2 public commitments from chain history`);
+  }
+  if (chronological.length > target) {
+    chronological.splice(0, chronological.length - target);
+  }
+
+  let tree = buildSparseMerkleTreeV2([], { epoch: Number(chain.epoch) });
+  const commitments = [];
+  for (let index = 0; index < chronological.length; index += 1) {
+    const event = chronological[index];
+    const transition = getMerkleAppendTransitionV2(tree, event.commitment);
+    if (transition.newRoot !== event.newRoot) {
+      throw new Error(`V2 chain history root mismatch at append ${index}`);
+    }
+    commitments.push(event.commitment);
+    tree = transition.tree;
+  }
+  if (tree.count !== target || tree.root !== chain.currentRoot) {
+    throw new Error('Reconstructed V2 public tree does not match the on-chain active tree');
+  }
+  const cache = savePublicTreeCacheV2({
+    storage,
+    scope,
+    epoch: Number(chain.epoch),
+    commitments,
+  });
+  return Object.freeze({
+    chain,
+    cache,
+    tree: cache.tree,
+    scannedSignatures,
+    appendEvents: chronological.length,
+  });
 }
 
 export async function verifyPublicTreeCacheV2({
