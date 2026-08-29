@@ -1,0 +1,4 @@
+requested_at=2026-08-30T04:45:00+07:00
+runtime_commit=993ee6d
+mode=persistent-public-devnet-custody-smoke
+amount_lamports=1000000
