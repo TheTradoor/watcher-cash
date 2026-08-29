@@ -112,7 +112,48 @@ async function main() {
     await waitForText(page.locator('[data-v2-private-balance]'), '0.004 SOL', 'balance after private change');
     await waitForText(page.locator('[data-v2-tree-index]'), '3 / 65536', 'change leaf appended');
     await waitForCount(page.locator('[data-note-status="confirmed"]'), 1, 'confirmed private change');
-    await waitForCount(page.locator('[data-note-status="spent"]'), 2, 'spent notes before multi-input withdrawal');
+    await waitForCount(page.locator('[data-note-status="spent"]'), 2, 'spent notes before backup');
+
+    console.log('V2 ciphertext-only backup survives local private-vault loss');
+    const downloadPromise = page.waitForEvent('download', { timeout });
+    await page.locator('[data-v2-backup-export]').click();
+    const download = await downloadPromise;
+    const backupPath = await download.path();
+    if (!backupPath) fail('V2 encrypted backup download did not produce a local file');
+    const backupText = fs.readFileSync(backupPath, 'utf8');
+    const backup = JSON.parse(backupText);
+    if (backup.protocolVersion !== 2 || backup.ciphertextOnly !== true) {
+      fail('V2 encrypted backup metadata is invalid');
+    }
+    const envelopeKeys = Object.keys(backup.envelope || {}).sort().join(',');
+    if (envelopeKeys !== 'ciphertext,iv,version') fail(`unexpected V2 backup envelope keys: ${envelopeKeys}`);
+    if (/"owner"|"nonce"|"notes"/.test(backupText)) fail('V2 encrypted backup leaked plaintext note fields');
+
+    const removedVaultKeys = await page.evaluate(() => {
+      const removed = [];
+      for (let index = localStorage.length - 1; index >= 0; index -= 1) {
+        const key = localStorage.key(index);
+        if (key?.startsWith('watcher-note-vault:v1:watcher-v2:')) {
+          removed.push(key);
+          localStorage.removeItem(key);
+        }
+      }
+      return removed;
+    });
+    if (removedVaultKeys.length !== 1) fail(`expected one encrypted V2 vault key, removed ${removedVaultKeys.length}`);
+
+    await page.reload({ waitUntil: 'domcontentloaded', timeout });
+    await waitForText(page.getByText('RUNTIME VERIFIED', { exact: true }), 'RUNTIME VERIFIED', 'runtime after private-vault loss');
+    await waitForText(page.locator('[data-v2-tree-index]'), '3 / 65536', 'public tree preserved after private-vault loss');
+    await waitForText(page.locator('[data-v2-primary]'), 'Unlock V2 private notes', 'wallet after private-vault loss');
+    await page.locator('[data-v2-primary]').click();
+    await waitForText(page.locator('[data-v2-message]'), 'Unlocked 0 encrypted V2 note records.', 'empty V2 vault after local loss');
+    await waitForText(page.locator('[data-v2-private-balance]'), '0 SOL', 'empty V2 balance before restore');
+    await page.locator('[data-v2-backup-file]').setInputFiles(backupPath);
+    await waitForText(page.locator('[data-v2-message]'), 'Encrypted V2 vault backup restored and synced. 3 note records available.', 'V2 encrypted backup restore');
+    await waitForText(page.locator('[data-v2-private-balance]'), '0.004 SOL', 'private balance after V2 backup restore');
+    await waitForCount(page.locator('[data-note-status="confirmed"]'), 1, 'confirmed note after V2 backup restore');
+    await waitForCount(page.locator('[data-note-status="spent"]'), 2, 'spent notes resynced after V2 backup restore');
 
     console.log('V2 two-input exact withdrawal');
     await page.locator('[data-v2-tab="deposit"]').click();
@@ -183,6 +224,7 @@ async function main() {
         'deposit-browser-proof',
         'one-input-exact-withdraw',
         'private-change-withdraw',
+        'encrypted-v2-backup-recovery',
         'two-input-exact-withdraw',
         'rebuild-public-tree-from-chain',
         'reload-encrypted-metadata',
@@ -192,6 +234,7 @@ async function main() {
       trackedBalance: trackedBalance.toString(),
       nullifierMarkers: markerAccounts.length,
       browserProver: 'V2 WASM Groth16',
+      encryptedBackupRecovery: true,
       publicTreeRecovery: true,
     }, null, 2));
   } catch (error) {
