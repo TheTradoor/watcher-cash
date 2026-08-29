@@ -270,8 +270,12 @@ mod tests {
 
     #[test]
     fn exact_withdrawal_reconstruction_ignores_changing_active_tree_state() {
+        // Reuse the exact same compact statement. Only trusted active-tree state
+        // changes between reconstructions; an exact withdrawal must not bind to
+        // that append-only state because it creates no change commitment.
+        let statement = statement(false);
         let first = WithdrawPublicInputsV2::from_statement(
-            &statement(false),
+            &statement,
             field(10),
             123,
             sol_asset_id_field_v2(),
@@ -279,7 +283,7 @@ mod tests {
         )
         .unwrap();
         let second = WithdrawPublicInputsV2::from_statement(
-            &statement(false),
+            &statement,
             field(99),
             456,
             sol_asset_id_field_v2(),
