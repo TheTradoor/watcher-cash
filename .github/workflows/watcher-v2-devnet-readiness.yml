@@ -61,21 +61,37 @@ jobs:
             echo 'READINESS_BLOCKER=missing WATCHER_V2_DEVNET_PROGRAM_KEYPAIR_B64' >&2
             exit 1
           fi
-          printf '%s' "$PAYER_KEYPAIR_B64" | base64 --decode > /tmp/watcher-v2-readiness-payer.json
-          printf '%s' "$PROGRAM_KEYPAIR_B64" | base64 --decode > /tmp/watcher-v2-readiness-program.json
+          if ! printf '%s' "$PAYER_KEYPAIR_B64" | base64 --decode > /tmp/watcher-v2-readiness-payer.json 2>/dev/null; then
+            echo 'READINESS_BLOCKER=WATCHER_DEVNET_DEPLOYER_KEYPAIR_B64 is not valid base64' >&2
+            exit 1
+          fi
+          if ! printf '%s' "$PROGRAM_KEYPAIR_B64" | base64 --decode > /tmp/watcher-v2-readiness-program.json 2>/dev/null; then
+            echo 'READINESS_BLOCKER=WATCHER_V2_DEVNET_PROGRAM_KEYPAIR_B64 is not valid base64' >&2
+            exit 1
+          fi
           chmod 600 /tmp/watcher-v2-readiness-payer.json /tmp/watcher-v2-readiness-program.json
           node --input-type=module - <<'NODE'
           import fs from 'node:fs';
           import { Connection, Keypair, PublicKey } from '@solana/web3.js';
 
-          function load(path) {
-            const value = JSON.parse(fs.readFileSync(path, 'utf8'));
-            if (!Array.isArray(value) || value.length !== 64) throw new Error(`${path} is not a 64-byte Solana keypair`);
+          function load(path, secretName) {
+            let value;
+            try {
+              value = JSON.parse(fs.readFileSync(path, 'utf8'));
+            } catch {
+              throw new Error(`${secretName} decodes from base64 but is not valid JSON`);
+            }
+            if (!Array.isArray(value) || value.length !== 64) {
+              throw new Error(`${secretName} must decode to a Solana 64-byte keypair JSON array`);
+            }
+            if (value.some((item) => !Number.isInteger(item) || item < 0 || item > 255)) {
+              throw new Error(`${secretName} contains invalid keypair bytes`);
+            }
             return Keypair.fromSecretKey(Uint8Array.from(value));
           }
 
-          const payer = load('/tmp/watcher-v2-readiness-payer.json');
-          const program = load('/tmp/watcher-v2-readiness-program.json');
+          const payer = load('/tmp/watcher-v2-readiness-payer.json', 'WATCHER_DEVNET_DEPLOYER_KEYPAIR_B64');
+          const program = load('/tmp/watcher-v2-readiness-program.json', 'WATCHER_V2_DEVNET_PROGRAM_KEYPAIR_B64');
           let v1Program = '';
           try {
             const v1 = JSON.parse(fs.readFileSync('public/watcher-protocol/devnet.json', 'utf8'));
