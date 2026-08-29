@@ -14,3 +14,6 @@ export * from './instructions-v2.mjs';
 export * from './bindings-v2.mjs';
 export * from './public-inputs-v2.mjs';
 export * from './browser-prover-v2.mjs';
+export * from './state-v2.mjs';
+export * from './public-tree-v2.mjs';
+export * from './flows-v2.mjs';
