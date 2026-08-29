@@ -4,14 +4,19 @@ on:
   workflow_dispatch:
     inputs:
       force_bootstrap:
-        description: Replace published V2 config/tree/vault with a fresh empty deployment state
+        description: Replace published V2 config/tree/vault with a fresh empty development state
+        required: true
+        default: false
+        type: boolean
+      acknowledge_nonzero_reset:
+        description: Permit force_bootstrap when the published V2 vault still tracks private liability
         required: true
         default: false
         type: boolean
       run_e2e:
-        description: Run a separate real-devnet V2 deposit/exact-withdraw smoke test
+        description: Run a separate real-devnet V2 custody smoke test after deployment
         required: true
-        default: true
+        default: false
         type: boolean
 
 permissions:
@@ -36,33 +41,6 @@ jobs:
           ref: watcher-protocol-v2
           fetch-depth: 0
 
-      - name: Require immutable V2 prover pin
-        shell: bash
-        run: |
-          set -euo pipefail
-          PIN=public/watcher-protocol/v2-prover-pin.json
-          test -s "$PIN"
-          test "$(jq -r '.version' "$PIN")" = 2
-          test "$(jq -r '.status' "$PIN")" = pinned-development-setup
-          test "$(jq -r '.networkTarget' "$PIN")" = solana-devnet
-          test "$(jq -r '.treeDepth' "$PIN")" = 16
-          test "$(jq -r '.maxInputs' "$PIN")" = 4
-          test -n "$(jq -r '.releaseTag' "$PIN")"
-          test -n "$(jq -r '.bundleSha256' "$PIN")"
-          test -n "$(jq -r '.depositVkSha256' "$PIN")"
-          test -n "$(jq -r '.withdrawVkSha256' "$PIN")"
-
-          RUNTIME=public/watcher-protocol/v2-devnet.json
-          if [ -s "$RUNTIME" ]; then
-            OLD_SHA=$(jq -r '.proverBundleSha256 // empty' "$RUNTIME")
-            PIN_SHA=$(jq -r '.bundleSha256' "$PIN")
-            if [ -n "$OLD_SHA" ] && [ "$OLD_SHA" != "$PIN_SHA" ] && [ "${{ inputs.force_bootstrap }}" != true ]; then
-              echo 'The pinned V2 proving setup changed from the published runtime.' >&2
-              echo 'Rerun with force_bootstrap=true only if intentionally abandoning compatibility with old V2 notes.' >&2
-              exit 1
-            fi
-          fi
-
       - name: Require persistent V2 deployment secrets
         env:
           PAYER_KEYPAIR_B64: ${{ secrets.WATCHER_DEVNET_DEPLOYER_KEYPAIR_B64 }}
@@ -70,9 +48,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [ -z "$PAYER_KEYPAIR_B64" ] || [ -z "$PROGRAM_KEYPAIR_B64" ]; then
-            echo 'Required repository secrets are missing.' >&2
-            echo 'Set WATCHER_DEVNET_DEPLOYER_KEYPAIR_B64 and WATCHER_V2_DEVNET_PROGRAM_KEYPAIR_B64.' >&2
+          if [ -z "$PAYER_KEYPAIR_B64" ]; then
+            echo 'Missing WATCHER_DEVNET_DEPLOYER_KEYPAIR_B64.' >&2
+            exit 1
+          fi
+          if [ -z "$PROGRAM_KEYPAIR_B64" ]; then
+            echo 'Missing WATCHER_V2_DEVNET_PROGRAM_KEYPAIR_B64.' >&2
+            echo 'V2 intentionally requires a persistent program key that is different from live V1.' >&2
             exit 1
           fi
           printf '%s' "$PAYER_KEYPAIR_B64" | base64 --decode > /tmp/watcher-v2-devnet-payer.json
@@ -103,51 +85,41 @@ jobs:
       - name: Install locked web dependencies
         run: npm ci --ignore-scripts --no-audit --no-fund
 
-      - name: Download exact content-addressed V2 prover pin
+      - name: Require exact immutable V2 prover pin
         id: pin
-        env:
-          GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
           PIN=public/watcher-protocol/v2-prover-pin.json
+          test -s "$PIN"
+          jq -e '.version == 2 and .status == "pinned-development-setup" and .networkTarget == "solana-devnet"' "$PIN" >/dev/null
+          test "$(jq -r '.treeDepth' "$PIN")" = 16
+          test "$(jq -r '.maxInputs' "$PIN")" = 4
           TAG=$(jq -r '.releaseTag' "$PIN")
-          EXPECTED_SHA=$(jq -r '.bundleSha256' "$PIN")
-          FILE=$(jq -r '.bundleFile' "$PIN")
-          rm -rf /tmp/watcher-v2-pin-release /tmp/watcher-v2-pin
-          mkdir -p /tmp/watcher-v2-pin-release /tmp/watcher-v2-pin
-          gh release download "$TAG" \
-            --repo "$GITHUB_REPOSITORY" \
-            --pattern "$FILE" \
-            --pattern "$FILE.sha256" \
-            --dir /tmp/watcher-v2-pin-release
-          (
-            cd /tmp/watcher-v2-pin-release
-            sha256sum --check "$FILE.sha256"
-          )
-          ACTUAL_SHA=$(sha256sum "/tmp/watcher-v2-pin-release/$FILE" | awk '{print $1}')
-          if [ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]; then
-            echo 'Downloaded V2 prover pin does not match its committed SHA-256.' >&2
-            exit 1
-          fi
-          tar -xzf "/tmp/watcher-v2-pin-release/$FILE" -C /tmp/watcher-v2-pin
-          ASSETS=/tmp/watcher-v2-pin/watcher-prover-v2/assets
-          for name in deposit.r1cs deposit.pk deposit.vk withdraw.r1cs withdraw.pk withdraw.vk manifest.json; do
-            test -s "$ASSETS/$name"
-          done
-          test -s /tmp/watcher-v2-pin/watcher-prover-v2/watcher-v2-prover.wasm
-          test -s /tmp/watcher-v2-pin/watcher-prover-v2/worker.js
-          test -s /tmp/watcher-v2-pin/watcher-prover-v2/wasm_exec.js
-
-          DEPOSIT_VK_SHA=$(sha256sum "$ASSETS/deposit.vk" | awk '{print $1}')
-          WITHDRAW_VK_SHA=$(sha256sum "$ASSETS/withdraw.vk" | awk '{print $1}')
-          test "$DEPOSIT_VK_SHA" = "$(jq -r '.depositVkSha256' "$PIN")"
-          test "$WITHDRAW_VK_SHA" = "$(jq -r '.withdrawVkSha256' "$PIN")"
-          test "$DEPOSIT_VK_SHA" = "$(jq -r '.depositVkSha256' programs/watcher-protocol/src/v2/development_prover_manifest_v2.json)"
-          test "$WITHDRAW_VK_SHA" = "$(jq -r '.withdrawVkSha256' programs/watcher-protocol/src/v2/development_prover_manifest_v2.json)"
+          BUNDLE_SHA=$(jq -r '.bundleSha256' "$PIN")
+          DEPOSIT_VK_SHA=$(jq -r '.depositVkSha256' "$PIN")
+          WITHDRAW_VK_SHA=$(jq -r '.withdrawVkSha256' "$PIN")
+          test "${#BUNDLE_SHA}" -eq 64
+          test "${TAG##*-}" = "${BUNDLE_SHA:0:16}"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "bundle_sha=$ACTUAL_SHA" >> "$GITHUB_OUTPUT"
-          echo "assets=$ASSETS" >> "$GITHUB_OUTPUT"
+          echo "bundle_sha=$BUNDLE_SHA" >> "$GITHUB_OUTPUT"
+          echo "deposit_vk_sha=$DEPOSIT_VK_SHA" >> "$GITHUB_OUTPUT"
+          echo "withdraw_vk_sha=$WITHDRAW_VK_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Download and cryptographically verify pinned V2 browser bundle
+        run: node scripts/install-pinned-v2-prover.mjs
+
+      - name: Require committed Rust verifier to match browser release
+        shell: bash
+        run: |
+          set -euo pipefail
+          PIN=public/watcher-protocol/v2-prover-pin.json
+          RUST_MANIFEST=programs/watcher-protocol/src/v2/development_prover_manifest_v2.json
+          test "$(jq -r '.depositVkSha256' "$RUST_MANIFEST")" = "$(jq -r '.depositVkSha256' "$PIN")"
+          test "$(jq -r '.withdrawVkSha256' "$RUST_MANIFEST")" = "$(jq -r '.withdrawVkSha256' "$PIN")"
+          node --check scripts/watcher-v2-runtime-verify.mjs
+          node --check scripts/watcher-v2-bootstrap.mjs
+          cargo test --quiet --manifest-path programs/watcher-protocol/Cargo.toml --lib --locked 'v2::'
 
       - name: Install Agave SBF toolchain
         shell: bash
@@ -162,43 +134,8 @@ jobs:
           /tmp/solana-release/bin/solana --version
           /tmp/solana-release/bin/cargo-build-sbf --version
 
-      - name: Validate pinned V2 source and verifier
-        shell: bash
-        run: |
-          set -euo pipefail
-          node --check scripts/watcher-v2-runtime-verify.mjs
-          node --check scripts/watcher-v2-bootstrap.mjs
-          node --test \
-            client/watcher/v2.test.mjs \
-            client/watcher/instructions-v2.test.mjs \
-            client/watcher/bindings-v2.test.mjs \
-            client/watcher/browser-prover-v2.test.mjs \
-            client/watcher/state-v2.test.mjs \
-            client/watcher/public-tree-v2.test.mjs \
-            client/watcher/flows-v2.test.mjs \
-            client/watcher/vault-v2.test.mjs \
-            client/watcher/backup-v2.test.mjs \
-            client/watcher/vault.test.mjs
-          go -C circuits/withdraw test -run '^(TestCircuitV2|TestDepositCircuitV2|TestProverV2)' .
-          cargo test --quiet --manifest-path programs/watcher-protocol/Cargo.toml --lib --locked 'v2::'
-
-      - name: Build SBF against pinned V2 verifying keys
-        shell: bash
-        run: |
-          set -euo pipefail
-          rm -rf target/deploy
-          mkdir -p target/deploy
-          cargo build-sbf \
-            --arch v3 \
-            --manifest-path programs/watcher-protocol/Cargo.toml \
-            --sbf-out-dir target/deploy
-          test -s target/deploy/watcher_protocol_program.so
-          sha256sum target/deploy/watcher_protocol_program.so | tee /tmp/watcher-v2-program-sha256.txt
-          go -C circuits/withdraw build -trimpath -o /tmp/watcher-v2-prover ./cmd/watcher-v2-prover
-          test -s /tmp/watcher-v2-prover
-
-      - name: Deploy or upgrade fixed V2 program id
-        id: deployment
+      - name: Resolve fixed V2 program id and funded deployer
+        id: identity
         shell: bash
         run: |
           set -euo pipefail
@@ -214,66 +151,122 @@ jobs:
             echo 'Persistent V2 devnet payer needs at least 5 SOL before deployment.' >&2
             exit 1
           fi
-          solana program deploy \
-            --url "$WATCHER_V2_RPC_URL" \
-            --keypair "$PAYER" \
-            --program-id "$PROGRAM" \
-            target/deploy/watcher_protocol_program.so \
-            | tee /tmp/watcher-v2-deploy.log
+          echo "payer=$PAYER_ADDRESS" >> "$GITHUB_OUTPUT"
           echo "program_id=$PROGRAM_ID" >> "$GITHUB_OUTPUT"
 
-      - name: Bootstrap or verify persistent V2 state
+      - name: Preflight published V2 state before any program upgrade
+        id: preflight
         env:
-          PROGRAM_ID: ${{ steps.deployment.outputs.program_id }}
+          PROGRAM_ID: ${{ steps.identity.outputs.program_id }}
           FORCE_BOOTSTRAP: ${{ inputs.force_bootstrap }}
+          ACK_NONZERO: ${{ inputs.acknowledge_nonzero_reset }}
+          PIN_SHA: ${{ steps.pin.outputs.bundle_sha }}
         shell: bash
         run: |
           set -euo pipefail
           RUNTIME=public/watcher-protocol/v2-devnet.json
           REUSE=0
-          if [ "$FORCE_BOOTSTRAP" != true ] && [ -s "$RUNTIME" ]; then
-            if [ "$(jq -r '.programId // empty' "$RUNTIME")" = "$PROGRAM_ID" ]; then
-              if node scripts/watcher-v2-runtime-verify.mjs --runtime "$RUNTIME" --rpc "$WATCHER_V2_RPC_URL"; then
-                REUSE=1
-              fi
+          TRACKED=0
+          if [ -s "$RUNTIME" ] && jq -e '.status == "ready"' "$RUNTIME" >/dev/null 2>&1; then
+            PUBLISHED_PROGRAM=$(jq -r '.programId // empty' "$RUNTIME")
+            if [ "$PUBLISHED_PROGRAM" != "$PROGRAM_ID" ]; then
+              echo 'Published V2 runtime uses a different program id than WATCHER_V2_DEVNET_PROGRAM_KEYPAIR_B64.' >&2
+              echo 'Refusing to replace a persistent V2 program identity.' >&2
+              exit 1
+            fi
+            node scripts/watcher-v2-runtime-verify.mjs \
+              --runtime "$RUNTIME" \
+              --rpc "$WATCHER_V2_RPC_URL" \
+              | tee /tmp/watcher-v2-preflight.json
+            TRACKED=$(jq -r '.trackedBalance' /tmp/watcher-v2-preflight.json)
+            PUBLISHED_PIN=$(jq -r '.proverBundleSha256 // empty' "$RUNTIME")
+            if [ "$PUBLISHED_PIN" = "$PIN_SHA" ] && [ "$FORCE_BOOTSTRAP" != true ]; then
+              REUSE=1
+            elif [ "$FORCE_BOOTSTRAP" != true ]; then
+              echo 'Pinned V2 proving setup differs from the published runtime.' >&2
+              echo 'Verifier-key rotation requires force_bootstrap=true in development.' >&2
+              exit 1
+            fi
+            if [ "$FORCE_BOOTSTRAP" = true ] && [ "$TRACKED" != 0 ] && [ "$ACK_NONZERO" != true ]; then
+              echo "Published V2 vault tracks $TRACKED lamports of private liability." >&2
+              echo 'Refusing reset without acknowledge_nonzero_reset=true.' >&2
+              exit 1
             fi
           fi
+          echo "reuse=$REUSE" >> "$GITHUB_OUTPUT"
+          echo "tracked=$TRACKED" >> "$GITHUB_OUTPUT"
 
-          if [ "$REUSE" -eq 0 ]; then
-            WATCHER_V2_PROGRAM_ID="$PROGRAM_ID" \
-            WATCHER_V2_PAYER_KEYPAIR=/tmp/watcher-v2-devnet-payer.json \
-            WATCHER_V2_RPC_URL="$WATCHER_V2_RPC_URL" \
-            WATCHER_V2_RUNTIME_OUT="$RUNTIME" \
-            WATCHER_V2_PROVER_BASE_PATH=/watcher-cash/watcher-prover-v2 \
-            WATCHER_V2_NETWORK=devnet \
-            WATCHER_V2_RELAYER_FEE_LAMPORTS=0 \
-            node scripts/watcher-v2-bootstrap.mjs \
-            | tee /tmp/watcher-v2-bootstrap.log
-          fi
-          node scripts/watcher-v2-runtime-verify.mjs --runtime "$RUNTIME" --rpc "$WATCHER_V2_RPC_URL" \
-            | tee /tmp/watcher-v2-runtime-verification.json
-
-      - name: Run separate real-devnet V2 custody smoke test
-        if: ${{ inputs.run_e2e }}
-        env:
-          WATCHER_V2_PROGRAM_ID: ${{ steps.deployment.outputs.program_id }}
-          WATCHER_V2_PAYER_KEYPAIR: /tmp/watcher-v2-devnet-payer.json
-          WATCHER_V2_PROVER: /tmp/watcher-v2-prover
-          WATCHER_V2_BUNDLE: ${{ steps.pin.outputs.assets }}
+      - name: Validate pinned V2 client and circuit source
         shell: bash
         run: |
           set -euo pipefail
-          node scripts/watcher-v2-e2e.mjs | tee /tmp/watcher-v2-real-devnet-e2e.log
+          node --test \
+            client/watcher/v2.test.mjs \
+            client/watcher/instructions-v2.test.mjs \
+            client/watcher/bindings-v2.test.mjs \
+            client/watcher/browser-prover-v2.test.mjs \
+            client/watcher/state-v2.test.mjs \
+            client/watcher/public-tree-v2.test.mjs \
+            client/watcher/flows-v2.test.mjs \
+            client/watcher/vault-v2.test.mjs \
+            client/watcher/backup-v2.test.mjs \
+            client/watcher/vault.test.mjs
+          go -C circuits/withdraw test -run '^(TestCircuitV2|TestDepositCircuitV2|TestProverV2)' .
 
-      - name: Seal and commit public V2 runtime
+      - name: Build SBF against pinned V2 verifying keys
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf target/v2-devnet-deploy
+          mkdir -p target/v2-devnet-deploy
+          cargo build-sbf \
+            --arch v3 \
+            --manifest-path programs/watcher-protocol/Cargo.toml \
+            --sbf-out-dir target/v2-devnet-deploy
+          test -s target/v2-devnet-deploy/watcher_protocol_program.so
+          sha256sum target/v2-devnet-deploy/watcher_protocol_program.so | tee /tmp/watcher-v2-program-sha256.txt
+          if [ "${{ inputs.run_e2e }}" = true ]; then
+            go -C circuits/withdraw build -trimpath -o /tmp/watcher-v2-prover ./cmd/watcher-v2-prover
+            test -s /tmp/watcher-v2-prover
+          fi
+
+      - name: Deploy or upgrade only the fixed V2 program id
+        id: deployment
+        shell: bash
+        run: |
+          set -euo pipefail
+          solana program deploy \
+            --url "$WATCHER_V2_RPC_URL" \
+            --keypair /tmp/watcher-v2-devnet-payer.json \
+            --program-id /tmp/watcher-v2-devnet-program.json \
+            target/v2-devnet-deploy/watcher_protocol_program.so \
+            | tee /tmp/watcher-v2-deploy.log
+          echo "program_id=${{ steps.identity.outputs.program_id }}" >> "$GITHUB_OUTPUT"
+
+      - name: Bootstrap fresh V2 state only when required
+        if: ${{ steps.preflight.outputs.reuse != '1' }}
         env:
-          PROGRAM_ID: ${{ steps.deployment.outputs.program_id }}
+          WATCHER_V2_PROGRAM_ID: ${{ steps.identity.outputs.program_id }}
+          WATCHER_V2_PAYER_KEYPAIR: /tmp/watcher-v2-devnet-payer.json
+          WATCHER_V2_RUNTIME_OUT: public/watcher-protocol/v2-devnet.json
+          WATCHER_V2_PROVER_BASE_PATH: /watcher-prover-v2
+          WATCHER_V2_NETWORK: devnet
+          WATCHER_V2_RELAYER_FEE_LAMPORTS: '0'
+        shell: bash
+        run: node scripts/watcher-v2-bootstrap.mjs | tee /tmp/watcher-v2-bootstrap.log
+
+      - name: Seal runtime to exact program and pinned prover hashes
+        env:
+          PROGRAM_ID: ${{ steps.identity.outputs.program_id }}
           RELEASE_TAG: ${{ steps.pin.outputs.tag }}
           BUNDLE_SHA: ${{ steps.pin.outputs.bundle_sha }}
+          DEPOSIT_VK_SHA: ${{ steps.pin.outputs.deposit_vk_sha }}
+          WITHDRAW_VK_SHA: ${{ steps.pin.outputs.withdraw_vk_sha }}
         shell: bash
         run: |
           set -euo pipefail
           RUNTIME=public/watcher-protocol/v2-devnet.json
+          test -s "$RUNTIME"
           PROGRAM_SHA=$(awk '{print $1}' /tmp/watcher-v2-program-sha256.txt)
           UPDATED_AT=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
           TMP=$(mktemp)
@@ -282,26 +275,53 @@ jobs:
             --arg programId "$PROGRAM_ID" \
             --arg proverReleaseTag "$RELEASE_TAG" \
             --arg proverBundleSha256 "$BUNDLE_SHA" \
+            --arg depositVkSha256 "$DEPOSIT_VK_SHA" \
+            --arg withdrawVkSha256 "$WITHDRAW_VK_SHA" \
             --arg programSha256 "$PROGRAM_SHA" \
             --arg sourceCommit "$GITHUB_SHA" \
             --arg updatedAt "$UPDATED_AT" \
             '. + {
               status: $status,
+              network: "devnet",
+              rpcUrl: "https://api.devnet.solana.com",
               programId: $programId,
+              proverBasePath: "/watcher-prover-v2",
               proverReleaseTag: $proverReleaseTag,
               proverBundleSha256: $proverBundleSha256,
+              depositVkSha256: $depositVkSha256,
+              withdrawVkSha256: $withdrawVkSha256,
               programSha256: $programSha256,
               sourceCommit: $sourceCommit,
               updatedAt: $updatedAt
             }' "$RUNTIME" > "$TMP"
           mv "$TMP" "$RUNTIME"
-          node scripts/watcher-v2-runtime-verify.mjs --runtime "$RUNTIME" --rpc "$WATCHER_V2_RPC_URL"
+          node scripts/watcher-v2-runtime-verify.mjs \
+            --runtime "$RUNTIME" \
+            --rpc "$WATCHER_V2_RPC_URL" \
+            --pin public/watcher-protocol/v2-prover-pin.json \
+            | tee /tmp/watcher-v2-runtime-verification.json
 
+      - name: Run optional separate real-devnet V2 custody smoke test
+        if: ${{ inputs.run_e2e }}
+        env:
+          WATCHER_V2_PROGRAM_ID: ${{ steps.identity.outputs.program_id }}
+          WATCHER_V2_PAYER_KEYPAIR: /tmp/watcher-v2-devnet-payer.json
+          WATCHER_V2_PROVER: /tmp/watcher-v2-prover
+          WATCHER_V2_BUNDLE: public/watcher-prover-v2/assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/watcher-v2-e2e.mjs | tee /tmp/watcher-v2-real-devnet-e2e.log
+
+      - name: Commit separate V2 public devnet runtime
+        shell: bash
+        run: |
+          set -euo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add public/watcher-protocol/v2-devnet.json
           if git diff --cached --quiet; then
-            echo 'Persistent V2 runtime is unchanged.'
+            echo 'Persistent V2 runtime metadata is unchanged.'
           else
             git commit -m 'Publish persistent Watcher V2 devnet runtime'
             git fetch origin watcher-protocol-v2
@@ -318,9 +338,11 @@ jobs:
             /tmp/watcher-v2-program-sha256.txt
             /tmp/watcher-v2-deploy.log
             /tmp/watcher-v2-bootstrap.log
+            /tmp/watcher-v2-preflight.json
             /tmp/watcher-v2-runtime-verification.json
             /tmp/watcher-v2-real-devnet-e2e.log
             public/watcher-protocol/v2-devnet.json
+            public/watcher-protocol/v2-prover-pin.json
           if-no-files-found: warn
           retention-days: 30
 
