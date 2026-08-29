@@ -1,0 +1,70 @@
+name: Refresh Watcher V2 Verifier Fixtures
+
+on:
+  push:
+    branches: [watcher-protocol-v2]
+    paths:
+      - 'circuits/withdraw/cmd/watcher-v2-setup/**'
+      - 'circuits/withdraw/circuit_v2.go'
+      - 'circuits/withdraw/deposit_v2.go'
+      - '.github/workflows/refresh-v2-verifier-fixtures.yml'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: watcher-v2-verifier-fixtures
+  cancel-in-progress: true
+
+jobs:
+  generate:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: watcher-protocol-v2
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+          cache-dependency-path: circuits/withdraw/go.sum
+      - name: Generate matched V2 setup and Rust fixtures
+        working-directory: circuits/withdraw
+        run: >-
+          go run ./cmd/watcher-v2-setup
+          --bundle-out fixture-out/v2
+          --rust-out ../../programs/watcher-protocol/src/v2
+      - name: Validate generated wire sizes and reload bundle
+        working-directory: circuits/withdraw
+        run: |
+          set -euo pipefail
+          test "$(stat -c%s fixture-out/v2/sample-deposit-proof.xark)" -eq 256
+          test "$(stat -c%s fixture-out/v2/sample-deposit-public.xark)" -eq 256
+          test "$(stat -c%s fixture-out/v2/sample-withdraw-proof.xark)" -eq 256
+          test "$(stat -c%s fixture-out/v2/sample-withdraw-public.xark)" -eq 608
+          grep -q 'depositVkSha256' ../../programs/watcher-protocol/src/v2/development_prover_manifest_v2.json
+          go test -run '^(TestCircuitV2|TestDepositCircuitV2|TestProverV2)' .
+      - name: Commit generated verifier fixtures
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add \
+            programs/watcher-protocol/src/v2/dev_deposit_vk_array.in \
+            programs/watcher-protocol/src/v2/dev_withdraw_vk_array.in \
+            programs/watcher-protocol/src/v2/dev_deposit_proof_array.in \
+            programs/watcher-protocol/src/v2/dev_deposit_public_inputs_array.in \
+            programs/watcher-protocol/src/v2/dev_withdraw_proof_array.in \
+            programs/watcher-protocol/src/v2/dev_withdraw_public_inputs_array.in \
+            programs/watcher-protocol/src/v2/development_prover_manifest_v2.json
+          if git diff --cached --quiet; then
+            echo 'V2 verifier fixtures unchanged'
+            exit 0
+          fi
+          git commit -m 'Sync matched V2 verifier fixtures'
+          git fetch origin watcher-protocol-v2
+          git rebase origin/watcher-protocol-v2
+          git push origin HEAD:watcher-protocol-v2
