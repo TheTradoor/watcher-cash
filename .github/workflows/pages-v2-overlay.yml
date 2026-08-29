@@ -156,9 +156,17 @@ jobs:
           test -s v1/out/watcher-prover-v2/worker.js
           test -s v1/out/watcher-prover-v2/watcher-v2-prover.wasm
           test "$(jq -r '.programId' v1/out/watcher-protocol/v2-devnet.json)" = 'DMU22YyGkLs9cuZXR6eHt4oZpWtMTMtkCNTNV8SW16HM'
-          grep -q '/watcher-cash/watcher-protocol/v2-devnet.json' v1/out/v2/index.html
-          grep -q '/watcher-cash/watcher-prover-v2' v1/out/v2/index.html
+
+          grep -R -F -q '/watcher-cash/watcher-protocol/v2-devnet.json' v1/out/v2 v1/out/_next || {
+            echo 'V2 runtime binding was not emitted into the V2 route/chunks' >&2
+            exit 1
+          }
+          grep -R -F -q '/watcher-cash/watcher-prover-v2' v1/out/v2 v1/out/_next || {
+            echo 'V2 prover binding was not emitted into the V2 route/chunks' >&2
+            exit 1
+          }
           echo "V1 root preserved: $ROOT_AFTER"
+          echo "V1 runtime preserved: $RUNTIME_AFTER"
           echo 'V2 overlay assembled successfully.'
 
       - name: Configure GitHub Pages
