@@ -118,7 +118,7 @@ async function main() {
     await waitForText(page.locator('[data-v3-primary]'), 'Unlock V3 private notes', 'Phantom wallet connection');
     await page.evaluate(() => sessionStorage.setItem('watcher-e2e:reject-next-message', '1'));
     await page.locator('[data-v3-primary]').click();
-    await waitForText(page.locator('[data-v3-error="true"]'), 'rejected', 'Phantom unlock rejection');
+    await waitForText(page.locator('[data-v3-error="true"]'), 'Request cancelled in your wallet', 'Phantom unlock rejection');
     await page.locator('[data-v3-primary]').click();
     await waitForText(page.locator('[data-v3-message]'), 'Unlocked 0 encrypted V3 note records.', 'V3 vault unlock');
     await waitForText(page.locator('[data-v3-private-balance]'), '0 SOL', 'empty V3 private balance');
@@ -158,9 +158,10 @@ async function main() {
 
     console.log('V3 two-note exact browser withdrawal');
     await page.locator('[data-v3-tab="deposit"]').click();
-    await page.locator('[data-v3-amount]').fill('0.004');
-    await runTransaction(page, 'Deposited 0.004 SOL into a V3 private note.', 'V3 deposit #2');
-    await runTransaction(page, 'Deposited 0.004 SOL into a V3 private note.', 'V3 deposit #3');
+    await page.locator('[data-v3-amount]').fill('0.003');
+    await runTransaction(page, 'Deposited 0.003 SOL into a V3 private note.', 'V3 deposit #2');
+    await page.locator('[data-v3-amount]').fill('0.005');
+    await runTransaction(page, 'Deposited 0.005 SOL into a V3 private note.', 'V3 deposit #3');
     await waitForText(page.locator('[data-v3-private-balance]'), '0.008 SOL', 'V3 balance before two-input exact');
     await waitForText(page.locator('[data-v3-tree-index]'), '3 / 65536', 'tree after three V3 deposits');
 
