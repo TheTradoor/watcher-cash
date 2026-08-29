@@ -1,0 +1,205 @@
+name: Watcher V3 Circuit-Scoped Prover E2E
+
+on:
+  push:
+    branches: [watcher-protocol-v3-lazy-prover]
+    paths:
+      - 'client/watcher/browser-prover-v2.mjs'
+      - 'client/watcher/browser-prover-v3.mjs'
+      - 'client/watcher/browser-prover-v3-lazy.worker.js'
+      - 'client/watcher/browser-prover-v3.test.mjs'
+      - 'client/watcher/index.mjs'
+      - 'circuits/withdraw/prover_circuit_v2.go'
+      - 'circuits/withdraw/cmd/watcher-v3-prover-wasm/**'
+      - 'scripts/watcher-v3-lazy-prover-perf.mjs'
+      - '.github/workflows/watcher-v3-lazy-prover-e2e.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: watcher-v3-lazy-prover-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  SOLANA_VERSION: v4.0.0
+  WATCHER_V3_RPC_URL: http://127.0.0.1:8899
+  WATCHER_V3_E2E_SEED_HEX: 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
+
+jobs:
+  acceptance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 95
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.x'
+          cache: npm
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+          cache-dependency-path: circuits/withdraw/go.sum
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Node and Chromium dependencies
+        run: |
+          npm ci --no-audit --no-fund
+          npm install --no-save --package-lock=false playwright@1.55.0
+          npx playwright install --with-deps chromium
+
+      - name: Validate unchanged proof surface and V3 circuit routing
+        run: >-
+          node --test
+          client/watcher/browser-prover-v2.test.mjs
+          client/watcher/browser-prover-v3.test.mjs
+          client/watcher/instructions-v3.test.mjs
+          client/watcher/flows-v3.test.mjs
+          client/watcher/vault-v3.test.mjs
+
+      - name: Compile Go circuit-scoped loader tests
+        run: |
+          set -euo pipefail
+          go -C circuits/withdraw test ./...
+          node --check client/watcher/browser-prover-v3-lazy.worker.js
+          node --check scripts/watcher-v3-lazy-prover-perf.mjs
+
+      - name: Generate exact V2 proving setup reused by V3
+        working-directory: circuits/withdraw
+        run: |
+          set -euo pipefail
+          rm -rf fixture-out/v3-lazy-e2e
+          go run ./cmd/watcher-v2-setup \
+            --bundle-out fixture-out/v3-lazy-e2e \
+            --rust-out ../../programs/watcher-protocol/src/v2
+          GOOS=js GOARCH=wasm go build \
+            -trimpath -ldflags='-s -w' \
+            -o fixture-out/v3-lazy-e2e/watcher-v3-prover.wasm \
+            ./cmd/watcher-v3-prover-wasm
+          WASM_EXEC="$(go env GOROOT)/lib/wasm/wasm_exec.js"
+          if [ ! -f "$WASM_EXEC" ]; then WASM_EXEC="$(go env GOROOT)/misc/wasm/wasm_exec.js"; fi
+          cp "$WASM_EXEC" fixture-out/v3-lazy-e2e/wasm_exec.js
+          test -s fixture-out/v3-lazy-e2e/watcher-v3-prover.wasm
+          test -s fixture-out/v3-lazy-e2e/manifest.json
+
+      - name: Assemble circuit-scoped V3 browser prover
+        run: |
+          set -euo pipefail
+          rm -rf public/watcher-prover-v3
+          mkdir -p public/watcher-prover-v3/assets
+          cp circuits/withdraw/fixture-out/v3-lazy-e2e/watcher-v3-prover.wasm public/watcher-prover-v3/
+          cp circuits/withdraw/fixture-out/v3-lazy-e2e/wasm_exec.js public/watcher-prover-v3/
+          cp client/watcher/browser-prover-v3-lazy.worker.js public/watcher-prover-v3/worker.js
+          for name in deposit.r1cs deposit.pk deposit.vk withdraw.r1cs withdraw.pk withdraw.vk manifest.json; do
+            cp "circuits/withdraw/fixture-out/v3-lazy-e2e/$name" "public/watcher-prover-v3/assets/$name"
+          done
+          node --check public/watcher-prover-v3/worker.js
+
+      - name: Measure circuit-scoped browser initialization
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/watcher-v3-lazy-perf-site
+          mkdir -p /tmp/watcher-v3-lazy-perf-site
+          cp -a public/watcher-prover-v3 /tmp/watcher-v3-lazy-perf-site/
+          printf '<!doctype html><meta charset="utf-8"><title>V3 lazy prover perf</title>\n' > /tmp/watcher-v3-lazy-perf-site/index.html
+          python3 -m http.server 3001 --directory /tmp/watcher-v3-lazy-perf-site > /tmp/watcher-v3-lazy-perf-site.log 2>&1 &
+          PERF_PID=$!
+          trap 'kill "$PERF_PID" || true' EXIT
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:3001/watcher-prover-v3/assets/manifest.json >/dev/null; then break; fi
+            sleep 1
+          done
+          WATCHER_V3_LAZY_PERF_URL=http://127.0.0.1:3001/ \
+          WATCHER_V3_LAZY_PERF_BASE=/watcher-prover-v3 \
+          WATCHER_V3_LAZY_PERF_TIMEOUT_MS=240000 \
+            node scripts/watcher-v3-lazy-prover-perf.mjs | tee /tmp/watcher-v3-lazy-perf.json
+          jq -e '.status == "pass"' /tmp/watcher-v3-lazy-perf.json >/dev/null
+
+      - name: Install Agave SBF toolchain
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 \
+            "https://github.com/anza-xyz/agave/releases/download/${SOLANA_VERSION}/solana-release-x86_64-unknown-linux-gnu.tar.bz2" \
+            --output /tmp/solana-release.tar.bz2
+          mkdir -p /tmp/solana-release
+          tar -xjf /tmp/solana-release.tar.bz2 -C /tmp/solana-release --strip-components=1
+          echo "/tmp/solana-release/bin" >> "$GITHUB_PATH"
+
+      - name: Build and deploy unchanged V3 on-chain verifier path
+        run: |
+          set -euo pipefail
+          rm -rf target/deploy
+          mkdir -p target/deploy
+          cargo build-sbf --arch v3 \
+            --manifest-path programs/watcher-protocol/Cargo.toml \
+            --sbf-out-dir target/deploy
+          solana-keygen new --no-bip39-passphrase --force --silent -o /tmp/watcher-v3-lazy-payer.json
+          solana-keygen new --no-bip39-passphrase --force --silent -o /tmp/watcher-v3-lazy-program.json
+          solana-test-validator --reset --quiet --ledger /tmp/watcher-v3-lazy-ledger > /tmp/watcher-v3-lazy-validator.log 2>&1 &
+          echo $! > /tmp/watcher-v3-lazy-validator.pid
+          for attempt in $(seq 1 60); do
+            if solana cluster-version --url "$WATCHER_V3_RPC_URL" >/dev/null 2>&1; then break; fi
+            sleep 1
+          done
+          solana airdrop 100 --url "$WATCHER_V3_RPC_URL" --keypair /tmp/watcher-v3-lazy-payer.json
+          solana program deploy target/deploy/watcher_protocol_program.so \
+            --url "$WATCHER_V3_RPC_URL" \
+            --keypair /tmp/watcher-v3-lazy-payer.json \
+            --program-id /tmp/watcher-v3-lazy-program.json
+          solana address -k /tmp/watcher-v3-lazy-program.json > /tmp/watcher-v3-lazy-program-id
+
+      - name: Bootstrap isolated V3 runtime and Phantom-compatible wallet
+        env:
+          WATCHER_V3_PAYER_KEYPAIR: /tmp/watcher-v3-lazy-payer.json
+          WATCHER_V3_RUNTIME_OUT: public/watcher-protocol/v3-local.json
+          WATCHER_V3_PROVER_BASE_PATH: /watcher-prover-v3
+          WATCHER_V3_NETWORK: localnet
+          WATCHER_V3_RELAYER_FEE_LAMPORTS: '0'
+          WATCHER_V3_SHARD_BATCH_SIZE: '4'
+        run: |
+          set -euo pipefail
+          export WATCHER_V3_PROGRAM_ID="$(cat /tmp/watcher-v3-lazy-program-id)"
+          node scripts/watcher-v3-bootstrap.mjs
+          E2E_ADDRESS="$(node --input-type=module - <<'NODE'
+          import { Keypair } from '@solana/web3.js';
+          console.log(Keypair.fromSeed(Buffer.from(process.env.WATCHER_V3_E2E_SEED_HEX, 'hex')).publicKey.toBase58());
+          NODE
+          )"
+          solana airdrop 10 "$E2E_ADDRESS" --url "$WATCHER_V3_RPC_URL"
+
+      - name: Build and serve V3 UI with circuit-scoped prover
+        env:
+          NEXT_PUBLIC_BASE_PATH: ''
+          NEXT_PUBLIC_RPC_URL: http://127.0.0.1:8899
+          NEXT_PUBLIC_WATCHER_V3_RUNTIME_URL: /watcher-protocol/v3-local.json
+          NEXT_PUBLIC_WATCHER_V3_PROVER_BASE: /watcher-prover-v3
+          NEXT_PUBLIC_WATCHER_E2E: '1'
+          NEXT_PUBLIC_WATCHER_E2E_PHANTOM: '1'
+          NEXT_PUBLIC_WATCHER_E2E_SEED: ${{ env.WATCHER_V3_E2E_SEED_HEX }}
+        run: |
+          set -euo pipefail
+          npm run build
+          test -s out/v3/index.html
+          test -s out/watcher-prover-v3/watcher-v3-prover.wasm
+          python3 -m http.server 3000 --directory out > /tmp/watcher-v3-lazy-site.log 2>&1 &
+          echo $! > /tmp/watcher-v3-lazy-site.pid
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent http://127.0.0.1:3000/v3/ >/dev/null; then exit 0; fi
+            sleep 1
+          done
+          exit 1
+
+      - name: Run full Phantom-compatible deposit/withdraw regression
+        env:
+          WATCHER_V3_E2E_URL: http://127.0.0.1:3000/v3/
+          WATCHER_V3_E2E_TIMEOUT_MS: '600000'
+          WATCHER_V3_RUNTIME_PATH: public/watcher-protocol/v3-local.json
+        run: node scripts/watcher-v3-browser-e2e.mjs | tee /tmp/watcher-v3-lazy-browser-e2e.json
+
+      - name: Stop isolated services and remove key material
+        if: always()
+        run: |
+          if test -f /tmp/watcher-v3-lazy-site.pid; then kill "$(cat /tmp/watcher-v3-lazy-site.pid)" || true; fi
+          if test -f /tmp/watcher-v3-lazy-validator.pid; then kill "$(cat /tmp/watcher-v3-lazy-validator.pid)" || true; fi
+          rm -f /tmp/watcher-v3-lazy-payer.json /tmp/watcher-v3-lazy-program.json /tmp/watcher-v3-lazy-program-id

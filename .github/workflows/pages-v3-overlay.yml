@@ -6,6 +6,9 @@ on:
     paths:
       - 'app/v3/**'
       - 'client/watcher/**v3*'
+      - 'client/watcher/browser-prover-v2.mjs'
+      - 'circuits/withdraw/prover_circuit_v2.go'
+      - 'circuits/withdraw/cmd/watcher-v3-prover-wasm/**'
       - 'public/watcher-protocol/v3-devnet.json'
       - 'scripts/watcher-v3-live-pages-smoke.mjs'
   workflow_dispatch:
@@ -157,18 +160,28 @@ jobs:
             --rpc https://api.devnet.solana.com \
             --pin public/watcher-protocol/v2-prover-pin.json
           node scripts/install-pinned-v2-prover.mjs
+
           rm -rf public/watcher-prover-v3
           cp -a public/watcher-prover-v2 public/watcher-prover-v3
-          cp client/watcher/browser-prover-v3-fast.worker.js public/watcher-prover-v3/worker.js
+          rm -f public/watcher-prover-v3/watcher-v2-prover.wasm public/watcher-prover-v3/worker.js
+          GOOS=js GOARCH=wasm go -C circuits/withdraw build \
+            -trimpath -ldflags='-s -w' \
+            -o ../../public/watcher-prover-v3/watcher-v3-prover.wasm \
+            ./cmd/watcher-v3-prover-wasm
+          cp client/watcher/browser-prover-v3-lazy.worker.js public/watcher-prover-v3/worker.js
+
           node --check public/watcher-prover-v3/worker.js
-          grep -F -q 'watcher-v3-zk-assets-v1-' public/watcher-prover-v3/worker.js
-          test -s public/watcher-prover-v3/watcher-v2-prover.wasm
+          grep -F -q 'watcher-v3-zk-assets-v2-' public/watcher-prover-v3/worker.js
+          grep -F -q 'watcherProverV3LoadCircuit' public/watcher-prover-v3/worker.js
+          test -s public/watcher-prover-v3/watcher-v3-prover.wasm
+          test ! -e public/watcher-prover-v3/watcher-v2-prover.wasm
           test -s public/watcher-prover-v3/assets/deposit.pk
           test -s public/watcher-prover-v3/assets/withdraw.pk
+
           npm run build
           test -s out/v3/index.html
           test -s out/watcher-protocol/v3-devnet.json
-          test -s out/watcher-prover-v3/watcher-v2-prover.wasm
+          test -s out/watcher-prover-v3/watcher-v3-prover.wasm
 
       - name: Overlay V3 and prove V1 plus V2 are byte-preserved
         run: |
@@ -194,8 +207,10 @@ jobs:
 
           test -s v1/out/v3/index.html
           test -s v1/out/watcher-prover-v3/worker.js
-          test -s v1/out/watcher-prover-v3/watcher-v2-prover.wasm
-          grep -F -q 'watcher-v3-zk-assets-v1-' v1/out/watcher-prover-v3/worker.js
+          test -s v1/out/watcher-prover-v3/watcher-v3-prover.wasm
+          test ! -e v1/out/watcher-prover-v3/watcher-v2-prover.wasm
+          grep -F -q 'watcher-v3-zk-assets-v2-' v1/out/watcher-prover-v3/worker.js
+          grep -F -q 'watcherProverV3LoadCircuit' v1/out/watcher-prover-v3/worker.js
           test "$(jq -r '.version' v1/out/watcher-protocol/v3-devnet.json)" = 3
           test "$(jq -r '.status' v1/out/watcher-protocol/v3-devnet.json)" = ready
           grep -R -F -q '/watcher-cash/watcher-protocol/v3-devnet.json' v1/out/v3 v1/out/_next || {
@@ -206,7 +221,7 @@ jobs:
             echo 'V3 prover binding was not emitted into the V3 route/chunks' >&2
             exit 1
           }
-          echo 'V1 and V2 fingerprints preserved; V3 fast prover overlay assembled successfully.'
+          echo 'V1 and V2 fingerprints preserved; V3 circuit-scoped prover overlay assembled successfully.'
 
       - name: Configure GitHub Pages
         uses: actions/configure-pages@v5
@@ -240,7 +255,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '24.x'
-      - name: Verify V1, V2, and V3 live routes over HTTPS
+      - name: Verify V1, V2, and circuit-scoped V3 live routes over HTTPS
         env:
           WATCHER_PAGES_URL: https://thetradoor.github.io/watcher-cash/
           WATCHER_V3_EXPECTED_RUNTIME: public/watcher-protocol/v3-devnet.json

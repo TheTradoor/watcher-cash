@@ -2,14 +2,17 @@ name: Watcher V3 Predeploy Sanity
 
 on:
   push:
-    branches: [watcher-protocol-v3, watcher-protocol-v3-fast-prover]
+    branches: [watcher-protocol-v3, watcher-protocol-v3-fast-prover, watcher-protocol-v3-lazy-prover]
     paths:
       - 'app/v3/**'
       - 'client/watcher/**v2*'
       - 'client/watcher/**v3*'
+      - 'circuits/withdraw/prover_circuit_v2.go'
+      - 'circuits/withdraw/cmd/watcher-v3-prover-wasm/**'
       - 'scripts/watcher-v3-bootstrap.mjs'
       - 'scripts/watcher-v3-runtime-verify.mjs'
       - 'scripts/watcher-v3-public-devnet-smoke.mjs'
+      - 'scripts/watcher-v3-live-pages-smoke.mjs'
       - '.github/workflows/watcher-v3-devnet-readiness.yml'
       - '.github/workflows/watcher-v3-persistent-devnet.yml'
       - '.github/workflows/watcher-v3-public-devnet-smoke.yml'
@@ -27,7 +30,7 @@ concurrency:
 jobs:
   sanity:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
         with:
@@ -43,7 +46,7 @@ jobs:
       - name: Install locked dependencies
         run: npm ci --ignore-scripts --no-audit --no-fund
 
-      - name: Syntax-check V3 deploy, smoke, and fast prover worker
+      - name: Syntax-check V3 deploy, smoke, and circuit-scoped prover workers
         run: |
           set -euo pipefail
           node --check scripts/watcher-v3-bootstrap.mjs
@@ -51,14 +54,23 @@ jobs:
           node --check scripts/watcher-v3-public-devnet-smoke.mjs
           node --check scripts/watcher-v3-live-pages-smoke.mjs
           node --check client/watcher/browser-prover-v3-fast.worker.js
+          if test -f client/watcher/browser-prover-v3-lazy.worker.js; then
+            node --check client/watcher/browser-prover-v3-lazy.worker.js
+          fi
 
-      - name: Run V2 proof-surface plus V3 packed-state tests
-        run: >-
-          node --test
-          client/watcher/browser-prover-v2.test.mjs
-          client/watcher/instructions-v3.test.mjs
-          client/watcher/flows-v3.test.mjs
-          client/watcher/vault-v3.test.mjs
+      - name: Run V2 proof-surface plus V3 browser and packed-state tests
+        run: |
+          set -euo pipefail
+          TESTS=(
+            client/watcher/browser-prover-v2.test.mjs
+            client/watcher/instructions-v3.test.mjs
+            client/watcher/flows-v3.test.mjs
+            client/watcher/vault-v3.test.mjs
+          )
+          if test -f client/watcher/browser-prover-v3.test.mjs; then
+            TESTS+=(client/watcher/browser-prover-v3.test.mjs)
+          fi
+          node --test "${TESTS[@]}"
 
       - name: Run V3 Rust packed-state tests
         run: cargo test --quiet --manifest-path programs/watcher-protocol/Cargo.toml --lib --locked 'v3::'

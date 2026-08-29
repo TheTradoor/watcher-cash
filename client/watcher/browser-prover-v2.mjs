@@ -3,6 +3,11 @@ import {
   WITHDRAW_PUBLIC_INPUT_BYTES_V2,
 } from './public-inputs-v2.mjs';
 import { validateProofPayloadV1 } from './prover.mjs';
+import {
+  checkBrowserProverManifestV3,
+  proveDepositWithBrowserProverV3,
+  proveWithdrawWithBrowserProverV3,
+} from './browser-prover-v3.mjs';
 
 export const DEFAULT_BROWSER_PROVER_BASE_V2 = '/watcher-prover-v2';
 
@@ -10,6 +15,11 @@ function normalizeBasePath(value) {
   const text = String(value || DEFAULT_BROWSER_PROVER_BASE_V2).trim();
   if (!text) return DEFAULT_BROWSER_PROVER_BASE_V2;
   return text.replace(/\/+$/, '');
+}
+
+function isV3BasePath(value) {
+  const normalized = normalizeBasePath(value);
+  return /(?:^|\/)watcher-prover-v3$/.test(normalized);
 }
 
 class BrowserProverV2 {
@@ -153,13 +163,22 @@ export function getBrowserProverV2({ basePath = DEFAULT_BROWSER_PROVER_BASE_V2 }
 }
 
 export function checkBrowserProverV2({ basePath, onProgress } = {}) {
+  if (isV3BasePath(basePath)) {
+    return checkBrowserProverManifestV3({ basePath });
+  }
   return getBrowserProverV2({ basePath }).initialize({ onProgress });
 }
 
 export function proveDepositWithBrowserProverV2({ witness, expectedPublicInputs, basePath, onProgress }) {
+  if (isV3BasePath(basePath)) {
+    return proveDepositWithBrowserProverV3({ witness, expectedPublicInputs, basePath, onProgress });
+  }
   return getBrowserProverV2({ basePath }).proveDeposit({ witness, expectedPublicInputs, onProgress });
 }
 
 export function proveWithdrawWithBrowserProverV2({ witness, expectedPublicInputs, basePath, onProgress }) {
+  if (isV3BasePath(basePath)) {
+    return proveWithdrawWithBrowserProverV3({ witness, expectedPublicInputs, basePath, onProgress });
+  }
   return getBrowserProverV2({ basePath }).proveWithdraw({ witness, expectedPublicInputs, onProgress });
 }
