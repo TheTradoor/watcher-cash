@@ -8,6 +8,7 @@ import {
   deriveNullifierShardForSpendV3,
   deriveNullifierShardPdaV3,
   encodeWithdrawDataV3,
+  NULLIFIER_BUCKETS_PER_SHARD_V3,
   NULLIFIER_RECORD_BYTES_V3,
   NULLIFIER_SHARD_COUNT_V3,
   NULLIFIER_SHARD_HEADER_BYTES_V3,
@@ -23,14 +24,15 @@ function bytes(seed) {
   return value;
 }
 
-test('V3 nullifier routing is deterministic and bounded', () => {
+test('V3 nullifier routing is deterministic, bounded, and keeps 65,536 buckets', () => {
   const config = Keypair.generate().publicKey;
   const nullifier = bytes(9);
   const first = routeNullifierV3({ config, nullifier });
   const second = routeNullifierV3({ config, nullifier });
   assert.deepEqual(first, second);
   assert.ok(first.shard >= 0 && first.shard < NULLIFIER_SHARD_COUNT_V3);
-  assert.ok(first.bucket >= 0 && first.bucket < 4096);
+  assert.ok(first.bucket >= 0 && first.bucket < NULLIFIER_BUCKETS_PER_SHARD_V3);
+  assert.equal(NULLIFIER_SHARD_COUNT_V3 * NULLIFIER_BUCKETS_PER_SHARD_V3, 65_536);
 });
 
 test('V3 shard PDA matches spend routing', () => {
@@ -112,7 +114,8 @@ test('V3 withdraw accounts point each active nullifier at its exact shard PDA', 
   for (const account of built.shardAccounts) assert.ok(account instanceof PublicKey);
 });
 
-test('V3 packed storage marginal footprint is 36 bytes per spent note', () => {
+test('V3 packed storage is SBF-safe and grows 36 bytes per spent note', () => {
   assert.equal(NULLIFIER_RECORD_BYTES_V3, 36);
-  assert.equal(NULLIFIER_SHARD_HEADER_BYTES_V3, 16_432);
+  assert.equal(NULLIFIER_SHARD_HEADER_BYTES_V3, 8_240);
+  assert.ok(NULLIFIER_SHARD_HEADER_BYTES_V3 <= 10_240);
 });
