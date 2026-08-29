@@ -34,8 +34,13 @@ const programId = new PublicKey(process.env.WATCHER_V2_PROGRAM_ID);
 const payerPath = process.env.WATCHER_V2_PAYER_KEYPAIR;
 const proverPath = process.env.WATCHER_V2_PROVER || 'circuits/withdraw/fixture-out/v2/watcher-v2-prover';
 const bundlePath = process.env.WATCHER_V2_BUNDLE || 'circuits/withdraw/fixture-out/v2';
-const allowAirdrop = String(process.env.WATCHER_V2_ALLOW_AIRDROP ?? '1') === '1';
-const requiredPayerLamports = BigInt(process.env.WATCHER_V2_REQUIRED_PAYER_LAMPORTS || '20000000000');
+const isLocalRpc = /^https?:\/\/(?:127\.0\.0\.1|localhost)(?::|\/|$)/i.test(rpcUrl);
+const allowAirdrop = process.env.WATCHER_V2_ALLOW_AIRDROP === undefined
+  ? isLocalRpc
+  : String(process.env.WATCHER_V2_ALLOW_AIRDROP) === '1';
+const requiredPayerLamports = BigInt(
+  process.env.WATCHER_V2_REQUIRED_PAYER_LAMPORTS || (isLocalRpc ? '20000000000' : '1000000000'),
+);
 const auxiliaryAccountLamports = BigInt(process.env.WATCHER_V2_AUXILIARY_ACCOUNT_LAMPORTS || '1000000');
 if (!payerPath) throw new Error('WATCHER_V2_PAYER_KEYPAIR is required');
 if (requiredPayerLamports < 100_000_000n) throw new Error('WATCHER_V2_REQUIRED_PAYER_LAMPORTS is too low for a custody smoke test');
@@ -379,6 +384,7 @@ async function main() {
     trackedBalance: u64From(vaultAfterWithdraw.data, VAULT_TRACKED_BALANCE_OFFSET).toString(),
     replayRejected,
     airdropAllowed: allowAirdrop,
+    localRpc: isLocalRpc,
     requiredPayerLamports: requiredPayerLamports.toString(),
     payerBalanceBefore: payerBalanceBefore.toString(),
     payerBalanceAfter: payerBalanceAfter.toString(),
