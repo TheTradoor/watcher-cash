@@ -1,0 +1,136 @@
+name: Watcher V3 Public Devnet Smoke
+
+on:
+  push:
+    branches: [watcher-protocol-v3]
+    paths:
+      - 'public/watcher-protocol/v3-devnet.json'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: watcher-v3-public-devnet-smoke
+  cancel-in-progress: false
+
+env:
+  WATCHER_V3_RPC_URL: https://api.devnet.solana.com
+
+jobs:
+  smoke:
+    if: github.actor != 'github-actions[bot]' || contains(github.event.head_commit.message, 'Publish persistent Watcher V3 devnet runtime')
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: watcher-protocol-v3
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.x'
+          cache: npm
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+          cache-dependency-path: circuits/withdraw/go.sum
+
+      - name: Install locked dependencies
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Restore devnet smoke payer
+        env:
+          PAYER_KEYPAIR_B64: ${{ secrets.WATCHER_DEVNET_DEPLOYER_KEYPAIR_B64 }}
+        run: |
+          set -euo pipefail
+          test -n "$PAYER_KEYPAIR_B64" || { echo 'Missing WATCHER_DEVNET_DEPLOYER_KEYPAIR_B64.' >&2; exit 1; }
+          printf '%s' "$PAYER_KEYPAIR_B64" | base64 --decode > /tmp/watcher-v3-smoke-payer.json
+          chmod 600 /tmp/watcher-v3-smoke-payer.json
+          python3 - <<'PY'
+          import json
+          value = json.load(open('/tmp/watcher-v3-smoke-payer.json'))
+          if not isinstance(value, list) or len(value) != 64:
+              raise SystemExit('WATCHER_DEVNET_DEPLOYER_KEYPAIR_B64 must decode to a 64-byte Solana keypair JSON array')
+          PY
+
+      - name: Verify runtime and shared pinned prover before custody test
+        run: |
+          set -euo pipefail
+          node scripts/watcher-v3-runtime-verify.mjs \
+            --runtime public/watcher-protocol/v3-devnet.json \
+            --rpc "$WATCHER_V3_RPC_URL" \
+            --pin public/watcher-protocol/v2-prover-pin.json \
+            | tee /tmp/watcher-v3-runtime-before-smoke.json
+          test "$(jq -r '.nextIndex' /tmp/watcher-v3-runtime-before-smoke.json)" = 0
+          test "$(jq -r '.trackedBalance' /tmp/watcher-v3-runtime-before-smoke.json)" = 0
+          node scripts/install-pinned-v2-prover.mjs
+          test -s public/watcher-prover-v2/assets/deposit.pk
+          test -s public/watcher-prover-v2/assets/withdraw.pk
+
+      - name: Build exact V2/V3 prover CLI from committed source
+        run: |
+          set -euo pipefail
+          go -C circuits/withdraw build -trimpath -o /tmp/watcher-v3-prover ./cmd/watcher-v2-prover
+          test -s /tmp/watcher-v3-prover
+          node --check scripts/watcher-v3-public-devnet-smoke.mjs
+
+      - name: Run persistent V3 custody smoke on public devnet
+        env:
+          WATCHER_V3_RUNTIME: public/watcher-protocol/v3-devnet.json
+          WATCHER_V3_PAYER_KEYPAIR: /tmp/watcher-v3-smoke-payer.json
+          WATCHER_V3_PROVER: /tmp/watcher-v3-prover
+          WATCHER_V3_BUNDLE: public/watcher-prover-v2/assets
+          WATCHER_V3_SMOKE_AMOUNT_LAMPORTS: '1000000'
+        run: |
+          set -euo pipefail
+          node scripts/watcher-v3-public-devnet-smoke.mjs | tee /tmp/watcher-v3-public-devnet-smoke.json
+          jq -e '.status == "pass"' /tmp/watcher-v3-public-devnet-smoke.json >/dev/null
+          test "$(jq -r '.nextIndex' /tmp/watcher-v3-public-devnet-smoke.json)" = 1
+          test "$(jq -r '.trackedBalance' /tmp/watcher-v3-public-devnet-smoke.json)" = 0
+          test "$(jq -r '.shardGrowthBytes' /tmp/watcher-v3-public-devnet-smoke.json)" = 36
+          test "$(jq -r '.replayRejected' /tmp/watcher-v3-public-devnet-smoke.json)" = true
+          test "$(jq -r '.legacyV2MarkerAccounts' /tmp/watcher-v3-public-devnet-smoke.json)" = 0
+
+      - name: Verify persistent runtime after smoke
+        run: |
+          set -euo pipefail
+          node scripts/watcher-v3-runtime-verify.mjs \
+            --runtime public/watcher-protocol/v3-devnet.json \
+            --rpc "$WATCHER_V3_RPC_URL" \
+            --pin public/watcher-protocol/v2-prover-pin.json \
+            | tee /tmp/watcher-v3-runtime-after-smoke.json
+          test "$(jq -r '.nextIndex' /tmp/watcher-v3-runtime-after-smoke.json)" = 1
+          test "$(jq -r '.trackedBalance' /tmp/watcher-v3-runtime-after-smoke.json)" = 0
+
+      - name: Publish sanitized V3 smoke evidence
+        run: |
+          set -euo pipefail
+          jq '. + {verifiedAt: (now | todateiso8601), sourceCommit: env.GITHUB_SHA}' \
+            /tmp/watcher-v3-public-devnet-smoke.json \
+            > public/watcher-protocol/v3-devnet-smoke.json
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add public/watcher-protocol/v3-devnet-smoke.json
+          git commit -m 'Publish Watcher V3 public devnet smoke evidence'
+          git fetch origin watcher-protocol-v3
+          git rebase origin/watcher-protocol-v3
+          git push origin HEAD:watcher-protocol-v3
+
+      - name: Upload V3 public devnet smoke evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: watcher-v3-public-devnet-smoke
+          path: |
+            /tmp/watcher-v3-public-devnet-smoke.json
+            /tmp/watcher-v3-runtime-before-smoke.json
+            /tmp/watcher-v3-runtime-after-smoke.json
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Remove smoke key material
+        if: always()
+        run: rm -f /tmp/watcher-v3-smoke-payer.json /tmp/watcher-v3-prover
