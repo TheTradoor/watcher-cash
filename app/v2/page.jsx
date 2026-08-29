@@ -287,19 +287,31 @@ export default function WatcherV2Page() {
   }
 
   async function sendDescriptor(descriptor) {
-    const transaction = new Transaction().add(
-      ComputeBudgetProgram.setComputeUnitLimit({ units: GROTH16_COMPUTE_UNITS }),
-      ComputeBudgetProgram.setComputeUnitPrice({ microLamports: COMPUTE_UNIT_PRICE }),
-      descriptorInstruction(descriptor),
-    );
-    const signature = await wallet.sendTransaction(transaction, connection, {
-      skipPreflight: false,
-      preflightCommitment: 'confirmed',
-      maxRetries: 25,
-    });
-    await connection.confirmTransaction(signature, 'confirmed');
-    return signature;
+  if (!publicKey) throw new Error('Wallet is not connected');
+  const latest = await connection.getLatestBlockhash('confirmed');
+  const transaction = new Transaction({
+    feePayer: publicKey,
+    recentBlockhash: latest.blockhash,
+  }).add(
+    ComputeBudgetProgram.setComputeUnitLimit({ units: GROTH16_COMPUTE_UNITS }),
+    ComputeBudgetProgram.setComputeUnitPrice({ microLamports: COMPUTE_UNIT_PRICE }),
+    descriptorInstruction(descriptor),
+  );
+  const signature = await wallet.sendTransaction(transaction, connection, {
+    skipPreflight: false,
+    preflightCommitment: 'confirmed',
+    maxRetries: 25,
+  });
+  const confirmation = await connection.confirmTransaction({
+    signature,
+    blockhash: latest.blockhash,
+    lastValidBlockHeight: latest.lastValidBlockHeight,
+  }, 'confirmed');
+  if (confirmation.value.err) {
+    throw new Error(`V2 transaction failed: ${JSON.stringify(confirmation.value.err)}`);
   }
+  return signature;
+}
 
   async function transact() {
     setError('');

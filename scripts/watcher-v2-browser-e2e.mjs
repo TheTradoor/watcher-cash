@@ -50,10 +50,21 @@ async function connectE2eWallet(page) {
 
 async function runTransaction(page, expectedMessage, label) {
   const primary = page.locator('[data-v2-primary]');
-  await primary.click({ timeout });
-  await waitForText(page.locator('[data-v2-message]'), expectedMessage, label);
+  const message = page.locator('[data-v2-message]');
   const error = page.locator('[data-v2-error="true"]');
-  if (await error.count()) fail(`${label}: ${String(await error.textContent()).trim()}`);
+  await primary.click({ timeout });
+  const deadline = Date.now() + Math.min(timeout, 240_000);
+  while (Date.now() < deadline) {
+    if (await error.count()) {
+      const errorText = String(await error.textContent().catch(() => '')).trim();
+      if (errorText) fail(`${label}: ${errorText}`);
+    }
+    const messageText = String(await message.textContent().catch(() => ''));
+    if (messageText.includes(expectedMessage)) return;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  const proverText = String(await page.locator('[data-v2-prover]').textContent().catch(() => '')).trim();
+  fail(`${label}: timed out waiting for ${JSON.stringify(expectedMessage)}; message=${JSON.stringify(String(await message.textContent().catch(() => '')).trim())}; prover=${JSON.stringify(proverText)}`);
 }
 
 async function main() {
