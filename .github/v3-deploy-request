@@ -1,0 +1,5 @@
+requested_at=2026-08-30T04:34:00+07:00
+mode=persistent-devnet
+force_bootstrap=false
+acknowledge_nonzero_reset=false
+reserved_program_id=AyAyADfWVV3ZRUDGgJ9sEeU5GnYdZ9DyW4t3uW49pUHg
