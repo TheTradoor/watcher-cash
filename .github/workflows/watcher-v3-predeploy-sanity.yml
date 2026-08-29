@@ -13,6 +13,7 @@ on:
       - 'scripts/watcher-v3-runtime-verify.mjs'
       - 'scripts/watcher-v3-public-devnet-smoke.mjs'
       - 'scripts/watcher-v3-live-pages-smoke.mjs'
+      - 'scripts/watcher-v3-recovery-change-e2e.mjs'
       - '.github/workflows/watcher-v3-devnet-readiness.yml'
       - '.github/workflows/watcher-v3-persistent-devnet.yml'
       - '.github/workflows/watcher-v3-public-devnet-smoke.yml'
@@ -46,23 +47,25 @@ jobs:
       - name: Install locked dependencies
         run: npm ci --ignore-scripts --no-audit --no-fund
 
-      - name: Syntax-check V3 deploy, smoke, and circuit-scoped prover workers
+      - name: Syntax-check V3 deploy, smoke, recovery, and circuit-scoped prover workers
         run: |
           set -euo pipefail
           node --check scripts/watcher-v3-bootstrap.mjs
           node --check scripts/watcher-v3-runtime-verify.mjs
           node --check scripts/watcher-v3-public-devnet-smoke.mjs
           node --check scripts/watcher-v3-live-pages-smoke.mjs
+          node --check scripts/watcher-v3-recovery-change-e2e.mjs
           node --check client/watcher/browser-prover-v3-fast.worker.js
           if test -f client/watcher/browser-prover-v3-lazy.worker.js; then
             node --check client/watcher/browser-prover-v3-lazy.worker.js
           fi
 
-      - name: Run V2 proof-surface plus V3 browser and packed-state tests
+      - name: Run V2 proof-surface plus V3 browser, recovery, and packed-state tests
         run: |
           set -euo pipefail
           TESTS=(
             client/watcher/browser-prover-v2.test.mjs
+            client/watcher/backup-v3.test.mjs
             client/watcher/instructions-v3.test.mjs
             client/watcher/flows-v3.test.mjs
             client/watcher/vault-v3.test.mjs
@@ -84,3 +87,4 @@ jobs:
         run: |
           npm run build
           test -s out/v3/index.html
+          grep -R -F -q 'PORTABLE RECOVERY' out/v3 out/_next
