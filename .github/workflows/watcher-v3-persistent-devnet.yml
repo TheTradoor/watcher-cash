@@ -1,313 +1,93 @@
-name: Deploy Persistent Watcher V3 Devnet
+name: Watcher V3 Persistent Devnet - Locked
 
 on:
+  workflow_dispatch:
   push:
     branches: [watcher-protocol-v3]
     paths:
       - '.github/v3-deploy-request'
-  workflow_dispatch:
-    inputs:
-      force_bootstrap:
-        description: Replace published V3 config/tree/vault/shards with a fresh empty development state
-        required: true
-        default: false
-        type: boolean
-      acknowledge_nonzero_reset:
-        description: Permit force_bootstrap when the published V3 vault still tracks private liability
-        required: true
-        default: false
-        type: boolean
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
-  group: watcher-v3-persistent-devnet
+  group: watcher-v3-persistent-devnet-locked
   cancel-in-progress: false
 
 env:
-  SOLANA_VERSION: v4.0.0
   WATCHER_V3_RPC_URL: https://api.devnet.solana.com
-  FORCE_BOOTSTRAP: ${{ github.event_name == 'workflow_dispatch' && inputs.force_bootstrap || false }}
-  ACK_NONZERO_RESET: ${{ github.event_name == 'workflow_dispatch' && inputs.acknowledge_nonzero_reset || false }}
+  WATCHER_V3_PROGRAM_ID: AyAyADfWVV3ZRUDGgJ9sEeU5GnYdZ9DyW4t3uW49pUHg
 
 jobs:
-  deploy:
+  verify-sealed-deployment:
     runs-on: ubuntu-latest
-    timeout-minutes: 150
+    timeout-minutes: 20
     steps:
-      - name: Checkout isolated V3 branch
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           ref: watcher-protocol-v3
-          fetch-depth: 0
-
-      - name: Require persistent V3 deployment secrets
-        env:
-          PAYER_KEYPAIR_B64: ${{ secrets.WATCHER_DEVNET_DEPLOYER_KEYPAIR_B64 }}
-          PROGRAM_KEYPAIR_B64: ${{ secrets.WATCHER_V3_DEVNET_PROGRAM_KEYPAIR_B64 }}
-        run: |
-          set -euo pipefail
-          test -n "$PAYER_KEYPAIR_B64" || { echo 'Missing WATCHER_DEVNET_DEPLOYER_KEYPAIR_B64.' >&2; exit 1; }
-          test -n "$PROGRAM_KEYPAIR_B64" || { echo 'Missing WATCHER_V3_DEVNET_PROGRAM_KEYPAIR_B64.' >&2; exit 1; }
-          printf '%s' "$PAYER_KEYPAIR_B64" | base64 --decode > /tmp/watcher-v3-devnet-payer.json
-          printf '%s' "$PROGRAM_KEYPAIR_B64" | base64 --decode > /tmp/watcher-v3-devnet-program.json
-          chmod 600 /tmp/watcher-v3-devnet-payer.json /tmp/watcher-v3-devnet-program.json
-          python3 - <<'PY'
-          import json
-          for path in ('/tmp/watcher-v3-devnet-payer.json', '/tmp/watcher-v3-devnet-program.json'):
-              value = json.load(open(path))
-              if not isinstance(value, list) or len(value) != 64:
-                  raise SystemExit(f'{path} must decode to a Solana 64-byte keypair JSON array')
-              if any(not isinstance(item, int) or item < 0 or item > 255 for item in value):
-                  raise SystemExit(f'{path} contains invalid keypair bytes')
-          PY
 
       - uses: actions/setup-node@v4
         with:
           node-version: '24.x'
           cache: npm
 
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.25.x'
-          cache-dependency-path: circuits/withdraw/go.sum
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - name: Install locked web dependencies
+      - name: Install locked dependencies
         run: npm ci --ignore-scripts --no-audit --no-fund
 
-      - name: Require exact immutable V2/V3 shared prover pin
-        id: pin
-        run: |
-          set -euo pipefail
-          PIN=public/watcher-protocol/v2-prover-pin.json
-          test -s "$PIN"
-          jq -e '.version == 2 and .status == "pinned-development-setup" and .networkTarget == "solana-devnet"' "$PIN" >/dev/null
-          test "$(jq -r '.treeDepth' "$PIN")" = 16
-          test "$(jq -r '.maxInputs' "$PIN")" = 4
-          TAG=$(jq -r '.releaseTag' "$PIN")
-          BUNDLE_SHA=$(jq -r '.bundleSha256' "$PIN")
-          DEPOSIT_VK_SHA=$(jq -r '.depositVkSha256' "$PIN")
-          WITHDRAW_VK_SHA=$(jq -r '.withdrawVkSha256' "$PIN")
-          test "${#BUNDLE_SHA}" -eq 64
-          test "${TAG##*-}" = "${BUNDLE_SHA:0:16}"
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "bundle_sha=$BUNDLE_SHA" >> "$GITHUB_OUTPUT"
-          echo "deposit_vk_sha=$DEPOSIT_VK_SHA" >> "$GITHUB_OUTPUT"
-          echo "withdraw_vk_sha=$WITHDRAW_VK_SHA" >> "$GITHUB_OUTPUT"
-
-      - name: Download and cryptographically verify shared browser bundle
-        run: node scripts/install-pinned-v2-prover.mjs
-
-      - name: Require committed Rust verifier and V3 code to match shared proof system
-        run: |
-          set -euo pipefail
-          PIN=public/watcher-protocol/v2-prover-pin.json
-          RUST_MANIFEST=programs/watcher-protocol/src/v2/development_prover_manifest_v2.json
-          test "$(jq -r '.depositVkSha256' "$RUST_MANIFEST")" = "$(jq -r '.depositVkSha256' "$PIN")"
-          test "$(jq -r '.withdrawVkSha256' "$RUST_MANIFEST")" = "$(jq -r '.withdrawVkSha256' "$PIN")"
-          node --check scripts/watcher-v3-runtime-verify.mjs
-          node --check scripts/watcher-v3-bootstrap.mjs
-          node --test client/watcher/instructions-v3.test.mjs client/watcher/flows-v3.test.mjs client/watcher/vault-v3.test.mjs
-          cargo test --quiet --manifest-path programs/watcher-protocol/Cargo.toml --lib --locked 'v3::'
-
-      - name: Install Agave SBF toolchain
-        run: |
-          set -euo pipefail
-          curl --fail --location --retry 5 \
-            "https://github.com/anza-xyz/agave/releases/download/${SOLANA_VERSION}/solana-release-x86_64-unknown-linux-gnu.tar.bz2" \
-            --output /tmp/solana-release.tar.bz2
-          mkdir -p /tmp/solana-release
-          tar -xjf /tmp/solana-release.tar.bz2 -C /tmp/solana-release --strip-components=1
-          echo "/tmp/solana-release/bin" >> "$GITHUB_PATH"
-          /tmp/solana-release/bin/solana --version
-          /tmp/solana-release/bin/cargo-build-sbf --version
-
-      - name: Resolve fixed isolated V3 program identity and deployment budget
-        id: identity
-        run: |
-          set -euo pipefail
-          PAYER=/tmp/watcher-v3-devnet-payer.json
-          PROGRAM=/tmp/watcher-v3-devnet-program.json
-          PAYER_ADDRESS=$(solana address --keypair "$PAYER")
-          PROGRAM_ID=$(solana address --keypair "$PROGRAM")
-          for RUNTIME in public/watcher-protocol/devnet.json public/watcher-protocol/v2-devnet.json; do
-            if [ -s "$RUNTIME" ]; then
-              OTHER=$(jq -r '.programId // empty' "$RUNTIME")
-              if [ -n "$OTHER" ] && [ "$OTHER" = "$PROGRAM_ID" ]; then
-                echo 'V3 program id collides with V1/V2. Refusing deployment.' >&2
-                exit 1
-              fi
-            fi
-          done
-          BALANCE=$(solana balance "$PAYER_ADDRESS" --url "$WATCHER_V3_RPC_URL" --lamports | awk '{print $1}')
-          SHARD_RENT=$(node --input-type=module - <<'NODE'
-          import { Connection } from '@solana/web3.js';
-          const c = new Connection(process.env.WATCHER_V3_RPC_URL, 'confirmed');
-          console.log(await c.getMinimumBalanceForRentExemption(8240));
-          NODE
-          )
-          REQUIRED=$(( SHARD_RENT * 32 + 3000000000 ))
-          echo "Persistent V3 payer: $PAYER_ADDRESS"
-          echo "Persistent V3 program id: $PROGRAM_ID"
-          echo "Payer balance: $BALANCE lamports"
-          echo "32 shard header rent: $((SHARD_RENT * 32)) lamports"
-          echo "Readiness floor: $REQUIRED lamports"
-          if [ "${BALANCE:-0}" -lt "$REQUIRED" ]; then
-            echo 'Persistent V3 devnet payer does not have enough SOL for 32 shard headers plus the 3 SOL deployment buffer.' >&2
-            exit 1
-          fi
-          echo "payer=$PAYER_ADDRESS" >> "$GITHUB_OUTPUT"
-          echo "program_id=$PROGRAM_ID" >> "$GITHUB_OUTPUT"
-
-      - name: Preflight published V3 state before any program upgrade
-        id: preflight
-        env:
-          PROGRAM_ID: ${{ steps.identity.outputs.program_id }}
-          PIN_SHA: ${{ steps.pin.outputs.bundle_sha }}
-        run: |
-          set -euo pipefail
-          RUNTIME=public/watcher-protocol/v3-devnet.json
-          REUSE=0
-          TRACKED=0
-          if [ -s "$RUNTIME" ] && jq -e '.status == "ready"' "$RUNTIME" >/dev/null 2>&1; then
-            PUBLISHED_PROGRAM=$(jq -r '.programId // empty' "$RUNTIME")
-            if [ "$PUBLISHED_PROGRAM" != "$PROGRAM_ID" ]; then
-              echo 'Published V3 runtime uses a different program id than WATCHER_V3_DEVNET_PROGRAM_KEYPAIR_B64.' >&2
-              exit 1
-            fi
-            node scripts/watcher-v3-runtime-verify.mjs \
-              --runtime "$RUNTIME" \
-              --rpc "$WATCHER_V3_RPC_URL" \
-              | tee /tmp/watcher-v3-preflight.json
-            TRACKED=$(jq -r '.trackedBalance' /tmp/watcher-v3-preflight.json)
-            PUBLISHED_PIN=$(jq -r '.proverBundleSha256 // empty' "$RUNTIME")
-            if [ "$PUBLISHED_PIN" = "$PIN_SHA" ] && [ "$FORCE_BOOTSTRAP" != true ]; then
-              REUSE=1
-            elif [ "$FORCE_BOOTSTRAP" != true ]; then
-              echo 'Shared proving setup differs from the published V3 runtime.' >&2
-              echo 'Verifier-key rotation requires force_bootstrap=true in development.' >&2
-              exit 1
-            fi
-            if [ "$FORCE_BOOTSTRAP" = true ] && [ "$TRACKED" != 0 ] && [ "$ACK_NONZERO_RESET" != true ]; then
-              echo "Published V3 vault tracks $TRACKED lamports of private liability." >&2
-              echo 'Refusing reset without acknowledge_nonzero_reset=true.' >&2
-              exit 1
-            fi
-          fi
-          echo "reuse=$REUSE" >> "$GITHUB_OUTPUT"
-          echo "tracked=$TRACKED" >> "$GITHUB_OUTPUT"
-
-      - name: Build V3 SBF against the pinned V2/V3 verifying keys
-        run: |
-          set -euo pipefail
-          rm -rf target/v3-devnet-deploy
-          mkdir -p target/v3-devnet-deploy
-          cargo build-sbf \
-            --arch v3 \
-            --manifest-path programs/watcher-protocol/Cargo.toml \
-            --sbf-out-dir target/v3-devnet-deploy
-          test -s target/v3-devnet-deploy/watcher_protocol_program.so
-          sha256sum target/v3-devnet-deploy/watcher_protocol_program.so | tee /tmp/watcher-v3-program-sha256.txt
-
-      - name: Deploy or upgrade only the fixed V3 program id
-        run: |
-          set -euo pipefail
-          solana program deploy \
-            --url "$WATCHER_V3_RPC_URL" \
-            --keypair /tmp/watcher-v3-devnet-payer.json \
-            --program-id /tmp/watcher-v3-devnet-program.json \
-            target/v3-devnet-deploy/watcher_protocol_program.so \
-            | tee /tmp/watcher-v3-deploy.log
-
-      - name: Bootstrap fresh V3 state and all packed shards only when required
-        if: ${{ steps.preflight.outputs.reuse != '1' }}
-        env:
-          WATCHER_V3_PROGRAM_ID: ${{ steps.identity.outputs.program_id }}
-          WATCHER_V3_PAYER_KEYPAIR: /tmp/watcher-v3-devnet-payer.json
-          WATCHER_V3_RUNTIME_OUT: public/watcher-protocol/v3-devnet.json
-          WATCHER_V3_PROVER_BASE_PATH: /watcher-prover-v3
-          WATCHER_V3_NETWORK: devnet
-          WATCHER_V3_RELAYER_FEE_LAMPORTS: '0'
-          WATCHER_V3_SHARD_BATCH_SIZE: '4'
-        run: node scripts/watcher-v3-bootstrap.mjs | tee /tmp/watcher-v3-bootstrap.log
-
-      - name: Seal V3 runtime to exact program, shared prover, and packed geometry
-        env:
-          PROGRAM_ID: ${{ steps.identity.outputs.program_id }}
-          RELEASE_TAG: ${{ steps.pin.outputs.tag }}
-          BUNDLE_SHA: ${{ steps.pin.outputs.bundle_sha }}
-          DEPOSIT_VK_SHA: ${{ steps.pin.outputs.deposit_vk_sha }}
-          WITHDRAW_VK_SHA: ${{ steps.pin.outputs.withdraw_vk_sha }}
+      - name: Verify the persistent V3 deployment is already sealed
         run: |
           set -euo pipefail
           RUNTIME=public/watcher-protocol/v3-devnet.json
           test -s "$RUNTIME"
-          PROGRAM_SHA=$(awk '{print $1}' /tmp/watcher-v3-program-sha256.txt)
-          UPDATED_AT=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
-          TMP=$(mktemp)
-          jq \
-            --arg status ready \
-            --arg programId "$PROGRAM_ID" \
-            --arg proverReleaseTag "$RELEASE_TAG" \
-            --arg proverBundleSha256 "$BUNDLE_SHA" \
-            --arg depositVkSha256 "$DEPOSIT_VK_SHA" \
-            --arg withdrawVkSha256 "$WITHDRAW_VK_SHA" \
-            --arg programSha256 "$PROGRAM_SHA" \
-            --arg sourceCommit "$GITHUB_SHA" \
-            --arg updatedAt "$UPDATED_AT" \
-            '. + {
-              status: $status,
-              network: "devnet",
-              rpcUrl: "https://api.devnet.solana.com",
-              programId: $programId,
-              proverBasePath: "/watcher-prover-v3",
-              proverReleaseTag: $proverReleaseTag,
-              proverBundleSha256: $proverBundleSha256,
-              depositVkSha256: $depositVkSha256,
-              withdrawVkSha256: $withdrawVkSha256,
-              programSha256: $programSha256,
-              sourceCommit: $sourceCommit,
-              updatedAt: $updatedAt
-            }' "$RUNTIME" > "$TMP"
-          mv "$TMP" "$RUNTIME"
-          node scripts/watcher-v3-runtime-verify.mjs \
-            --runtime "$RUNTIME" \
-            --rpc "$WATCHER_V3_RPC_URL" \
-            --pin public/watcher-protocol/v2-prover-pin.json \
-            | tee /tmp/watcher-v3-runtime-verification.json
+          test "$(jq -r '.version' "$RUNTIME")" = 3
+          test "$(jq -r '.network' "$RUNTIME")" = devnet
+          test "$(jq -r '.status' "$RUNTIME")" = ready
+          test "$(jq -r '.programId' "$RUNTIME")" = "$WATCHER_V3_PROGRAM_ID"
+          test "$(jq -r '.proverBasePath' "$RUNTIME")" = '/watcher-cash/watcher-prover-v3'
+          test "$(jq -r '.nullifierShardCount' "$RUNTIME")" = 32
+          test "$(jq -r '.nullifierShards | length' "$RUNTIME")" = 32
 
-      - name: Commit separate V3 public devnet runtime
+          success=0
+          for attempt in 1 2 3 4 5 6; do
+            if node scripts/watcher-v3-runtime-verify.mjs \
+              --runtime "$RUNTIME" \
+              --rpc "$WATCHER_V3_RPC_URL" \
+              --pin public/watcher-protocol/v2-prover-pin.json \
+              > /tmp/watcher-v3-sealed-runtime.json; then
+              success=1
+              cat /tmp/watcher-v3-sealed-runtime.json
+              break
+            fi
+            sleep $((attempt * 5))
+          done
+          test "$success" = 1
+
+      - name: Require the stored program secret to match the sealed program id
+        env:
+          PROGRAM_KEYPAIR_B64: ${{ secrets.WATCHER_V3_DEVNET_PROGRAM_KEYPAIR_B64 }}
         run: |
           set -euo pipefail
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add public/watcher-protocol/v3-devnet.json
-          if git diff --cached --quiet; then
-            echo 'Persistent V3 runtime metadata is unchanged.'
-          else
-            git commit -m 'Publish persistent Watcher V3 devnet runtime'
-            git fetch origin watcher-protocol-v3
-            git rebase origin/watcher-protocol-v3
-            git push origin HEAD:watcher-protocol-v3
-          fi
+          test -n "$PROGRAM_KEYPAIR_B64" || { echo 'Missing WATCHER_V3_DEVNET_PROGRAM_KEYPAIR_B64.' >&2; exit 1; }
+          printf '%s' "$PROGRAM_KEYPAIR_B64" | base64 --decode > /tmp/watcher-v3-locked-program.json
+          chmod 600 /tmp/watcher-v3-locked-program.json
+          node --input-type=module - <<'NODE'
+          import fs from 'node:fs';
+          import { Keypair } from '@solana/web3.js';
+          const expected = process.env.WATCHER_V3_PROGRAM_ID;
+          const value = JSON.parse(fs.readFileSync('/tmp/watcher-v3-locked-program.json', 'utf8'));
+          if (!Array.isArray(value) || value.length !== 64) throw new Error('V3 program secret is not a 64-byte keypair');
+          const actual = Keypair.fromSecretKey(Uint8Array.from(value)).publicKey.toBase58();
+          if (actual !== expected) throw new Error(`V3 program secret resolves to ${actual}, expected ${expected}`);
+          console.log(`Sealed V3 program identity verified: ${actual}`);
+          NODE
 
-      - name: Upload sanitized V3 deployment evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: watcher-v3-persistent-devnet-evidence
-          path: |
-            /tmp/watcher-v3-deploy.log
-            /tmp/watcher-v3-bootstrap.log
-            /tmp/watcher-v3-runtime-verification.json
-            /tmp/watcher-v3-program-sha256.txt
-            public/watcher-protocol/v3-devnet.json
-          if-no-files-found: warn
-          retention-days: 14
+      - name: Confirm no deployment mutation is performed
+        run: |
+          echo 'Watcher V3 initial public-devnet deployment is sealed.'
+          echo 'This workflow intentionally performs no program deploy, no bootstrap, no shard creation, and no state reset.'
+          echo 'Any future program upgrade or state migration must use a new reviewed migration workflow with explicit liability guards.'
 
-      - name: Remove V3 deployment key material
+      - name: Remove temporary key material
         if: always()
-        run: rm -f /tmp/watcher-v3-devnet-payer.json /tmp/watcher-v3-devnet-program.json
+        run: rm -f /tmp/watcher-v3-locked-program.json
