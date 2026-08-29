@@ -1,0 +1,17 @@
+{
+  "version": 2,
+  "status": "pinned-development-setup",
+  "networkTarget": "solana-devnet",
+  "curve": "BN254",
+  "scheme": "Groth16",
+  "treeDepth": 16,
+  "maxInputs": 4,
+  "sourceCommit": "deff72952ebd33ee79e80cc6054658ae26212134",
+  "releaseTag": "watcher-v2-devnet-prover-11943f387bd260be",
+  "bundleFile": "watcher-v2-devnet-browser-bundle.tar.gz",
+  "bundleSha256": "11943f387bd260be424501712645bf0b7ae3a4e1762073d222efcbf6ea11181c",
+  "bundleUrl": "https://github.com/TheTradoor/watcher-cash/releases/download/watcher-v2-devnet-prover-11943f387bd260be/watcher-v2-devnet-browser-bundle.tar.gz",
+  "depositVkSha256": "9eb04482c8ba326bab34fb9d4a5c00b8a4ba9a29320d0db1bc43ea5d9b03d22f",
+  "withdrawVkSha256": "66ce0bb221814c79fc9b43052772efdb3e32d1f10b64301a85ff48d579a6cf97",
+  "warning": "DEVELOPMENT SINGLE-PARTY SETUP ONLY. Never use this bundle with production funds."
+}

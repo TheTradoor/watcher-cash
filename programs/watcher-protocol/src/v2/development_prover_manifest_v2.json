@@ -1,6 +1,6 @@
 {
-  "depositVkSha256": "2a21fb4086e11e4fe657143b5799bd4db94465cd8a528679bdb7dcc28078455a",
+  "depositVkSha256": "9eb04482c8ba326bab34fb9d4a5c00b8a4ba9a29320d0db1bc43ea5d9b03d22f",
   "version": 2,
   "warning": "DEVELOPMENT SINGLE-PARTY SETUP ONLY. Never use this bundle with production funds.",
-  "withdrawVkSha256": "cc7c593fb122723c466d508f3732cc4ce6fc337f69531c6d11a25cf0ab1fcfab"
+  "withdrawVkSha256": "66ce0bb221814c79fc9b43052772efdb3e32d1f10b64301a85ff48d579a6cf97"
 }
