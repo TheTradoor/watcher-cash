@@ -1,0 +1,227 @@
+name: Watcher V2 Devnet Prover Pin
+
+on:
+  push:
+    branches: [watcher-protocol-v2]
+    paths:
+      - '.github/workflows/watcher-v2-prover-pin.yml'
+      - '.github/v2-prover-pin-request'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: watcher-v2-devnet-prover-pin
+  cancel-in-progress: false
+
+env:
+  SOLANA_VERSION: v4.0.0
+
+jobs:
+  pin:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: watcher-protocol-v2
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+          cache-dependency-path: circuits/withdraw/go.sum
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.x'
+          cache: npm
+
+      - name: Generate one exact V2 Groth16 setup
+        working-directory: circuits/withdraw
+        run: |
+          set -euo pipefail
+          rm -rf fixture-out/v2-pinned
+          go run ./cmd/watcher-v2-setup \
+            --bundle-out fixture-out/v2-pinned \
+            --rust-out ../../programs/watcher-protocol/src/v2
+          go test -v -run '^(TestCircuitV2|TestDepositCircuitV2|TestProverV2)' .
+
+      - name: Build browser WASM from the same circuit source
+        working-directory: circuits/withdraw
+        run: |
+          set -euo pipefail
+          GOOS=js GOARCH=wasm go build \
+            -trimpath \
+            -ldflags='-s -w' \
+            -o fixture-out/v2-pinned/watcher-v2-prover.wasm \
+            ./cmd/watcher-v2-prover-wasm
+          WASM_EXEC="$(go env GOROOT)/lib/wasm/wasm_exec.js"
+          if [ ! -f "$WASM_EXEC" ]; then
+            WASM_EXEC="$(go env GOROOT)/misc/wasm/wasm_exec.js"
+          fi
+          cp "$WASM_EXEC" fixture-out/v2-pinned/wasm_exec.js
+          test -s fixture-out/v2-pinned/watcher-v2-prover.wasm
+          test -s fixture-out/v2-pinned/manifest.json
+
+      - name: Test Rust verifier against generated fixtures
+        run: cargo test --quiet --manifest-path programs/watcher-protocol/Cargo.toml --lib --locked 'v2::'
+
+      - name: Install Agave SBF toolchain
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 \
+            "https://github.com/anza-xyz/agave/releases/download/${SOLANA_VERSION}/solana-release-x86_64-unknown-linux-gnu.tar.bz2" \
+            --output /tmp/solana-release.tar.bz2
+          mkdir -p /tmp/solana-release
+          tar -xjf /tmp/solana-release.tar.bz2 -C /tmp/solana-release --strip-components=1
+          echo "/tmp/solana-release/bin" >> "$GITHUB_PATH"
+          /tmp/solana-release/bin/solana --version
+          /tmp/solana-release/bin/cargo-build-sbf --version
+
+      - name: Build deployable SBF against the pinned verifying keys
+        run: |
+          set -euo pipefail
+          rm -rf target/v2-pinned-deploy
+          mkdir -p target/v2-pinned-deploy
+          cargo build-sbf \
+            --arch v3 \
+            --manifest-path programs/watcher-protocol/Cargo.toml \
+            --sbf-out-dir target/v2-pinned-deploy
+          test -s target/v2-pinned-deploy/watcher_protocol_program.so
+
+      - name: Assemble content-addressed browser bundle
+        id: bundle
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/watcher-v2-pin
+          mkdir -p /tmp/watcher-v2-pin/watcher-prover-v2/assets
+          cp circuits/withdraw/fixture-out/v2-pinned/watcher-v2-prover.wasm /tmp/watcher-v2-pin/watcher-prover-v2/
+          cp circuits/withdraw/fixture-out/v2-pinned/wasm_exec.js /tmp/watcher-v2-pin/watcher-prover-v2/
+          cp client/watcher/browser-prover-v2.worker.js /tmp/watcher-v2-pin/watcher-prover-v2/worker.js
+          for name in deposit.r1cs deposit.pk deposit.vk withdraw.r1cs withdraw.pk withdraw.vk manifest.json; do
+            cp "circuits/withdraw/fixture-out/v2-pinned/$name" "/tmp/watcher-v2-pin/watcher-prover-v2/assets/$name"
+          done
+          tar -C /tmp/watcher-v2-pin -czf /tmp/watcher-v2-devnet-browser-bundle.tar.gz watcher-prover-v2
+          BUNDLE_SHA="$(sha256sum /tmp/watcher-v2-devnet-browser-bundle.tar.gz | awk '{print $1}')"
+          TAG="watcher-v2-devnet-prover-${BUNDLE_SHA:0:16}"
+          echo "$BUNDLE_SHA  watcher-v2-devnet-browser-bundle.tar.gz" > /tmp/watcher-v2-devnet-browser-bundle.tar.gz.sha256
+          echo "bundle_sha=$BUNDLE_SHA" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "source_sha=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+          echo "Pinned V2 browser bundle: $TAG ($BUNDLE_SHA)"
+
+      - name: Create public V2 bundle pin manifest
+        env:
+          BUNDLE_SHA: ${{ steps.bundle.outputs.bundle_sha }}
+          TAG: ${{ steps.bundle.outputs.tag }}
+          SOURCE_SHA: ${{ steps.bundle.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p public/watcher-protocol
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+
+          verifier = json.loads(Path('programs/watcher-protocol/src/v2/development_prover_manifest_v2.json').read_text())
+          repo = os.environ['GITHUB_REPOSITORY']
+          tag = os.environ['TAG']
+          payload = {
+              'version': 2,
+              'status': 'pinned-development-setup',
+              'networkTarget': 'solana-devnet',
+              'curve': 'BN254',
+              'scheme': 'Groth16',
+              'treeDepth': 16,
+              'maxInputs': 4,
+              'sourceCommit': os.environ['SOURCE_SHA'],
+              'releaseTag': tag,
+              'bundleFile': 'watcher-v2-devnet-browser-bundle.tar.gz',
+              'bundleSha256': os.environ['BUNDLE_SHA'],
+              'bundleUrl': f'https://github.com/{repo}/releases/download/{tag}/watcher-v2-devnet-browser-bundle.tar.gz',
+              'depositVkSha256': verifier['depositVkSha256'],
+              'withdrawVkSha256': verifier['withdrawVkSha256'],
+              'warning': 'DEVELOPMENT SINGLE-PARTY SETUP ONLY. Never use this bundle with production funds.',
+          }
+          Path('public/watcher-protocol/v2-prover-pin.json').write_text(json.dumps(payload, indent=2) + '\n')
+          Path('/tmp/watcher-v2-devnet-prover-pin.json').write_text(json.dumps(payload, indent=2) + '\n')
+          PY
+          cat public/watcher-protocol/v2-prover-pin.json
+
+      - name: Commit pinned verifier fixtures and manifest
+        id: commit
+        env:
+          TAG: ${{ steps.bundle.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add \
+            programs/watcher-protocol/src/v2/dev_deposit_vk_array.in \
+            programs/watcher-protocol/src/v2/dev_withdraw_vk_array.in \
+            programs/watcher-protocol/src/v2/dev_deposit_proof_array.in \
+            programs/watcher-protocol/src/v2/dev_deposit_public_inputs_array.in \
+            programs/watcher-protocol/src/v2/dev_withdraw_proof_array.in \
+            programs/watcher-protocol/src/v2/dev_withdraw_public_inputs_array.in \
+            programs/watcher-protocol/src/v2/development_prover_manifest_v2.json \
+            public/watcher-protocol/v2-prover-pin.json
+          git commit -m "Pin V2 devnet prover ${TAG#watcher-v2-devnet-prover-}"
+          git fetch origin watcher-protocol-v2
+          git rebase origin/watcher-protocol-v2
+          git push origin HEAD:watcher-protocol-v2
+          PIN_COMMIT="$(git rev-parse HEAD)"
+          echo "pin_commit=$PIN_COMMIT" >> "$GITHUB_OUTPUT"
+
+      - name: Publish non-overwritable V2 development release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.bundle.outputs.tag }}
+          PIN_COMMIT: ${{ steps.commit.outputs.pin_commit }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Refusing to overwrite existing pinned V2 release: $TAG" >&2
+            exit 1
+          fi
+          gh release create "$TAG" \
+            --target "$PIN_COMMIT" \
+            --prerelease \
+            --title "Watcher V2 devnet prover ${TAG#watcher-v2-devnet-prover-}" \
+            --notes 'Pinned development-only Watcher V2 BN254/Groth16 browser proving bundle. The release tag is derived from the bundle SHA-256. Never use with production funds.'
+          gh release upload "$TAG" \
+            /tmp/watcher-v2-devnet-browser-bundle.tar.gz \
+            /tmp/watcher-v2-devnet-browser-bundle.tar.gz.sha256 \
+            /tmp/watcher-v2-devnet-prover-pin.json
+
+      - name: Verify released bytes by SHA-256
+        env:
+          TAG: ${{ steps.bundle.outputs.tag }}
+          BUNDLE_SHA: ${{ steps.bundle.outputs.bundle_sha }}
+        run: |
+          set -euo pipefail
+          URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/watcher-v2-devnet-browser-bundle.tar.gz"
+          curl --fail --location --retry 5 "$URL" -o /tmp/released-v2-bundle.tar.gz
+          ACTUAL="$(sha256sum /tmp/released-v2-bundle.tar.gz | awk '{print $1}')"
+          test "$ACTUAL" = "$BUNDLE_SHA"
+          rm -rf /tmp/released-v2
+          mkdir -p /tmp/released-v2
+          tar -xzf /tmp/released-v2-bundle.tar.gz -C /tmp/released-v2
+          test -s /tmp/released-v2/watcher-prover-v2/watcher-v2-prover.wasm
+          test -s /tmp/released-v2/watcher-prover-v2/assets/manifest.json
+          echo "Released V2 bundle verified: $ACTUAL"
+
+      - name: Upload pinned bundle as short-lived CI artifact too
+        uses: actions/upload-artifact@v4
+        with:
+          name: watcher-v2-devnet-prover-${{ steps.bundle.outputs.bundle_sha }}
+          path: |
+            /tmp/watcher-v2-devnet-browser-bundle.tar.gz
+            /tmp/watcher-v2-devnet-browser-bundle.tar.gz.sha256
+            /tmp/watcher-v2-devnet-prover-pin.json
+            target/v2-pinned-deploy/watcher_protocol_program.so
+          if-no-files-found: error
+          retention-days: 7
