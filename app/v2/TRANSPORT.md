@@ -14,3 +14,7 @@ For each deposit or withdrawal the UI:
 This is intentionally explicit. Browser wallets and deterministic test adapters must receive an already well-formed transaction rather than relying on adapter-specific blockhash preparation.
 
 The browser regression also checks UI errors while a transaction is running so transport failures fail fast instead of being mistaken for a long-running Groth16 proof.
+
+## Public Pages isolation
+
+The public `/v2/` route is published as an overlay on top of the immutable V1 Pages artifact. The overlay deployment must preserve the byte hash of the V1 root page and V1 runtime while adding only the V2 route, V2 runtime, and pinned V2 prover assets.
