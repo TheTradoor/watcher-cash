@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  checkBrowserProverV2,
   getBrowserProverV2,
   proveDepositWithBrowserProverV2,
   proveWithdrawWithBrowserProverV2,
@@ -67,6 +68,37 @@ class FakeWorker {
   }
 }
 
+class SlowInitWorker extends FakeWorker {
+  postMessage(message) {
+    if (message.type !== 'init') {
+      super.postMessage(message);
+      return;
+    }
+    queueMicrotask(() => {
+      this.onmessage?.({ data: {
+        type: 'progress',
+        payload: {
+          stage: 'assets',
+          message: 'Loading matched proving assets…',
+          progress: 0.5,
+        },
+      } });
+    });
+    setTimeout(() => {
+      this.onmessage?.({ data: {
+        id: message.id,
+        type: 'ready',
+        payload: {
+          status: 'ready',
+          version: 2,
+          bundleDigest: '33'.repeat(32),
+          circuits: ['deposit-v2', 'withdraw-v2'],
+        },
+      } });
+    }, 25);
+  }
+}
+
 test('V2 browser prover uses an isolated worker path and validates deposit proof bytes', async () => {
   const previousWorker = globalThis.Worker;
   globalThis.Worker = FakeWorker;
@@ -122,6 +154,29 @@ test('V2 browser prover rejects public inputs that do not match the client state
     );
   } finally {
     getBrowserProverV2({ basePath: '/watcher-prover-v2-mismatch-test' }).terminate();
+    globalThis.Worker = previousWorker;
+  }
+});
+
+test('a late foreground listener immediately receives shared prover initialization progress', async () => {
+  const previousWorker = globalThis.Worker;
+  globalThis.Worker = SlowInitWorker;
+  const basePath = '/watcher-prover-v3-late-listener-test';
+  try {
+    const background = checkBrowserProverV2({ basePath });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+
+    const seen = [];
+    const foreground = checkBrowserProverV2({
+      basePath,
+      onProgress: (progress) => seen.push(progress),
+    });
+
+    const [, ready] = await Promise.all([background, foreground]);
+    assert.equal(ready.bundleDigest, '33'.repeat(32));
+    assert.ok(seen.some((progress) => progress?.stage === 'assets' && progress?.progress === 0.5));
+  } finally {
+    getBrowserProverV2({ basePath }).terminate();
     globalThis.Worker = previousWorker;
   }
 });
