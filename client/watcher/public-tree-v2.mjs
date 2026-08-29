@@ -30,13 +30,6 @@ function normalizeCommitments(values) {
   });
 }
 
-function bytesEqual(left, right) {
-  if (left.length !== right.length) return false;
-  let difference = 0;
-  for (let index = 0; index < left.length; index += 1) difference |= left[index] ^ right[index];
-  return difference === 0;
-}
-
 function isZero32(bytes) {
   return bytes.length === 32 && bytes.every((value) => value === 0);
 }
@@ -78,9 +71,7 @@ function instructionBytes(instruction) {
 
 function accountKeys(message) {
   if (Array.isArray(message?.staticAccountKeys)) return message.staticAccountKeys;
-  if (Array.isArray(message?.accountKeys)) {
-    return message.accountKeys.map((value) => value?.pubkey || value);
-  }
+  if (Array.isArray(message?.accountKeys)) return message.accountKeys.map((value) => value?.pubkey || value);
   if (typeof message?.getAccountKeys === 'function') {
     try {
       const resolved = message.getAccountKeys();
@@ -156,30 +147,29 @@ function appendEventsFromTransaction(transaction, programId) {
 
 async function fetchTransactions(connection, signatures, commitment) {
   const options = { commitment, maxSupportedTransactionVersion: 0 };
-  if (typeof connection.getTransactions === 'function') {
-    return connection.getTransactions(signatures, options);
-  }
+  if (typeof connection.getTransactions === 'function') return connection.getTransactions(signatures, options);
   if (typeof connection.getTransaction !== 'function') {
     throw new TypeError('connection.getTransactions or connection.getTransaction is required');
   }
   return Promise.all(signatures.map((signature) => connection.getTransaction(signature, options)));
 }
 
-export function loadPublicTreeCacheV2({
-  storage = globalThis.localStorage,
-  scope,
-} = {}) {
-  if (!storage || typeof storage.getItem !== 'function') {
-    throw new Error('Local storage is unavailable for the V2 public tree cache');
-  }
+function canRebuildFromChain(connection, chain) {
+  return Boolean(
+    chain?.owner
+    && typeof chain.owner.toBytes === 'function'
+    && connection
+    && typeof connection.getSignaturesForAddress === 'function'
+    && (typeof connection.getTransactions === 'function' || typeof connection.getTransaction === 'function'),
+  );
+}
+
+export function loadPublicTreeCacheV2({ storage = globalThis.localStorage, scope } = {}) {
+  if (!storage || typeof storage.getItem !== 'function') throw new Error('Local storage is unavailable for the V2 public tree cache');
   const raw = storage.getItem(storageName(scope));
   if (!raw) return null;
   let parsed;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    throw new Error('V2 public tree cache is malformed');
-  }
+  try { parsed = JSON.parse(raw); } catch { throw new Error('V2 public tree cache is malformed'); }
   if (parsed?.version !== CACHE_VERSION_V2) throw new Error('Unsupported V2 public tree cache version');
   const epoch = Number(parsed.epoch);
   if (!Number.isSafeInteger(epoch) || epoch < 0) throw new Error('V2 public tree cache epoch is invalid');
@@ -193,15 +183,8 @@ export function loadPublicTreeCacheV2({
   });
 }
 
-export function savePublicTreeCacheV2({
-  storage = globalThis.localStorage,
-  scope,
-  epoch,
-  commitments,
-} = {}) {
-  if (!storage || typeof storage.setItem !== 'function') {
-    throw new Error('Local storage is unavailable for the V2 public tree cache');
-  }
+export function savePublicTreeCacheV2({ storage = globalThis.localStorage, scope, epoch, commitments } = {}) {
+  if (!storage || typeof storage.setItem !== 'function') throw new Error('Local storage is unavailable for the V2 public tree cache');
   if (!Number.isSafeInteger(epoch) || epoch < 0) throw new RangeError('V2 tree epoch is invalid');
   const values = normalizeCommitments(commitments);
   const tree = buildSparseMerkleTreeV2(values, { epoch });
@@ -217,9 +200,7 @@ export function savePublicTreeCacheV2({
 
 export function appendPublicTreeCacheV2({ storage = globalThis.localStorage, scope, epoch, commitment }) {
   const current = loadPublicTreeCacheV2({ storage, scope });
-  if (current && current.epoch !== epoch) {
-    throw new Error('V2 public tree cache belongs to another epoch');
-  }
+  if (current && current.epoch !== epoch) throw new Error('V2 public tree cache belongs to another epoch');
   const commitments = current ? [...current.commitments] : [];
   commitments.push(BigInt(commitment));
   return savePublicTreeCacheV2({ storage, scope, epoch, commitments });
@@ -238,9 +219,11 @@ export async function rebuildPublicTreeCacheFromChainV2({
   if (!connection || typeof connection.getSignaturesForAddress !== 'function') {
     throw new TypeError('connection.getSignaturesForAddress is required');
   }
-  const program = programId instanceof PublicKey ? programId : new PublicKey(programId);
   const treeAddress = activeTree instanceof PublicKey ? activeTree : new PublicKey(activeTree);
   const chain = await fetchActiveTreeV2({ connection, activeTree: treeAddress, commitment });
+  const owner = programId || chain.owner;
+  if (!owner) throw new Error('Cannot derive the Watcher V2 program id from the active-tree account');
+  const program = owner instanceof PublicKey ? owner : new PublicKey(owner);
   const target = chain.nextIndex;
   if (target === 0) {
     const cache = savePublicTreeCacheV2({ storage, scope, epoch: Number(chain.epoch), commitments: [] });
@@ -264,8 +247,7 @@ export async function rebuildPublicTreeCacheFromChainV2({
     const signatures = successful.map((entry) => entry.signature);
     const transactions = await fetchTransactions(connection, signatures, commitment);
     for (let index = 0; index < successful.length; index += 1) {
-      const transaction = transactions[index];
-      const events = appendEventsFromTransaction(transaction, program);
+      const events = appendEventsFromTransaction(transactions[index], program);
       if (events.length > 0) {
         newestFirst.push({ signature: successful[index].signature, events });
         appendCount += events.length;
@@ -281,37 +263,22 @@ export async function rebuildPublicTreeCacheFromChainV2({
   if (chronological.length < target) {
     throw new Error(`Could only reconstruct ${chronological.length} of ${target} V2 public commitments from chain history`);
   }
-  if (chronological.length > target) {
-    chronological.splice(0, chronological.length - target);
-  }
+  if (chronological.length > target) chronological.splice(0, chronological.length - target);
 
   let tree = buildSparseMerkleTreeV2([], { epoch: Number(chain.epoch) });
   const commitments = [];
   for (let index = 0; index < chronological.length; index += 1) {
     const event = chronological[index];
     const transition = getMerkleAppendTransitionV2(tree, event.commitment);
-    if (transition.newRoot !== event.newRoot) {
-      throw new Error(`V2 chain history root mismatch at append ${index}`);
-    }
+    if (transition.newRoot !== event.newRoot) throw new Error(`V2 chain history root mismatch at append ${index}`);
     commitments.push(event.commitment);
     tree = transition.tree;
   }
   if (tree.count !== target || tree.root !== chain.currentRoot) {
     throw new Error('Reconstructed V2 public tree does not match the on-chain active tree');
   }
-  const cache = savePublicTreeCacheV2({
-    storage,
-    scope,
-    epoch: Number(chain.epoch),
-    commitments,
-  });
-  return Object.freeze({
-    chain,
-    cache,
-    tree: cache.tree,
-    scannedSignatures,
-    appendEvents: chronological.length,
-  });
+  const cache = savePublicTreeCacheV2({ storage, scope, epoch: Number(chain.epoch), commitments });
+  return Object.freeze({ chain, cache, tree: cache.tree, scannedSignatures, appendEvents: chronological.length });
 }
 
 export async function verifyPublicTreeCacheV2({
@@ -320,20 +287,46 @@ export async function verifyPublicTreeCacheV2({
   scope,
   storage = globalThis.localStorage,
   commitment = 'confirmed',
+  rebuildFromChain = true,
 } = {}) {
   const chain = await fetchActiveTreeV2({ connection, activeTree, commitment });
   const cached = loadPublicTreeCacheV2({ storage, scope });
 
+  if (!cached && chain.nextIndex === 0) {
+    const initialized = savePublicTreeCacheV2({ storage, scope, epoch: Number(chain.epoch), commitments: [] });
+    return Object.freeze({ chain, cache: initialized, tree: initialized.tree, status: 'ready', rebuilt: false });
+  }
+
+  const cacheMatches = Boolean(
+    cached
+    && BigInt(cached.epoch) === chain.epoch
+    && cached.tree.count === chain.nextIndex
+    && cached.tree.root === chain.currentRoot,
+  );
+  if (cacheMatches) {
+    return Object.freeze({ chain, cache: cached, tree: cached.tree, status: 'ready', rebuilt: false });
+  }
+
+  if (rebuildFromChain && canRebuildFromChain(connection, chain)) {
+    const rebuilt = await rebuildPublicTreeCacheFromChainV2({
+      connection,
+      programId: chain.owner,
+      activeTree,
+      scope,
+      storage,
+      commitment,
+    });
+    return Object.freeze({
+      chain: rebuilt.chain,
+      cache: rebuilt.cache,
+      tree: rebuilt.tree,
+      status: 'ready',
+      rebuilt: true,
+      scannedSignatures: rebuilt.scannedSignatures,
+    });
+  }
+
   if (!cached) {
-    if (chain.nextIndex === 0) {
-      const initialized = savePublicTreeCacheV2({
-        storage,
-        scope,
-        epoch: Number(chain.epoch),
-        commitments: [],
-      });
-      return Object.freeze({ chain, cache: initialized, tree: initialized.tree, status: 'ready' });
-    }
     return Object.freeze({
       chain,
       cache: null,
@@ -342,7 +335,6 @@ export async function verifyPublicTreeCacheV2({
       error: 'This browser does not have the public commitment history for the current V2 tree yet.',
     });
   }
-
   if (BigInt(cached.epoch) !== chain.epoch) {
     return Object.freeze({
       chain,
@@ -352,14 +344,11 @@ export async function verifyPublicTreeCacheV2({
       error: 'The local V2 tree cache is from another epoch.',
     });
   }
-  if (cached.tree.count !== chain.nextIndex || cached.tree.root !== chain.currentRoot) {
-    return Object.freeze({
-      chain,
-      cache: cached,
-      tree: cached.tree,
-      status: 'stale',
-      error: 'The local V2 public tree cache is behind the on-chain tree. Sync it before generating a proof.',
-    });
-  }
-  return Object.freeze({ chain, cache: cached, tree: cached.tree, status: 'ready' });
+  return Object.freeze({
+    chain,
+    cache: cached,
+    tree: cached.tree,
+    status: 'stale',
+    error: 'The local V2 public tree cache is behind the on-chain tree. Sync it before generating a proof.',
+  });
 }
