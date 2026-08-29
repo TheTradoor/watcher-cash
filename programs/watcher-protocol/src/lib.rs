@@ -12,6 +12,7 @@ pub mod processor;
 pub mod public_inputs;
 pub mod root_history;
 pub mod v2;
+pub mod v3;
 pub mod verifier;
 
 pub use processor::process_instruction;
