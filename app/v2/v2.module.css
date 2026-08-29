@@ -241,6 +241,34 @@
 .note[data-note-status='spent'] { opacity: .5; }
 .note button { color: #ffb0b0; background: rgba(255, 100, 100, .07); border-radius: 999px; padding: 7px 9px; font-size: 10px; }
 
+.backupBlock {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  margin: 18px 0 4px;
+  padding: 14px;
+  border: 1px solid rgba(184, 255, 87, .12);
+  border-radius: 13px;
+  background: rgba(184, 255, 87, .025);
+}
+.backupBlock > div:first-child { display: grid; gap: 5px; max-width: 650px; }
+.backupBlock span { color: rgba(235, 241, 229, .48); font-size: 11px; line-height: 1.45; }
+.backupActions { display: flex; gap: 8px; flex: 0 0 auto; }
+.backupActions button {
+  appearance: none;
+  border: 1px solid rgba(255, 255, 255, .09);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, .05);
+  color: rgba(235, 241, 229, .75);
+  font: inherit;
+  font-size: 10px;
+  padding: 8px 11px;
+  cursor: pointer;
+}
+.backupActions button:hover { border-color: rgba(184, 255, 87, .28); color: #dfffba; }
+.hiddenFile { display: none; }
+
 .footer { padding-top: 24px; text-align: center; color: rgba(235, 241, 229, .28); font-size: 9px; letter-spacing: .15em; }
 
 @media (max-width: 780px) {
@@ -255,4 +283,7 @@
   .preview { flex-direction: column; gap: 5px; }
   .note { grid-template-columns: 1fr 1fr; }
   .note button { grid-column: 1 / -1; justify-self: start; }
+  .backupBlock { align-items: stretch; flex-direction: column; }
+  .backupActions { display: grid; grid-template-columns: 1fr 1fr; }
+  .backupActions button { width: 100%; }
 }
