@@ -12,7 +12,14 @@ export * from './merkle-v2.mjs';
 export * from './selection-v2.mjs';
 export * from './instructions-v2.mjs';
 export * from './bindings-v2.mjs';
-export * from './public-inputs-v2.mjs';
+export {
+  DEPOSIT_PUBLIC_FIELDS_V2,
+  WITHDRAW_PUBLIC_FIELDS_V2,
+  DEPOSIT_PUBLIC_INPUT_BYTES_V2,
+  WITHDRAW_PUBLIC_INPUT_BYTES_V2,
+  reconstructDepositPublicInputsV2,
+  reconstructWithdrawPublicInputsV2,
+} from './public-inputs-v2.mjs';
 export * from './browser-prover-v2.mjs';
 export * from './state-v2.mjs';
 export * from './public-tree-v2.mjs';
