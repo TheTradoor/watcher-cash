@@ -1,0 +1,36 @@
+name: Watcher V2 Live Pages Smoke
+
+on:
+  push:
+    branches: [watcher-protocol-v2]
+    paths:
+      - 'scripts/watcher-v2-live-pages-smoke.mjs'
+      - '.github/workflows/watcher-v2-live-pages-smoke.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: watcher-v2-live-pages-smoke
+  cancel-in-progress: true
+
+jobs:
+  live-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: watcher-protocol-v2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.x'
+
+      - name: Verify deployed V1 root and V2 overlay over HTTPS
+        env:
+          WATCHER_PAGES_URL: https://thetradoor.github.io/watcher-cash/
+          WATCHER_LIVE_SMOKE_ATTEMPTS: '30'
+          WATCHER_LIVE_SMOKE_DELAY_MS: '5000'
+        run: node scripts/watcher-v2-live-pages-smoke.mjs
