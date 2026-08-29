@@ -31,3 +31,4 @@ export * from './instructions-v3.mjs';
 export * from './flows-v3.mjs';
 export * from './vault-v3.mjs';
 export * from './browser-prover-v3.mjs';
+export * from './backup-v3.mjs';
