@@ -1,0 +1,101 @@
+name: Apply V3 Foreground Transaction Fix
+
+on:
+  push:
+    branches: [watcher-protocol-v3-foreground-fix]
+    paths:
+      - '.github/workflows/apply-v3-foreground-fix.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: watcher-protocol-v3-foreground-fix
+          fetch-depth: 0
+
+      - name: Apply exact V3 foreground mutex and visible-progress patch
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('app/v3/page.jsx')
+          text = path.read_text()
+
+          def replace_once(old, new, label):
+              global text
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'{label}: expected exactly one match, found {count}')
+              text = text.replace(old, new, 1)
+
+          replace_once(
+              "import { useCallback, useEffect, useMemo, useState } from 'react';",
+              "import { useCallback, useEffect, useMemo, useRef, useState } from 'react';",
+              'react import',
+          )
+
+          replace_once(
+              "  const [walletBalance, setWalletBalance] = useState(0n);\n",
+              "  const [walletBalance, setWalletBalance] = useState(0n);\n  const inFlightRef = useRef(false);\n",
+              'foreground mutex ref',
+          )
+
+          replace_once(
+              "  async function transact() {\n    setError('');\n    try {",
+              "  async function transact() {\n    if (inFlightRef.current) return;\n    inFlightRef.current = true;\n    setError('');\n    setBusy('prepare');\n    try {",
+              'transaction entry lock',
+          )
+
+          replace_once(
+              "      const current = await refreshTree({ syncNotes: true });\n      if (!current || current.status !== 'ready') throw new Error(current?.error || 'V3 public tree cache is not ready');\n      const sourceRecords = current.records || records;\n      await ensureProver();\n      const value = parseSol(amount);",
+              "      setMessage('Preparing V3 transaction: syncing private note state and loading the browser prover…');\n      const [current] = await Promise.all([\n        refreshTree({ syncNotes: true }),\n        ensureProver(),\n      ]);\n      if (!current || current.status !== 'ready') throw new Error(current?.error || 'V3 public tree cache is not ready');\n      const sourceRecords = current.records || records;\n      const value = parseSol(amount);",
+              'parallel foreground preparation',
+          )
+
+          replace_once(
+              "    } finally {\n      setBusy('');\n    }\n  }",
+              "    } finally {\n      inFlightRef.current = false;\n      setBusy('');\n    }\n  }",
+              'transaction unlock',
+          )
+
+          replace_once(
+              "            data-v3-primary\n            onClick={transact}",
+              "            data-v3-primary\n            data-v3-busy={busy || 'idle'}\n            onClick={transact}",
+              'busy instrumentation',
+          )
+
+          path.write_text(text)
+
+          e2e = Path('scripts/watcher-v3-browser-e2e.mjs')
+          script = e2e.read_text()
+          old = """  await primary.click({ timeout });\n  const deadline = Date.now() + Math.min(timeout, 300_000);\n"""
+          new = """  await primary.click({ timeout });\n  await page.waitForFunction(\n    (expected) => {\n      const button = document.querySelector('[data-v3-primary]');\n      const message = document.querySelector('[data-v3-message]');\n      const busy = button?.getAttribute('data-v3-busy') || 'idle';\n      return busy !== 'idle' || String(message?.textContent || '').includes(expected);\n    },\n    expectedMessage,\n    { timeout: Math.min(assertionTimeout, 10_000) },\n  );\n  const deadline = Date.now() + Math.min(timeout, 300_000);\n"""
+          count = script.count(old)
+          if count != 1:
+              raise SystemExit(f'E2E foreground-state assertion: expected exactly one match, found {count}')
+          e2e.write_text(script.replace(old, new, 1))
+          PY
+
+      - name: Confirm intended patch scope
+        run: |
+          set -euo pipefail
+          git diff --check
+          git diff --name-only | sort
+          test "$(git diff --name-only | sort | tr '\n' ' ')" = "app/v3/page.jsx scripts/watcher-v3-browser-e2e.mjs "
+          grep -F -q 'if (inFlightRef.current) return;' app/v3/page.jsx
+          grep -F -q "data-v3-busy={busy || 'idle'}" app/v3/page.jsx
+          grep -F -q "busy !== 'idle'" scripts/watcher-v3-browser-e2e.mjs
+
+      - name: Commit foreground fix
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add app/v3/page.jsx scripts/watcher-v3-browser-e2e.mjs
+          git commit -m 'Fix V3 silent foreground prover wait'
+          git push origin HEAD:watcher-protocol-v3-foreground-fix
