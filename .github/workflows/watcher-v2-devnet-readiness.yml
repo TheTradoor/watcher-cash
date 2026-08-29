@@ -1,0 +1,114 @@
+name: Watcher V2 Devnet Readiness
+
+on:
+  push:
+    branches: [watcher-protocol-v2]
+    paths:
+      - '.github/workflows/watcher-v2-devnet-readiness.yml'
+      - '.github/v2-devnet-readiness-request'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: watcher-v2-devnet-readiness
+  cancel-in-progress: true
+
+jobs:
+  readiness:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: watcher-protocol-v2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.x'
+          cache: npm
+
+      - name: Install locked dependencies
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Require pinned prover release metadata
+        run: |
+          set -euo pipefail
+          PIN=public/watcher-protocol/v2-prover-pin.json
+          test -s "$PIN"
+          jq -e '.version == 2 and .status == "pinned-development-setup"' "$PIN" >/dev/null
+          URL=$(jq -r '.bundleUrl' "$PIN")
+          EXPECTED=$(jq -r '.bundleSha256' "$PIN")
+          TAG=$(jq -r '.releaseTag' "$PIN")
+          test "${TAG##*-}" = "${EXPECTED:0:16}"
+          curl --fail --location --retry 3 --range 0-1023 "$URL" -o /tmp/watcher-v2-release-prefix >/dev/null 2>&1
+          test -s /tmp/watcher-v2-release-prefix
+          echo "Pinned release reachable: $TAG"
+
+      - name: Check persistent key identities and public devnet balance
+        env:
+          PAYER_KEYPAIR_B64: ${{ secrets.WATCHER_DEVNET_DEPLOYER_KEYPAIR_B64 }}
+          PROGRAM_KEYPAIR_B64: ${{ secrets.WATCHER_V2_DEVNET_PROGRAM_KEYPAIR_B64 }}
+        run: |
+          set -euo pipefail
+          if [ -z "$PAYER_KEYPAIR_B64" ]; then
+            echo 'READINESS_BLOCKER=missing WATCHER_DEVNET_DEPLOYER_KEYPAIR_B64' >&2
+            exit 1
+          fi
+          if [ -z "$PROGRAM_KEYPAIR_B64" ]; then
+            echo 'READINESS_BLOCKER=missing WATCHER_V2_DEVNET_PROGRAM_KEYPAIR_B64' >&2
+            exit 1
+          fi
+          printf '%s' "$PAYER_KEYPAIR_B64" | base64 --decode > /tmp/watcher-v2-readiness-payer.json
+          printf '%s' "$PROGRAM_KEYPAIR_B64" | base64 --decode > /tmp/watcher-v2-readiness-program.json
+          chmod 600 /tmp/watcher-v2-readiness-payer.json /tmp/watcher-v2-readiness-program.json
+          node --input-type=module - <<'NODE'
+          import fs from 'node:fs';
+          import { Connection, Keypair, PublicKey } from '@solana/web3.js';
+
+          function load(path) {
+            const value = JSON.parse(fs.readFileSync(path, 'utf8'));
+            if (!Array.isArray(value) || value.length !== 64) throw new Error(`${path} is not a 64-byte Solana keypair`);
+            return Keypair.fromSecretKey(Uint8Array.from(value));
+          }
+
+          const payer = load('/tmp/watcher-v2-readiness-payer.json');
+          const program = load('/tmp/watcher-v2-readiness-program.json');
+          let v1Program = '';
+          try {
+            const v1 = JSON.parse(fs.readFileSync('public/watcher-protocol/devnet.json', 'utf8'));
+            v1Program = String(v1.programId || '');
+          } catch {}
+          if (v1Program && program.publicKey.equals(new PublicKey(v1Program))) {
+            throw new Error('V2 program key resolves to the live V1 program id; refusing shared program identity');
+          }
+
+          const connection = new Connection('https://api.devnet.solana.com', 'confirmed');
+          const [balance, genesisHash, programInfo] = await Promise.all([
+            connection.getBalance(payer.publicKey, 'confirmed'),
+            connection.getGenesisHash(),
+            connection.getAccountInfo(program.publicKey, 'confirmed'),
+          ]);
+          if (balance < 5_000_000_000) {
+            throw new Error(`V2 deployer has only ${(balance / 1e9).toFixed(4)} SOL on devnet; at least 5 SOL is required`);
+          }
+          if (programInfo && !programInfo.executable) {
+            throw new Error('Configured V2 program address exists on devnet but is not executable');
+          }
+          console.log(JSON.stringify({
+            status: 'ready',
+            payer: payer.publicKey.toBase58(),
+            payerBalanceLamports: balance,
+            payerBalanceSol: balance / 1e9,
+            programId: program.publicKey.toBase58(),
+            differsFromV1: !v1Program || program.publicKey.toBase58() !== v1Program,
+            devnetGenesisHash: genesisHash,
+            programAlreadyDeployed: Boolean(programInfo?.executable),
+          }, null, 2));
+          NODE
+
+      - name: Remove readiness key material
+        if: always()
+        run: rm -f /tmp/watcher-v2-readiness-payer.json /tmp/watcher-v2-readiness-program.json
