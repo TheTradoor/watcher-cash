@@ -131,14 +131,32 @@ async function main() {
     await waitForCount(page.locator('[data-note-status="spent"]'), 4, 'all V2 private notes spent');
     await waitForCount(page.locator('[data-note-status="confirmed"]'), 0, 'no remaining confirmed V2 notes');
 
-    console.log('V2 encrypted note metadata survives reload');
+    console.log('V2 public tree reconstructs from chain after local cache loss');
+    const removedPublicTreeKeys = await page.evaluate(() => {
+      const removed = [];
+      for (let index = localStorage.length - 1; index >= 0; index -= 1) {
+        const key = localStorage.key(index);
+        if (key?.startsWith('watcher-public-tree:v2:')) {
+          removed.push(key);
+          localStorage.removeItem(key);
+        }
+      }
+      return removed;
+    });
+    if (removedPublicTreeKeys.length !== 1) {
+      fail(`expected exactly one V2 public-tree cache key, removed ${removedPublicTreeKeys.length}`);
+    }
     await page.reload({ waitUntil: 'domcontentloaded', timeout });
-    await waitForText(page.getByText('RUNTIME VERIFIED', { exact: true }), 'RUNTIME VERIFIED', 'runtime after reload');
+    await waitForText(page.getByText('RUNTIME VERIFIED', { exact: true }), 'RUNTIME VERIFIED', 'runtime after public-tree cache loss');
+    await waitForText(page.locator('[data-v2-tree-index]'), '4 / 65536', 'rebuilt V2 public tree index');
+    await waitForText(page.locator('[data-tree-status="ready"]'), 'local commitment history matches on-chain root', 'rebuilt V2 public tree root');
+
+    console.log('V2 encrypted note metadata survives reload independently of public-tree cache');
     await waitForText(page.locator('[data-v2-primary]'), 'Unlock V2 private notes', 'remembered V2 wallet');
     await page.locator('[data-v2-primary]').click();
     await waitForText(page.locator('[data-v2-message]'), 'Unlocked 4 encrypted V2 note records.', 'V2 encrypted vault reload');
     await waitForText(page.locator('[data-v2-private-balance]'), '0 SOL', 'reloaded private balance');
-    await waitForText(page.locator('[data-v2-tree-index]'), '4 / 65536', 'reloaded V2 public tree cache');
+    await waitForText(page.locator('[data-v2-tree-index]'), '4 / 65536', 'reloaded V2 public tree');
     await waitForCount(page.locator('[data-note-status="spent"]'), 4, 'reloaded spent metadata');
 
     const activeTree = new PublicKey(runtime.activeTree);
@@ -166,6 +184,7 @@ async function main() {
         'one-input-exact-withdraw',
         'private-change-withdraw',
         'two-input-exact-withdraw',
+        'rebuild-public-tree-from-chain',
         'reload-encrypted-metadata',
       ],
       treeDepth: runtime.treeDepth,
@@ -173,6 +192,7 @@ async function main() {
       trackedBalance: trackedBalance.toString(),
       nullifierMarkers: markerAccounts.length,
       browserProver: 'V2 WASM Groth16',
+      publicTreeRecovery: true,
     }, null, 2));
   } catch (error) {
     await page.screenshot({ path: '/tmp/watcher-v2-browser-e2e-failure.png', fullPage: true }).catch(() => {});
