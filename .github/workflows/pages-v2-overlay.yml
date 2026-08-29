@@ -10,6 +10,7 @@ on:
       - 'public/watcher-protocol/v2-prover-pin.json'
       - 'scripts/install-pinned-v2-prover.mjs'
       - 'scripts/watcher-v2-runtime-verify.mjs'
+      - 'scripts/watcher-v2-live-pages-smoke.mjs'
       - 'package.json'
       - 'package-lock.json'
       - 'next.config.mjs'
@@ -189,3 +190,21 @@ jobs:
       - name: Deploy V1-preserving V2 overlay
         id: deployment
         uses: actions/deploy-pages@v4
+
+  live-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: deploy
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: watcher-protocol-v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.x'
+      - name: Verify deployed V1 root and V2 overlay over HTTPS
+        env:
+          WATCHER_PAGES_URL: https://thetradoor.github.io/watcher-cash/
+          WATCHER_LIVE_SMOKE_ATTEMPTS: '30'
+          WATCHER_LIVE_SMOKE_DELAY_MS: '5000'
+        run: node scripts/watcher-v2-live-pages-smoke.mjs
