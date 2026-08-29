@@ -130,7 +130,9 @@ export function selectInputsV2(records, {
   if (target > ((1n << 64n) - 1n)) throw new RangeError('withdrawal outputs exceed u64');
 
   const candidates = confirmedNoteRecordsV1(records).slice().sort(compareCandidates);
-  if (candidates.length === 0) throw new Error('No confirmed private notes are available');
+  if (candidates.length === 0) {
+    throw new Error('No spendable private notes. Deposit or restore a note before withdrawing.');
+  }
 
   const bestByCount = [];
   for (let count = 1; count <= MAX_INPUTS_V2; count += 1) {
