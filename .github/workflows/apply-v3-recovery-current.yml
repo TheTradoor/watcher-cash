@@ -1,0 +1,72 @@
+name: Apply V3 Recovery to Current Head
+
+on:
+  push:
+    branches: [watcher-protocol-v3-recovery-current]
+    paths:
+      - '.github/workflows/apply-v3-recovery-current.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  port:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: watcher-protocol-v3-recovery-current
+          fetch-depth: 0
+
+      - name: Port accepted recovery/change implementation without reverting latest prover
+        run: |
+          set -euo pipefail
+          git fetch origin watcher-protocol-v3-recovery-change
+          for path in \
+            app/v3/VaultBackupControls.jsx \
+            client/watcher/backup-v3.mjs \
+            client/watcher/backup-v3.test.mjs \
+            scripts/watcher-v3-recovery-change-e2e.mjs; do
+            mkdir -p "$(dirname "$path")"
+            git show origin/watcher-protocol-v3-recovery-change:"$path" > "$path"
+          done
+
+          # The lazy/circuit-scoped prover commit did not modify app/v3/page.jsx,
+          # so use the already-accepted recovery-wired page from the feature branch.
+          git show origin/watcher-protocol-v3-recovery-change:app/v3/page.jsx > app/v3/page.jsx
+
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('client/watcher/index.mjs')
+          text = path.read_text()
+          line = "export * from './backup-v3.mjs';\n"
+          if line not in text:
+              if not text.endswith('\n'):
+                  text += '\n'
+              text += line
+          path.write_text(text)
+          PY
+
+      - name: Prove latest circuit-scoped prover files remain present
+        run: |
+          set -euo pipefail
+          git diff --check
+          test -s client/watcher/browser-prover-v3.mjs
+          test -s client/watcher/browser-prover-v3-lazy.worker.js
+          test -s circuits/withdraw/prover_circuit_v2.go
+          test -s circuits/withdraw/cmd/watcher-v3-prover-wasm/main.go
+          grep -F -q "export * from './browser-prover-v3.mjs';" client/watcher/index.mjs
+          grep -F -q "export * from './backup-v3.mjs';" client/watcher/index.mjs
+          grep -F -q "import VaultBackupControls from './VaultBackupControls';" app/v3/page.jsx
+          grep -F -q 'onRestored={restoreBackupRecords}' app/v3/page.jsx
+
+      - name: Commit ported recovery feature
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add app/v3/page.jsx app/v3/VaultBackupControls.jsx \
+            client/watcher/backup-v3.mjs client/watcher/backup-v3.test.mjs \
+            client/watcher/index.mjs scripts/watcher-v3-recovery-change-e2e.mjs
+          git commit -m 'Add encrypted V3 recovery and private-change acceptance'
+          git push origin HEAD:watcher-protocol-v3-recovery-current
