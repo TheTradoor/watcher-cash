@@ -4,8 +4,8 @@ use crate::WatcherError;
 
 pub const NULLIFIER_SHARD_SEED_V3: &[u8] = b"watcher-nullifier-shard-v3";
 pub const NULLIFIER_BUCKET_DOMAIN_V3: &[u8] = b"watcher-nullifier-bucket-v3";
-pub const NULLIFIER_SHARD_COUNT_V3: usize = 16;
-pub const NULLIFIER_BUCKETS_PER_SHARD_V3: usize = 4096;
+pub const NULLIFIER_SHARD_COUNT_V3: usize = 32;
+pub const NULLIFIER_BUCKETS_PER_SHARD_V3: usize = 2048;
 pub const NULLIFIER_HEAD_NONE_V3: u32 = u32::MAX;
 pub const NULLIFIER_RECORD_BYTES_V3: usize = 36;
 pub const MAX_NULLIFIERS_PER_SHARD_V3: u32 = 250_000;
@@ -57,8 +57,11 @@ pub fn route_nullifier_v3(
     let digest = hashv(&[NULLIFIER_BUCKET_DOMAIN_V3, config.as_ref(), nullifier]).to_bytes();
     let key = u16::from_be_bytes([digest[0], digest[1]]);
     Ok(NullifierRouteV3 {
-        shard: (key >> 12) as u8,
-        bucket: key & 0x0fff,
+        // 5 high bits choose one of 32 shards; 11 low bits choose one of
+        // 2,048 buckets. Total bucket cardinality stays 65,536 while every
+        // shard header remains below Solana's 10,240-byte CPI growth limit.
+        shard: (key >> 11) as u8,
+        bucket: key & 0x07ff,
     })
 }
 
@@ -240,6 +243,8 @@ mod tests {
         assert_ne!(first, route_nullifier_v3(&config_b, &value).unwrap());
         assert!((first.shard as usize) < NULLIFIER_SHARD_COUNT_V3);
         assert!((first.bucket as usize) < NULLIFIER_BUCKETS_PER_SHARD_V3);
+        assert_eq!(NULLIFIER_SHARD_COUNT_V3 * NULLIFIER_BUCKETS_PER_SHARD_V3, 65_536);
+        assert!(NULLIFIER_SHARD_HEADER_BYTES_V3 <= 10_240);
     }
 
     #[test]
@@ -280,6 +285,7 @@ mod tests {
             4 * NULLIFIER_RECORD_BYTES_V3,
         );
         assert_eq!(NULLIFIER_RECORD_BYTES_V3, 36);
+        assert_eq!(NULLIFIER_SHARD_HEADER_BYTES_V3, 8_240);
     }
 
     #[test]
