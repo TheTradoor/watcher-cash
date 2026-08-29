@@ -3,13 +3,72 @@
 import { useEffect } from 'react';
 import { useConnection, useWallet } from '@solana/wallet-adapter-react';
 import { normalizeWatcherFailure } from '../../client/watcher/failure-errors.mjs';
+import { reconcileSignatureStatusV2 } from '../../client/watcher/v2-confirmation.mjs';
 import { watcherE2EEnabled } from '../e2e-wallet';
 
 const WATCHER_V2_DIRECT_SEND_PATCH = '__watcherV2DirectDevnetSendV1';
+const WATCHER_V2_CONFIRM_PATCH = '__watcherV2ReconciledConfirmV1';
 
 export default function V2WalletTransport({ children }) {
   const { connection } = useConnection();
   const { wallet, connected } = useWallet();
+
+  useEffect(() => {
+    if (!connection || connection[WATCHER_V2_CONFIRM_PATCH]) return undefined;
+    if (typeof connection.confirmTransaction !== 'function') return undefined;
+
+    const originalConfirmTransaction = connection.confirmTransaction.bind(connection);
+
+    const patchedConfirmTransaction = async (...args) => {
+      try {
+        return await originalConfirmTransaction(...args);
+      } catch (error) {
+        const strategy = args[0];
+        const signature = typeof strategy === 'string' ? strategy : strategy?.signature;
+
+        if (signature) {
+          const reconciled = await reconcileSignatureStatusV2({
+            connection,
+            signature,
+          });
+          if (reconciled) return reconciled;
+        }
+
+        throw normalizeWatcherFailure(error);
+      }
+    };
+
+    try {
+      Object.defineProperty(connection, WATCHER_V2_CONFIRM_PATCH, {
+        value: true,
+        configurable: true,
+        enumerable: false,
+        writable: false,
+      });
+      Object.defineProperty(connection, 'confirmTransaction', {
+        configurable: true,
+        writable: true,
+        value: patchedConfirmTransaction,
+      });
+    } catch {
+      return undefined;
+    }
+
+    return () => {
+      try {
+        if (connection.confirmTransaction === patchedConfirmTransaction) {
+          Object.defineProperty(connection, 'confirmTransaction', {
+            configurable: true,
+            writable: true,
+            value: originalConfirmTransaction,
+          });
+        }
+        delete connection[WATCHER_V2_CONFIRM_PATCH];
+      } catch {
+        // Route cleanup is best-effort; a page reload recreates the connection.
+      }
+    };
+  }, [connection]);
 
   useEffect(() => {
     const adapter = wallet?.adapter;
